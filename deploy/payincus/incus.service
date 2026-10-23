@@ -1,0 +1,21 @@
+[Unit]
+Description=Incus with PayIncus node extensions
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=INCUS_PAYINCUS=1
+Environment=PATH=/usr/libexec/incus:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/usr/libexec/incus/incusd --group incus-admin
+ExecStop=/usr/libexec/incus/incusd shutdown --timeout 600
+KillMode=process
+TimeoutStopSec=610
+Delegate=yes
+TasksMax=infinity
+LimitNOFILE=1048576
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,109 @@
+name: PayIncus Integration
+
+on:
+  push:
+    branches: [main, canary]
+    tags: ['payincus-v*']
+  pull_request:
+    branches: [main, canary]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: payincus-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  integration:
+    if: github.repository != 'lxc/incus'
+    name: Integration (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            python3 build-essential pkg-config libcowsql-dev liblxc-dev libsqlite3-dev \
+            libcap-dev libudev-dev libacl1-dev libseccomp-dev libselinux1-dev \
+            iproute2 rsync attr squashfs-tools xz-utils dpkg-dev shellcheck
+      - name: Verify released LTS baseline
+        run: |
+          git cat-file -e v7.0.2^{commit}
+          test "$(git rev-parse v7.0.2^{commit})" = 01f81e5e607bbb5818410318e4b3496ad1820824
+          git merge-base --is-ancestor v7.0.2 HEAD
+      - name: Prepare pinned Xray
+        run: python3 scripts/payincus/prepare-xray.py "${{ matrix.arch }}"
+      - name: Extension and connector contracts (race detector)
+        run: go test -race ./internal/server/payincus/... ./cmd/payincus-agent ./cmd/payincus-network-worker
+      - name: Real daemon API integration and upstream daemon unit tests
+        run: |
+          sudo env "PATH=$PATH" "GOPATH=$(go env GOPATH)" "GOCACHE=$(go env GOCACHE)" \
+            go test -tags libsqlite3 ./cmd/incusd -count=1
+      - name: Upstream client and shared unit tests
+        run: CGO_ENABLED=0 go test ./cmd/incus/... ./shared/...
+      - name: Packaging script checks
+        run: |
+          bash -n scripts/payincus/build.sh scripts/payincus/package.sh
+          shellcheck scripts/payincus/build.sh scripts/payincus/package.sh
+      - name: Build integrated binaries
+        run: bash scripts/payincus/build.sh
+      - name: Assemble native integration packages
+        env:
+          RELEASE_REF: ${{ github.ref_name }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: bash scripts/payincus/package.sh
+      - name: Inspect package and checksums
+        run: |
+          cd scripts/payincus/dist/release
+          sha256sum --check SHA256SUMS
+          dpkg-deb --info ./*.deb
+          dpkg-deb --contents ./*.deb
+      - uses: actions/upload-artifact@v4
+        with:
+          name: payincus-linux-${{ matrix.arch }}
+          path: scripts/payincus/dist/release/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish integration prerelease
+    if: startsWith(github.ref, 'refs/tags/payincus-v')
+    needs: integration
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: payincus-linux-*
+          path: release
+          # Keep architecture-specific checksums and manifests separate.
+      - name: Publish verified artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          find release -type f -name SHA256SUMS -execdir sha256sum --check SHA256SUMS \;
+          for arch in amd64 arm64; do
+            mv "release/payincus-linux-$arch/SHA256SUMS" "release/payincus-linux-$arch/SHA256SUMS-$arch"
+          done
+          gh release create "$GITHUB_REF_NAME" --verify-tag --prerelease \
+            --title "PayIncus Incus ${GITHUB_REF_NAME#payincus-v} (integration)" \
+            --notes-file scripts/payincus/RELEASE-NOTES.md \
+            release/payincus-linux-*/*

@@ -12,6 +12,8 @@ permissions:
 
 jobs:
   version:
+    # PayIncus: upstream CI stays intact; the fork uses payincus.yml on hosted runners.
+    if: github.repository == 'lxc/incus'
     name: Format version
     runs-on: ubuntu-latest
     outputs:
@@ -31,6 +33,8 @@ jobs:
           fi
 
   build-msi:
+    # PayIncus: upstream CI stays intact; the fork uses payincus.yml on hosted runners.
+    if: github.repository == 'lxc/incus'
     name: Build Windows installer
     runs-on: windows-latest
     needs: version
@@ -71,6 +75,8 @@ jobs:
           if-no-files-found: error
 
   build-pkg:
+    # PayIncus: upstream CI stays intact; the fork uses payincus.yml on hosted runners.
+    if: github.repository == 'lxc/incus'
     name: Build macOS installer
     runs-on: macos-latest
     needs: version
@@ -98,6 +104,8 @@ jobs:
           if-no-files-found: error
 
   goreleaser:
+    # PayIncus: upstream CI stays intact; the fork uses payincus.yml on hosted runners.
+    if: github.repository == 'lxc/incus'
     name: Release
     runs-on: ubuntu-latest
     needs: [version, build-msi, build-pkg]

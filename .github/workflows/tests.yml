@@ -15,6 +15,8 @@ concurrency:
 
 jobs:
   code-tests:
+    # PayIncus: upstream CI stays intact; the fork uses payincus.yml on hosted runners.
+    if: github.repository == 'lxc/incus'
     name: Code
     runs-on: ubuntu-24.04
     strategy:
@@ -128,6 +130,8 @@ jobs:
           sudo --preserve-env=CGO_CFLAGS,CGO_LDFLAGS,CGO_LDFLAGS_ALLOW,LD_LIBRARY_PATH LD_LIBRARY_PATH=${LD_LIBRARY_PATH} env "PATH=${PATH}" go test ./...
 
   system-tests:
+    # PayIncus: upstream CI stays intact; the fork uses payincus.yml on hosted runners.
+    if: github.repository == 'lxc/incus'
     name: System
     strategy:
       fail-fast: false
@@ -517,6 +521,8 @@ jobs:
           sudo --preserve-env=PATH,GOPATH,GITHUB_ACTIONS,INCUS_VERBOSE,INCUS_BACKEND,INCUS_CEPH_CLUSTER,INCUS_CEPH_CEPHFS,INCUS_CEPH_CEPHOBJECT_RADOSGW,INCUS_LINSTOR_LOCAL_SATELLITE,INCUS_LINSTOR_CLUSTER,INCUS_OFFLINE,INCUS_SKIP_TESTS,INCUS_REQUIRED_TESTS, INCUS_BACKEND=${{ matrix.backend }} env LD_LIBRARY_PATH=${LD_LIBRARY_PATH} JAVA_HOME= ./main.sh ${{ matrix.suite }}
 
   ovn-tests:
+    # PayIncus: upstream CI stays intact; the fork uses payincus.yml on hosted runners.
+    if: github.repository == 'lxc/incus'
     name: OVN
     runs-on: ubuntu-24.04
     strategy:
@@ -683,6 +689,8 @@ jobs:
           sudo --preserve-env=PATH,GOPATH,GITHUB_ACTIONS,INCUS_VERBOSE,INCUS_TMPFS,INCUS_REQUIRED_TESTS env LD_LIBRARY_PATH=${LD_LIBRARY_PATH} ./main.sh network_ovn_${{ matrix.test }}
 
   extended-tests:
+    # PayIncus: upstream CI stays intact; the fork uses payincus.yml on hosted runners.
+    if: github.repository == 'lxc/incus'
     name: Extended
     strategy:
       fail-fast: false
@@ -860,6 +868,8 @@ jobs:
           sudo --preserve-env=PATH,GOPATH,GITHUB_ACTIONS,INCUS_VERBOSE,INCUS_REQUIRED_TESTS env LD_LIBRARY_PATH=${LD_LIBRARY_PATH} ./main.sh ${{ matrix.test }}
 
   vm-tests:
+    # PayIncus: upstream CI stays intact; the fork uses payincus.yml on hosted runners.
+    if: github.repository == 'lxc/incus'
     name: VM
     strategy:
       fail-fast: false
@@ -1107,6 +1117,8 @@ jobs:
           sudo --preserve-env=PATH,GOPATH,GITHUB_ACTIONS,INCUS_VERBOSE,INCUS_CEPH_CLUSTER,INCUS_CLI_TIMEOUT,INCUS_LINSTOR_CLUSTER,INCUS_LINSTOR_LOCAL_SATELLITE,INCUS_REQUIRED_TESTS,INCUS_VM_STORAGE_DRIVERS env LD_LIBRARY_PATH=${LD_LIBRARY_PATH} ./main.sh ${{ matrix.test }}
 
   clustering-vm-tests:
+    # PayIncus: upstream CI stays intact; the fork uses payincus.yml on hosted runners.
+    if: github.repository == 'lxc/incus'
     name: Clustering VM
     # Runs on ephemeral Debian VMs with nested virtualization (amd64 only).
     runs-on:
@@ -1186,6 +1198,8 @@ jobs:
           sudo --preserve-env=PATH,GOPATH env INCUS_BIN_DIR="$(go env GOPATH)/bin" ./test/clustering-vm.sh
 
   client:
+    # PayIncus: upstream CI stays intact; the fork uses payincus.yml on hosted runners.
+    if: github.repository == 'lxc/incus'
     name: Client
     strategy:
       fail-fast: false
@@ -1280,6 +1294,8 @@ jobs:
           path: bin/
 
   documentation:
+    # PayIncus: upstream CI stays intact; the fork uses payincus.yml on hosted runners.
+    if: github.repository == 'lxc/incus'
     name: Documentation
     runs-on: ubuntu-24.04
     steps:

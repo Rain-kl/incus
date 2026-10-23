@@ -1,0 +1,14 @@
+[Unit]
+Description=PayIncus authenticated reverse connector
+Wants=network-online.target incus.service
+After=network-online.target incus.service
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/incus/payincus-agent -config /etc/incudal-agent/config.yaml
+Restart=always
+RestartSec=5
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

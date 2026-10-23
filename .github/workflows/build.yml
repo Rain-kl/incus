@@ -14,6 +14,8 @@ concurrency:
 
 jobs:
   build:
+    # PayIncus: upstream CI stays intact; the fork uses payincus.yml on hosted runners.
+    if: github.repository == 'lxc/incus'
     name: Build (${{ matrix.architecture }})
     strategy:
       fail-fast: false

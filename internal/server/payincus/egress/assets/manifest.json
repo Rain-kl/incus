@@ -1,0 +1,15 @@
+{
+  "version": "v26.3.27",
+  "files": {
+    "amd64": {
+      "asset": "Xray-linux-64.zip",
+      "archiveSha256": "23cd9af937744d97776ee35ecad4972cf4b2109d1e0fe6be9930467608f7c8ae",
+      "binarySha256": "8255dd939c34cf966cc91517b6324dd3c8d0bcf49ffac8beca049a38c46845ed"
+    },
+    "arm64": {
+      "asset": "Xray-linux-arm64-v8a.zip",
+      "archiveSha256": "4d30283ae614e3057f730f67cd088a42be6fdf91f8639d82cb69e48cde80413c",
+      "binarySha256": "c2d20a7045250497083afea0d79db0672f6c89a25aaaf37c92de034d6b764b04"
+    }
+  }
+}
