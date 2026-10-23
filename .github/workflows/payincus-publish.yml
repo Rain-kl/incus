@@ -1,0 +1,75 @@
+name: Publish PayIncus Integration
+
+on:
+  workflow_run:
+    workflows: [PayIncus Integration]
+    types: [completed]
+    branches: [canary]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: integration-release-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'canary' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: payincus-linux-*
+          path: release
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+      - name: Verify both architectures and source provenance
+        env:
+          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          for arch in amd64 arm64; do
+            (cd "release/payincus-linux-$arch" && sha256sum --check SHA256SUMS)
+          done
+          python3 <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          for arch in ("amd64", "arm64"):
+              folder = Path("release") / f"payincus-linux-{arch}"
+              manifests = list(folder.glob("*.manifest.json"))
+              assert len(manifests) == 1, "expected one source manifest"
+              data = json.loads(manifests[0].read_text())
+              assert data["sourceCommit"] == os.environ["EXPECTED_SHA"]
+              assert data["architecture"] == arch
+              assert data["upstreamCommit"] == "01f81e5e607bbb5818410318e4b3496ad1820824"
+              assert data["channel"] == "integration"
+          PY
+      - name: Publish immutable integration prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+          CI_URL: ${{ github.event.workflow_run.html_url }}
+        run: |
+          set -euo pipefail
+          tag="integration-7.0.2-${SOURCE_SHA:0:12}"
+          for arch in amd64 arm64; do
+            mv "release/payincus-linux-$arch/SHA256SUMS" "release/payincus-linux-$arch/SHA256SUMS-$arch"
+          done
+          cp scripts/payincus/RELEASE-NOTES.md release-notes.md
+          printf '\nSource: %s\nValidated CI: %s\n' "$SOURCE_SHA" "$CI_URL" >> release-notes.md
+          gh release create "$tag" --target "$SOURCE_SHA" --prerelease \
+            --title "PayIncus 7.0.2 integration ${SOURCE_SHA:0:12}" \
+            --notes-file release-notes.md release/payincus-linux-*/*

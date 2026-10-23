@@ -125,3 +125,7 @@
 CI 接线修正：fork 初始没有官方 release tag，校验步骤从官方仓库显式获取 v7.0.2 tag 并核对固定 SHA，不以 fork 自有 tag 代替上游发布依据。新增干净 Ubuntu 24.04 容器安装 deb、解析原生依赖、检查 CLI/daemon/连接器入口及权限组的验收步骤，安装成功后才上传产物。
 
 发布归档将 rootfs 的 UID/GID 固定为 0，避免把构建 runner 的文件所有者带到节点；deb 使用 dpkg-deb 的 root-owner-group。
+
+### canary 自动集成发布
+
+新增 `.github/workflows/payincus-publish.yml`，在同仓库 canary 的 push 集成工作流成功后，下载该 run 的双架构产物，逐项核对 SHA256、架构、源提交及固定 LTS 基线，再发布唯一的 `integration-7.0.2-<提交前12位>` prerelease。发布目标为已验证的准确提交，发布说明附 CI 链接。PR、其他仓库、其他分支或失败 run 不可触发发布；工作流只读取受信任 push 的说明文件，不执行下载产物中的脚本。版本化 RC tag 发布流程保留。此流程将持续集成与发布分离，不依赖本地手工创建 tag；不触及生产环境。
