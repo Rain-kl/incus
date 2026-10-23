@@ -96,5 +96,5 @@ PY
 # Include the manifest in both distribution formats.
 dpkg-deb --root-owner-group --build "$stage/rootfs" "$out/$filename.deb"
 cp "$stage/rootfs/usr/share/doc/payincus-incus/manifest.json" "$out/$filename.manifest.json"
-tar -czf "$out/$filename.tar.gz" -C "$stage/rootfs" .
+tar --owner=0 --group=0 --numeric-owner -czf "$out/$filename.tar.gz" -C "$stage/rootfs" .
 (cd "$out" && sha256sum "$filename.deb" "$filename.tar.gz" "$filename.manifest.json" > SHA256SUMS)
