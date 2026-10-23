@@ -54,8 +54,9 @@ jobs:
         run: go test -race ./internal/server/payincus/... ./cmd/payincus-agent ./cmd/payincus-network-worker
       - name: Real daemon API integration and upstream daemon unit tests
         run: |
-          sudo env "PATH=$PATH" "GOPATH=$(go env GOPATH)" "GOCACHE=$(go env GOCACHE)" \
-            go test -tags libsqlite3 ./cmd/incusd -count=1
+          # Compile as the runner; only executing daemon tests requires root.
+          go test -c -tags libsqlite3 -o "$RUNNER_TEMP/payincus-incusd.test" ./cmd/incusd
+          sudo "$RUNNER_TEMP/payincus-incusd.test" -test.v -test.count=1
       - name: Upstream client and shared unit tests
         run: CGO_ENABLED=0 go test ./cmd/incus/... ./shared/...
       - name: Packaging script checks

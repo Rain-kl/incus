@@ -129,3 +129,5 @@ CI 接线修正：fork 初始没有官方 release tag，校验步骤从官方仓
 ### canary 自动集成发布
 
 新增 `.github/workflows/payincus-publish.yml`，在同仓库 canary 的 push 集成工作流成功后，下载该 run 的双架构产物，逐项核对 SHA256、架构、源提交及固定 LTS 基线，再发布唯一的 `integration-7.0.2-<提交前12位>` prerelease。发布目标为已验证的准确提交，发布说明附 CI 链接。PR、其他仓库、其他分支或失败 run 不可触发发布；工作流只读取受信任 push 的说明文件，不执行下载产物中的脚本。版本化 RC tag 发布流程保留。此流程将持续集成与发布分离，不依赖本地手工创建 tag；不触及生产环境。
+
+CI 权限隔离：daemon 测试先由普通 runner 编译测试程序，再以 root 执行该程序；Go 下载与编译不使用 root，避免后续 CLI/shared 测试遇到 root 创建的 0600 模块缓存锁。不跳过失败用例，不修改上游 API 行为。
