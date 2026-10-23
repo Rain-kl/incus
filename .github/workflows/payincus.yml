@@ -44,6 +44,7 @@ jobs:
             iproute2 rsync attr squashfs-tools xz-utils dpkg-dev shellcheck
       - name: Verify released LTS baseline
         run: |
+          git fetch --no-tags https://github.com/lxc/incus.git refs/tags/v7.0.2:refs/tags/v7.0.2
           git cat-file -e v7.0.2^{commit}
           test "$(git rev-parse v7.0.2^{commit})" = 01f81e5e607bbb5818410318e4b3496ad1820824
           git merge-base --is-ancestor v7.0.2 HEAD
@@ -74,6 +75,18 @@ jobs:
           sha256sum --check SHA256SUMS
           dpkg-deb --info ./*.deb
           dpkg-deb --contents ./*.deb
+      - name: Install package in a clean target system
+        run: |
+          docker run --rm -v "$PWD/scripts/payincus/dist/release:/packages:ro" ubuntu:24.04 sh -ec '
+            apt-get update -qq
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq /packages/*.deb
+            incus --version
+            /usr/libexec/incus/incusd --version
+            /usr/libexec/incus/payincus-agent -h
+            getent group incus-admin
+            getent group incus
+            test -x /usr/libexec/incus/payincus-network-worker
+          '
       - uses: actions/upload-artifact@v4
         with:
           name: payincus-linux-${{ matrix.arch }}
