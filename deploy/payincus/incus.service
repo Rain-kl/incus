@@ -1,7 +1,8 @@
 [Unit]
 Description=Incus with PayIncus node extensions
-After=network-online.target
-Wants=network-online.target
+# PayIncus: local daemon must not wait for external DNS/network readiness.
+After=network.target
+Wants=network.target
 
 [Service]
 Type=simple

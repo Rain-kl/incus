@@ -14,6 +14,11 @@ CGO_ENABLED=1 "$go_bin" build -tags libsqlite3 -o "$dest/incus-user" ./cmd/incus
 CGO_ENABLED=0 "$go_bin" build -trimpath -o "$dest/incus-agent" ./cmd/incus-agent
 CGO_ENABLED=0 "$go_bin" build -trimpath -o "$dest/payincus-agent" ./cmd/payincus-agent
 CGO_ENABLED=0 "$go_bin" build -trimpath -o "$dest/payincus-network-worker" ./cmd/payincus-network-worker
+# PayIncus: isolate Bubble Tea dependencies in a separate module.
+(cd tools/incus-tui && CGO_ENABLED=0 "$go_bin" build -trimpath -ldflags "-X main.version=$(git rev-parse --short=12 HEAD)" -o "$dest/incus-tui" .)
+(cd tools/incus-tui && "$go_bin" list -m -f '{{if .Dir}}{{.Path}} {{.Version}} {{.Dir}}{{end}}' all) > "$dest/tui-modules.txt"
+python3 scripts/payincus/tui-licenses.py "$dest/tui-modules.txt" "$dest/NOTICE.tui"
+rm "$dest/tui-modules.txt"
 cp internal/server/payincus/LICENSE.payincus "$dest/LICENSE.payincus"
 cp internal/server/payincus/NOTICE "$dest/NOTICE.payincus"
 cp internal/server/payincus/egress/assets/LICENSE "$dest/LICENSE.xray"

@@ -35,25 +35,29 @@ jobs:
           path: release
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ github.token }}
-      - name: Verify both architectures and source provenance
+      - name: Verify distribution, architecture and source provenance
         env:
           EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
-          for arch in amd64 arm64; do
-            (cd "release/payincus-linux-$arch" && sha256sum --check SHA256SUMS)
+          for target in ubuntu-24.04 debian-13; do
+            for arch in amd64 arm64; do
+              (cd "release/payincus-linux-$target-$arch" && sha256sum --check SHA256SUMS)
+            done
           done
           python3 <<'PY'
           import json
           import os
           from pathlib import Path
-          for arch in ("amd64", "arm64"):
-              folder = Path("release") / f"payincus-linux-{arch}"
+          import itertools
+          for target, arch in itertools.product(("ubuntu-24.04", "debian-13"), ("amd64", "arm64")):
+              folder = Path("release") / f"payincus-linux-{target}-{arch}"
               manifests = list(folder.glob("*.manifest.json"))
               assert len(manifests) == 1, "expected one source manifest"
               data = json.loads(manifests[0].read_text())
               assert data["sourceCommit"] == os.environ["EXPECTED_SHA"]
               assert data["architecture"] == arch
+              assert data["targetDistribution"] == target
               assert data["upstreamCommit"] == "01f81e5e607bbb5818410318e4b3496ad1820824"
               assert data["channel"] == "integration"
           PY
@@ -65,8 +69,10 @@ jobs:
         run: |
           set -euo pipefail
           tag="integration-7.0.2-${SOURCE_SHA:0:12}"
-          for arch in amd64 arm64; do
-            mv "release/payincus-linux-$arch/SHA256SUMS" "release/payincus-linux-$arch/SHA256SUMS-$arch"
+          for target in ubuntu-24.04 debian-13; do
+            for arch in amd64 arm64; do
+              mv "release/payincus-linux-$target-$arch/SHA256SUMS" "release/payincus-linux-$target-$arch/SHA256SUMS-$target-$arch"
+            done
           done
           cp scripts/payincus/RELEASE-NOTES.md release-notes.md
           printf '\nSource: %s\nValidated CI: %s\n' "$SOURCE_SHA" "$CI_URL" >> release-notes.md

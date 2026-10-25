@@ -6,16 +6,23 @@ arch="${GOARCH:-$(dpkg --print-architecture)}"
 case "$arch" in amd64|arm64) ;; *) echo 'Unsupported package architecture' >&2; exit 1 ;; esac
 ref="${RELEASE_REF:-integration}"
 source_sha="${SOURCE_SHA:-$(git rev-parse HEAD)}"
+# Platform-specific packages must be built on their declared target distribution.
+# shellcheck source=/dev/null
+. /etc/os-release
+target="${ID}-${VERSION_ID}"
+case "$target" in ubuntu-24.04|debian-13) ;; *) echo "Unsupported build distribution: $target" >&2; exit 1 ;; esac
+channel=integration
 if [[ "$ref" == payincus-v* ]]; then
   version="${ref#payincus-v}"
-  [[ "$version" =~ ^7\.0\.2-rc\.[0-9]+$ ]] || { echo 'Expected a versioned 7.0.2 integration RC tag' >&2; exit 1; }
+  [[ "$version" =~ ^7\.0\.2(-rc\.[0-9]+)?$ ]] || { echo 'Expected a 7.0.2 stable or RC tag' >&2; exit 1; }
+  if [[ "$version" == 7.0.2 ]]; then channel=stable; fi
   deb_version="${version/-rc./~rc.}"
 else
   version="7.0.2-integration.${source_sha:0:12}"
   deb_version="7.0.2~integration.${source_sha:0:12}"
 fi
 binaries="${BUILD_DIR:-$root/scripts/payincus/dist/$arch}"
-out="$root/scripts/payincus/dist/release"
+out="${RELEASE_DIR:-$root/scripts/payincus/dist/release}"
 stage="$(mktemp -d)"
 trap 'rm -rf "$stage"' EXIT
 mkdir -p "$out" "$stage/rootfs/usr/libexec/incus" "$stage/rootfs/usr/bin" \
@@ -25,14 +32,16 @@ for binary in incusd incus-user incus-agent payincus-agent payincus-network-work
   install -m 0755 "$binaries/$binary" "$stage/rootfs/usr/libexec/incus/$binary"
 done
 install -m 0755 "$binaries/incus" "$stage/rootfs/usr/bin/incus"
+install -m 0755 "$binaries/incus-tui" "$stage/rootfs/usr/bin/incus-tui"
 for unit in incus.service incus-user.service incudal-agent.service; do
   install -m 0644 "deploy/payincus/$unit" "$stage/rootfs/usr/lib/systemd/system/$unit"
 done
-for notice in LICENSE.payincus NOTICE.payincus LICENSE.xray NOTICE.xray; do
+for notice in LICENSE.payincus NOTICE.payincus LICENSE.xray NOTICE.xray NOTICE.tui; do
   install -m 0644 "$binaries/$notice" "$stage/rootfs/usr/share/doc/payincus-incus/$notice"
 done
 install -m 0644 COPYING "$stage/rootfs/usr/share/doc/payincus-incus/COPYING"
 install -m 0644 FEATURES.md "$stage/rootfs/usr/share/doc/payincus-incus/FEATURES.md"
+install -m 0644 scripts/payincus/INSTALL.md "$stage/rootfs/usr/share/doc/payincus-incus/INSTALL.md"
 install -m 0644 deploy/payincus/config.example.yaml "$stage/rootfs/etc/incudal-agent/config.example.yaml"
 # This package provides its own daemon/user units and intentionally omits optional socket activation.
 cat > "$stage/debian/control" <<'CONTROL'
@@ -63,7 +72,7 @@ Provides: incus, incus-base, incus-client
 Conflicts: incus, incus-base, incus-client
 Replaces: incus, incus-base, incus-client
 Description: Incus 7.0 LTS with PayIncus node API and reverse connector
- Integration prerelease. Optional QEMU and UEFI packages are required for virtual machines.
+ Optional QEMU and UEFI packages are required for virtual machines.
 CONTROL
 cat > "$stage/rootfs/DEBIAN/postinst" <<'POSTINST'
 #!/bin/sh
@@ -76,9 +85,9 @@ fi
 # Starting or restarting instances and replacing the old connector require a maintenance window.
 POSTINST
 chmod 0755 "$stage/rootfs/DEBIAN/postinst"
-filename="payincus-incus-${version}-linux-${arch}"
+filename="payincus-incus-${version}-linux-${target}-${arch}"
 # Archives contain the same file layout and scripts as the deb, plus an explicit manifest.
-export version source_sha arch
+export version source_sha arch channel target
 python3 - "$stage/rootfs/usr/share/doc/payincus-incus/manifest.json" <<'PY'
 import json
 import os
@@ -89,7 +98,7 @@ Path(sys.argv[1]).write_text(json.dumps({
     "version": os.environ["version"], "sourceCommit": os.environ["source_sha"],
     "architecture": os.environ["arch"], "upstreamTag": "v7.0.2",
     "upstreamCommit": "01f81e5e607bbb5818410318e4b3496ad1820824",
-    "buildDistribution": platform.freedesktop_os_release().get("PRETTY_NAME", "unknown"), "channel": "integration",
+    "buildDistribution": platform.freedesktop_os_release().get("PRETTY_NAME", "unknown"), "channel": os.environ["channel"], "targetDistribution": os.environ["target"],
     "apiExtensions": ["payincus_node_v1"],
 }, indent=2) + "\n")
 PY

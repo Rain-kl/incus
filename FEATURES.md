@@ -9,7 +9,7 @@
 | 正式发布 tag | `v7.0.2` |
 | 上游提交 | `01f81e5e607bbb5818410318e4b3496ad1820824` |
 | 官方发布时间 | 2026-10-16 |
-| 核对日期 | 2026-10-23 |
+| 核对日期 | 2026-10-25 |
 
 上游始终以正式 LTS 版本为准，仅同步 LTS 维护版本及经过兼容性验证的新 LTS 系列。普通功能版、开发分支及未发版提交均不纳入基线或同步目标。定制提交建立在记录的 LTS 基线上。
 
@@ -131,3 +131,45 @@ CI 接线修正：fork 初始没有官方 release tag，校验步骤从官方仓
 新增 `.github/workflows/payincus-publish.yml`，在同仓库 canary 的 push 集成工作流成功后，下载该 run 的双架构产物，逐项核对 SHA256、架构、源提交及固定 LTS 基线，再发布唯一的 `integration-7.0.2-<提交前12位>` prerelease。发布目标为已验证的准确提交，发布说明附 CI 链接。PR、其他仓库、其他分支或失败 run 不可触发发布；工作流只读取受信任 push 的说明文件，不执行下载产物中的脚本。版本化 RC tag 发布流程保留。此流程将持续集成与发布分离，不依赖本地手工创建 tag；不触及生产环境。
 
 CI 权限隔离：daemon 测试先由普通 runner 编译测试程序，再以 root 执行该程序；Go 下载与编译不使用 root，避免后续 CLI/shared 测试遇到 root 创建的 0600 模块缓存锁。不跳过失败用例，不修改上游 API 行为。
+
+## 一键安装与 incus-tui（2026-10-23）
+
+### 行为与边界
+
+- 新增独立 Bubble Tea v1.3.10 TUI，入口 `tools/incus-tui/`。使用单独 Go module 固定依赖，不改上游 `go.mod` / `go.sum` 或 daemon；定制安装包将命令安装为 `/usr/bin/incus-tui`，依赖许可收集在 `NOTICE.tui`，保留 README 中声明的 MIT 许可及作者。
+- `scripts/payincus/install.sh [latest|canary] [--no-tui]` 仅检测 OS/架构、查询 Rain-kl/incus GitHub release、下载匹配 deb 及 SHA256、通过 apt 安装，然后交接 TUI。缺少 curl/Python 时通过 apt 补齐安装器依赖。支持 Debian 13、Ubuntu 24.04 的 amd64/arm64，其他目标明确拒绝，不使用不匹配的 Ubuntu 包。
+- `latest` 只接受正式 `payincus-vX.Y.Z` release，`canary` 只接受集成 prerelease；无包、错误平台、无校验文件、校验失败均不安装，不跨渠道或回退旧包。canary 搜索最近 100 个 release。旧发布的通用包名不再被新安装器选中。
+- 包名增加 `linux-<ID>-<VERSION_ID>-<arch>`，manifest 新增 `targetDistribution`、实际 channel，Debian 13 使用 Debian 原生依赖构建及安装验证。稳定 tag `payincus-v7.0.2` 发布稳定版并标 latest，RC 继续 prerelease，canary 仍只发布已验证 push 的唯一集成 tag；上游基线仍为官方 v7.0.2 LTS，不改为普通功能版。
+- TUI 提供 Panel 凭据配置及一次性 token 兑换、原子 0600 配置保存、连接服务启动、服务生命周期、实时 journal、固定基础初始化、mTLS 公钥证书指纹确认及本地隧道监听。仅写入确认过的配置，不运行旧 Agent 安装器，不在终端或错误信息显示 token/密钥；已有旧连接服务覆盖时在兑换前停止并给出诊断。
+- 一键初始化只面向全新非集群节点：dir 存储、IPv4 NAT 网桥、default profile；拒绝覆盖已有资源，失败不自动删除资源，部分写入需人工检查。内核、KVM、AppArmor、外层嵌套权限及 UID/GID 映射不由安装器/TUI 自动修改。Agent 在线与实例管理的 mTLS 验证分开。
+- 仅调整本 fork 自有 `deploy/payincus/incus.service`，改为 `network.target`，避免 DNS wait-online 阻塞本地 daemon；连接器的网络等待保持原有行为。包安装仍不自动启动/重启服务，避免升级时直接影响运行中的节点。
+
+### 上游/API 接入与测试
+
+本功能没有新增上游源码修改。所有上游命令集中于 TUI `backend.go`，固定 `/usr/bin/incus --force-local`，防止管理员默认 remote 指向其他机器；子进程无 shell 拼接，写操作三分钟超时，可取消。HTTP 兑换 20 秒超时，禁止重定向、限制响应大小、不自动重试一次性 token。
+
+| 接口 | 接入方式与兼容性 | 单元测试 |
+| --- | --- | --- |
+| GitHub releases/latest、releases、release assets | 按 release 状态/tag、系统/架构选择匹配包；HTTPS、同发布 SHA256，无其他来源 fallback | `scripts/payincus/test-install.py` 执行真实安装器，mock OS/下载/apt；覆盖两渠道×两系统×双架构、损坏包、无包、非法 URL、draft、错误架构/系统/渠道 |
+| `GET /api/agent/install-config/:token` | 与当前 PayIncus 两行单引号 shell assignment 契约一致；仅解析数据，严禁 source/eval；HMAC 凭据供原连接器使用 | `TestPanelTokenProtocol`：真实 TLS HTTP fixture，路径/方法、权限/过期/服务错误、格式变化、重复字段、注入、体积、重定向、取消、错误脱敏 |
+| `GET /1.0/payincus` | 经 CLI query 读取 metadata，探测 `payincus_node_v1`；不修改扩展清单 | `TestStatusCapabilityAndFailure` |
+| `GET /1.0`、storage-pools、instances?all-projects=true、networks?recursion=1、profiles/default | v7.0.2 真实 metadata 契约；确认就绪、非集群、无现有资源，拒绝格式变化 | `TestInitializeContract`、`TestInitializeRefusesExistingAndMalformedState`、`TestInitializePropagatesInterfaceErrors` |
+| `incus admin init --preseed` | 复用正式 LTS 的 preseed/异步 operation 等待与错误处理；TUI 不重写 operation 实现，不重试写请求 | 同上，验证 preseed、参数、失败传播及不覆盖已有状态 |
+| `incus config get/set core.https_address` | 仅设置空/相同监听，不覆盖其他监听 | `TestServicesAndListenerContracts` |
+| `incus config trust add-certificate` | 校验单个 PEM X.509、公钥证书有效期与 SHA256；私有临时文件、完成后清理，不删除其他 trust | `TestCertificateTrustContract` |
+| systemctl show/start/stop/restart/enable/disable、journalctl | 固定服务白名单；show 检查连接器实际启动入口，journal 交回终端进行实时跟随 | `TestServicesAndListenerContracts`、`TestConnectorPreflightAndConnection`、`TestStatusCapabilityAndFailure`、`TestJournalAndOperationCancellation`、UI 测试及 PTY 验证 |
+| 本地配置写入、交互确认 | 原子 rename、0600，掩码输入，不在确认前执行写操作 | `TestAtomicPrivateConfiguration`、`TestUIRequiresConfirmationAndMasksSecrets`、`TestUIServiceActionsAndFailure`、`TestRunnerCancellationAndFailure` |
+
+操作说明见 `scripts/payincus/INSTALL.md`。上游 LTS 同步时复核 CLI query 的 metadata 输出、force-local、preseed 字段/operation 错误语义、profiles/实例/网络 API 与 server_clustered 字段；Panel 升级时复核 token assignment 契约及 systemd 服务路径。未修改 Incus 数据库和原生 API，未部署生产。
+
+### 验证记录
+
+本地验证通过：
+
+- 隔离 TUI module 的 `go test -race ./...`、`go vet ./...`、按根仓配置运行的 golangci-lint（零问题）；amd64 静态构建及 arm64 交叉编译。
+- 真实安装脚本的 fixture 测试，覆盖两渠道、两系统、双架构，以及校验/元数据/平台/渠道错误时不执行 apt 安装；Bash 语法、ShellCheck、两份发布 workflow 的 actionlint。
+- Debian 13 amd64 原生环境完整执行 `build.sh`，编译所有 daemon/CLI/guest/connector/network-worker/TUI；执行新格式集成 deb/归档/manifest 打包；正式 `payincus-v7.0.2` 打包验证 stable channel、原生版本号及 SHA256。
+- 全新 Debian 13 容器通过 apt 安装本地新 deb，验证 TUI、CLI、daemon、连接 Agent 入口、权限组、操作说明和依赖许可文件。
+- 真实 PTY 验证菜单导航、初始化确认与取消、密钥掩码、退出恢复终端；journal 子进程以 fixture 测试 Ctrl+C 后返回面板，未连接真实宿主 journal 或生产节点。
+
+以上本地产物来自开发工作树，manifest 标记 dirty，不上传为正式 release。推送后的四目标 CI 负责验证 Ubuntu 24.04 / Debian 13 的 amd64 / arm64 原生包安装，通过后发布对应提交的 canary 集成包；结果以该提交 Actions run 与 release 为准。实际宿主初始化/容器创建与 Panel 联通仍待节点验收。之前已记录的上游全仓静态/内核测试限制继续适用，本轮未重复运行无关的完整上游测试。
