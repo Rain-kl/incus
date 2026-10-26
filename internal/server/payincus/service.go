@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/lxc/incus/v7/internal/server/payincus/diagnostics"
 	"github.com/lxc/incus/v7/internal/server/payincus/egress"
 	"github.com/lxc/incus/v7/internal/server/payincus/report"
+	nodesecurity "github.com/lxc/incus/v7/internal/server/payincus/security"
 )
 
 // Constants define protocol identifiers and timing limits.
@@ -34,6 +36,7 @@ type Engine interface {
 // Service serves authenticated node extension requests inside incusd.
 type Service struct {
 	ctx         context.Context
+	guard       *nodesecurity.Manager
 	engine      Engine
 	enabled     bool
 	caddyGate   chan struct{}
@@ -56,7 +59,7 @@ func New(ctx context.Context, enabled bool) *Service {
 
 func newService(ctx context.Context, enabled bool, engine Engine) *Service {
 	return &Service{
-		ctx: ctx, enabled: enabled, engine: engine, caddyGate: make(chan struct{}, 1), reportGate: make(chan struct{}, 1), logs: make(chan struct{}, 32), collect: report.HeartbeatPayload, diagnostics: diagnostics.Stream, journal: diagnostics.Journal,
+		ctx: ctx, enabled: enabled, engine: engine, guard: nodesecurity.Default(), caddyGate: make(chan struct{}, 1), reportGate: make(chan struct{}, 1), logs: make(chan struct{}, 32), collect: report.HeartbeatPayload, diagnostics: diagnostics.Stream, journal: diagnostics.Journal,
 		caddyAction: func(ctx context.Context, action string) error {
 			if action == "install" {
 				return caddy.Install(ctx)
@@ -121,13 +124,22 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer stop()
 	defer cancel()
 	r = r.WithContext(ctx)
+	if strings.HasPrefix(r.URL.Path, Prefix+"/security") {
+		code, value := s.guard.Handle(r)
+		if code != 200 {
+			respond(w, 500, "Internal server error")
+			return
+		}
+		respond(w, code, value)
+		return
+	}
 	switch r.URL.Path {
 	case Prefix:
 		if r.Method != http.MethodGet {
 			break
 		}
 
-		respond(w, 200, map[string]any{"api_extensions": []string{Extension}, "api_version": "1.0", "transport_only_agent": true})
+		respond(w, 200, map[string]any{"api_extensions": []string{Extension, nodesecurity.Extension}, "api_version": "1.0", "transport_only_agent": true})
 		return
 	case Prefix + "/report":
 		if r.Method != http.MethodGet {
@@ -148,7 +160,11 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		payload := s.collect("payincus-node-v1", interval)
+		payload := map[string]any{}
+		if s.guard.Check() == nil {
+			payload = s.collect("payincus-node-v1", interval)
+		}
+		payload["nodeSecurity"] = s.guard.Report()
 		payload["networkStatus"] = s.engine.Report()
 		payload["nodeApi"] = Extension
 		respond(w, 200, payload)

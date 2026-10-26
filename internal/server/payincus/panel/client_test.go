@@ -2,6 +2,7 @@ package panel
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -46,5 +47,35 @@ func TestHeartbeatDenialAndCancellation(t *testing.T) {
 	_, err = client.Heartbeat(ctx, map[string]any{})
 	if err == nil {
 		t.Fatal("accepted cancelled heartbeat")
+	}
+}
+
+func TestSecurityReportSignedContract(t *testing.T) {
+	const secret = "fixture-signature-material"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/agent/security-report" || r.Method != "POST" {
+			t.Error("report endpoint mismatch")
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hash := protocol.BodySHA256(body)
+		expected := protocol.Signature(secret, protocol.SigningPayload("POST", r.URL.Path, r.Header.Get("x-incudal-timestamp"), r.Header.Get("x-incudal-nonce"), hash))
+		if r.Header.Get("x-incudal-body-sha256") != hash || r.Header.Get("x-incudal-signature") != expected {
+			t.Error("unsigned or mismatched report")
+		}
+		_, _ = w.Write([]byte(`{"ack":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]}`))
+	}))
+	defer server.Close()
+	client := New(config.Config{PanelURL: server.URL, AgentID: "fixture", AgentSecret: secret, RequestTimeout: time.Second})
+	ids, err := client.SecurityReport(context.Background(), map[string]any{"state": map[string]any{"locked": true, "revision": 3}, "events": []any{}})
+	if err != nil || len(ids) != 1 {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := client.SecurityReport(ctx, map[string]any{}); err == nil {
+		t.Fatal("ignored cancellation")
 	}
 }

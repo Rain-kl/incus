@@ -1,0 +1,286 @@
+package main
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+
+	tea "github.com/charmbracelet/bubbletea"
+)
+
+var poolPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{0,39}$`)
+
+func (b *backend) prepareZFS(ctx context.Context) error {
+	releasePath := b.releasePath
+	if releasePath == "" {
+		releasePath = "/etc/os-release"
+	}
+	data, err := os.ReadFile(releasePath)
+	if err != nil {
+		return err
+	}
+	release := map[string]string{}
+	for _, line := range strings.Split(string(data), "\n") {
+		k, v, ok := strings.Cut(line, "=")
+		if ok {
+			release[k] = strings.Trim(v, `"`)
+		}
+	}
+	debian := release["ID"] == "debian" && release["VERSION_ID"] == "13"
+	ubuntu := release["ID"] == "ubuntu" && release["VERSION_ID"] == "24.04"
+	if !debian && !ubuntu {
+		return errors.New("仅支持 Debian 和 Ubuntu")
+	}
+	if debian {
+		path := b.sourcePath
+		if path == "" {
+			path = "/etc/apt/sources.list.d/debian.sources"
+		}
+		source, readErr := os.ReadFile(path)
+		if readErr == nil {
+			lines := strings.Split(string(source), "\n")
+			changed := false
+			for i, line := range lines {
+				if strings.HasPrefix(line, "Components:") && !strings.Contains(" "+line+" ", " contrib ") {
+					lines[i] = line + " contrib"
+					changed = true
+				}
+			}
+			if changed {
+				// Preserve the administrator's original source file; never replace its URIs or signing keys.
+				backup := path + ".before-incus-tui"
+				file, err := os.OpenFile(backup, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+				if err != nil {
+					return errors.New("APT 配置备份已存在或不可写，请先检查源配置")
+				}
+				_, err = file.Write(source)
+				closeErr := file.Close()
+				if err != nil {
+					return err
+				}
+				if closeErr != nil {
+					return closeErr
+				}
+				err = os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o644)
+				if err != nil {
+					return err
+				}
+			}
+		}
+	}
+	_, err = b.run(ctx, "apt-get", "update")
+	if err != nil {
+		return err
+	}
+	packages := []string{"install", "-y", "--no-install-recommends", "zfsutils-linux", "util-linux"}
+	if debian {
+		kernel, err := b.run(ctx, "uname", "-r")
+		if err != nil {
+			return err
+		}
+		packages = append(packages, "zfs-dkms", "linux-headers-"+strings.TrimSpace(string(kernel)))
+	}
+	_, err = b.run(ctx, "apt-get", packages...)
+	if err != nil {
+		return fmt.Errorf("ZFS 依赖安装失败，请检查 contrib 软件源和当前内核 headers：%w", err)
+	}
+	_, err = b.run(ctx, "modprobe", "zfs")
+	if err != nil && ubuntu {
+		kernel, kernelErr := b.run(ctx, "uname", "-r")
+		if kernelErr != nil {
+			return kernelErr
+		}
+		_, err = b.run(ctx, "apt-get", "install", "-y", "--no-install-recommends", "zfs-dkms", "linux-headers-"+strings.TrimSpace(string(kernel)))
+		if err == nil {
+			_, err = b.run(ctx, "modprobe", "zfs")
+		}
+	}
+	if err != nil {
+		return errors.New("ZFS 内核模块无法加载，请检查内核兼容性或 Secure Boot 签名；未创建存储")
+	}
+	_, err = b.run(ctx, "zfs", "version")
+	return err
+}
+
+func (b *backend) createPool(ctx context.Context, name, device, size string) error {
+	if (device == "") == (size == "") {
+		return errors.New("磁盘路径与测试文件容量必须且只能填写一项")
+	}
+	if !poolPattern.MatchString(name) {
+		return errors.New("池名称格式不正确")
+	}
+	var target string
+	if size != "" {
+		gib, err := strconv.ParseInt(size, 10, 64)
+		if err != nil || gib < 1 || gib > 65536 {
+			return errors.New("文件池容量必须为 1–65536 GiB")
+		}
+		root := os.Getenv("INCUS_DIR")
+		if root == "" {
+			root = "/var/lib/incus"
+		}
+		dir := filepath.Join(root, "disks")
+		err = os.MkdirAll(dir, 0o700)
+		if err != nil {
+			return err
+		}
+		target = filepath.Join(dir, name+".img")
+		file, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err != nil {
+			return errors.New("文件已存在或无法创建，不覆盖已有文件")
+		}
+		err = file.Close()
+		if err != nil {
+			return err
+		}
+		_, err = b.run(ctx, "fallocate", "-l", strconv.FormatInt(gib<<30, 10), target)
+		if err != nil {
+			return errors.New("文件预分配失败，未创建池；请检查磁盘剩余空间")
+		}
+	} else {
+		if !strings.HasPrefix(device, "/dev/") || strings.Contains(device, "..") {
+			return errors.New("请输入 /dev 下的专用磁盘或分区")
+		}
+		info, err := os.Stat(device)
+		if err != nil || info.Mode()&os.ModeDevice == 0 || info.Mode()&os.ModeCharDevice != 0 {
+			return errors.New("不是可用的块设备")
+		}
+		output, err := b.run(ctx, "lsblk", "-n", "-o", "MOUNTPOINTS,FSTYPE", device)
+		if err != nil || strings.TrimSpace(string(output)) != "" {
+			return errors.New("设备含文件系统或挂载，拒绝覆盖；请管理员自行准备空设备")
+		}
+		target = device
+	}
+	_, err := b.run(ctx, "zpool", "create", "-o", "ashift=12", "-O", "mountpoint=none", "-O", "canmount=off", name, target)
+	if err != nil {
+		return errors.New("池创建失败；未使用强制覆盖，请检查设备状态；文件池的预分配文件会保留供检查")
+	}
+	return nil
+}
+
+func keyFingerprint(key string) string {
+	data, _ := hex.DecodeString(key)
+	sum := sha256.Sum256(data)
+	clear(data)
+	return hex.EncodeToString(sum[:])
+}
+
+func (m model) zfsMenu() (tea.Model, tea.Cmd) {
+	m.focus = 0
+	switch m.cursor {
+	case 10:
+		m.page = "confirm"
+		m.message = "安装 ZFS 工具；Debian 将在标准 deb822 源中添加 contrib 并备份原文件，安装匹配内核 headers/DKMS。不会选择或格式化磁盘。"
+		m.confirm = m.backend.prepareZFS
+	case 11:
+		m.page = "zpool"
+		m.fields = []field{{label: "新池名称"}, {label: "专用磁盘/分区 /dev/...（创建文件池时留空）"}, {label: "测试文件池容量 GiB（使用磁盘时留空）"}}
+	case 12:
+		var key [32]byte
+		_, err := rand.Read(key[:])
+		if err != nil {
+			m.message = "随机密钥生成失败"
+			return m, nil
+		}
+		value := hex.EncodeToString(key[:])
+		clear(key[:])
+		m.page = "zfs-create"
+		m.fields = []field{{label: "新加密数据集（例如 tank/incus）"}, {label: "新密钥：复制到控制台保存（不写入文件）", value: value, readonly: true}, {label: "从控制端保存结果复制 SHA256 指纹确认"}}
+		m.message = "请先在控制端保存密钥。程序不保存，但终端录屏和剪贴板历史可能保留副本。"
+	case 13:
+		m.page = "zfs-unlock"
+		m.fields = []field{{label: "已注册加密数据集"}, {label: "从控制端领取的 ZFS hex 密钥", secret: true}}
+	case 14:
+		m.page = "zfs-bind"
+		m.fields = []field{{label: "新的 Incus 存储池名称"}, {label: "已创建且已解锁的 ZFS 数据集"}}
+	case 16:
+		m.page = "zfs-register"
+		m.fields = []field{{label: "已有加密根数据集"}, {label: "已有 ZFS hex 密钥（先保存控制端）", secret: true}, {label: "从控制端保存结果复制 SHA256 指纹确认"}}
+	case 15:
+		m.busy = true
+		return m, func() tea.Msg {
+			ctx, cancel := context.WithTimeout(context.Background(), 15e9)
+			defer cancel()
+			output, err := m.backend.run(ctx, "zpool", "list", "-H", "-o", "name,health,size,alloc,free")
+			return resultMsg{text: string(output), err: err}
+		}
+	}
+	return m, nil
+}
+
+func (m model) submitZFS(values []string) (tea.Model, tea.Cmd) {
+	switch m.page {
+	case "zpool":
+		m.message = fmt.Sprintf("确认创建池 %s：设备=%s，测试文件容量=%s GiB。设备创建可能不可逆；不会使用 -f 强制覆盖。", values[0], values[1], values[2])
+		m.confirm = func(ctx context.Context) error { return m.backend.createPool(ctx, values[0], values[1], values[2]) }
+	case "zfs-create", "zfs-register":
+		action := "create"
+		if m.page == "zfs-register" {
+			action = "register"
+		}
+		if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(values[1]) || keyFingerprint(values[1]) != values[2] {
+			m.message = "密钥格式或控制端确认指纹不匹配"
+			return m, nil
+		}
+		m.message = "确认创建或核验已有加密根并注册到节点。已在控制端保存且核对指纹；本机不保存密钥。"
+		m.confirm = func(ctx context.Context) error {
+			c := newLocalClient()
+			defer c.http.CloseIdleConnections()
+			_, err := c.call(ctx, "POST", "/1.0/payincus/security/"+action, map[string]any{"dataset": values[0], "key": values[1], "fingerprint": values[2], "stored": true})
+			return err
+		}
+	case "zfs-unlock":
+		m.message = "确认加载存储密钥；这不会解除节点锁定或自动启动容器，恢复仍需控制端批准。"
+		m.confirm = func(ctx context.Context) error {
+			c := newLocalClient()
+			defer c.http.CloseIdleConnections()
+			_, err := c.call(ctx, "POST", "/1.0/payincus/security/unlock", map[string]string{"dataset": values[0], "key": values[1]})
+			return err
+		}
+	case "zfs-bind":
+		if !poolPattern.MatchString(values[0]) || !strings.Contains(values[1], "/") {
+			m.message = "请输入池名称及专用子数据集"
+			return m, nil
+		}
+		m.message = "确认将指定现有数据集交给 Incus 管理；它将管理其中的子数据集，不会迁移 DIR 数据。"
+		m.confirm = func(ctx context.Context) error {
+			c := newLocalClient()
+			defer c.http.CloseIdleConnections()
+			data, err := c.call(ctx, "GET", "/1.0/payincus/security", nil)
+			if err != nil {
+				return err
+			}
+			var registration struct {
+				Targets []struct {
+					Dataset string `json:"dataset"`
+				} `json:"targets"`
+			}
+			if json.Unmarshal(data, &registration) != nil {
+				return errors.New("本机服务响应不兼容")
+			}
+			found := false
+			for _, target := range registration.Targets {
+				if target.Dataset == values[1] {
+					found = true
+				}
+			}
+			if !found {
+				return errors.New("请先创建或注册此加密根并完成密钥托管")
+			}
+			_, err = c.call(ctx, "POST", "/1.0/storage-pools", map[string]any{"name": values[0], "driver": "zfs", "config": map[string]string{"source": values[1]}})
+			return err
+		}
+	}
+	m.fields = nil
+	m.page = "confirm"
+	return m, nil
+}

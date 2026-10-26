@@ -29,6 +29,7 @@ import (
 	"github.com/lxc/incus/v7/internal/server/backup"
 	localMigration "github.com/lxc/incus/v7/internal/server/migration"
 	"github.com/lxc/incus/v7/internal/server/operations"
+	nodesecurity "github.com/lxc/incus/v7/internal/server/payincus/security"
 	internalUtil "github.com/lxc/incus/v7/internal/util"
 	"github.com/lxc/incus/v7/shared/api"
 	"github.com/lxc/incus/v7/shared/archive"
@@ -2599,6 +2600,11 @@ func (d *zfs) deactivateDevice(dataset string, property string, devPath string) 
 
 // MountVolume mounts a volume and increments ref counter. Please call UnmountVolume() when done with the volume.
 func (d *zfs) MountVolume(vol Volume, op *operations.Operation) error {
+	// PayIncus: direct volume operations must obey the same node lock.
+	if nodesecurity.Check() != nil {
+		return errors.New("Internal server error")
+	}
+
 	unlock, err := vol.MountLock()
 	if err != nil {
 		return err

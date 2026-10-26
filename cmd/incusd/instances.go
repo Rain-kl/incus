@@ -23,6 +23,7 @@ import (
 	"github.com/lxc/incus/v7/internal/server/instance"
 	instanceDrivers "github.com/lxc/incus/v7/internal/server/instance/drivers"
 	"github.com/lxc/incus/v7/internal/server/instance/instancetype"
+	nodesecurity "github.com/lxc/incus/v7/internal/server/payincus/security"
 	"github.com/lxc/incus/v7/internal/server/project"
 	"github.com/lxc/incus/v7/internal/server/state"
 	"github.com/lxc/incus/v7/internal/server/warnings"
@@ -361,6 +362,11 @@ func instanceStart(s *state.State, inst instance.Instance) error {
 }
 
 func instancesStart(s *state.State, instances []instance.Instance) {
+	// PayIncus: do not queue boot/retry starts that could run after a later manual recovery.
+	if nodesecurity.Check() != nil {
+		return
+	}
+
 	// Check if the cluster is currently evacuated.
 	if s.ServerClustered && s.DB.Cluster.LocalNodeIsEvacuated() {
 		return

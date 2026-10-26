@@ -9,7 +9,7 @@
 | 正式发布 tag | `v7.0.2` |
 | 上游提交 | `01f81e5e607bbb5818410318e4b3496ad1820824` |
 | 官方发布时间 | 2026-10-16 |
-| 核对日期 | 2026-10-25 |
+| 核对日期 | 2026-10-26 |
 
 上游始终以正式 LTS 版本为准，仅同步 LTS 维护版本及经过兼容性验证的新 LTS 系列。普通功能版、开发分支及未发版提交均不纳入基线或同步目标。定制提交建立在记录的 LTS 基线上。
 
@@ -146,7 +146,7 @@ CI 权限隔离：daemon 测试先由普通 runner 编译测试程序，再以 r
 
 ### 上游/API 接入与测试
 
-本功能没有新增上游源码修改。所有上游命令集中于 TUI `backend.go`，固定 `/usr/bin/incus --force-local`，防止管理员默认 remote 指向其他机器；子进程无 shell 拼接，写操作三分钟超时，可取消。HTTP 兑换 20 秒超时，禁止重定向、限制响应大小、不自动重试一次性 token。
+该轮功能没有新增上游源码修改。其本地 CLI 接线在下文 2026-10-26 节点功能中已改为集中 Unix API 适配；管理员默认 remote 不参与本地操作。子进程无 shell 拼接，可取消。HTTP 兑换 20 秒超时，禁止重定向、限制响应大小、不自动重试一次性 token。
 
 | 接口 | 接入方式与兼容性 | 单元测试 |
 | --- | --- | --- |
@@ -173,3 +173,58 @@ CI 权限隔离：daemon 测试先由普通 runner 编译测试程序，再以 r
 - 真实 PTY 验证菜单导航、初始化确认与取消、密钥掩码、退出恢复终端；journal 子进程以 fixture 测试 Ctrl+C 后返回面板，未连接真实宿主 journal 或生产节点。
 
 以上本地产物来自开发工作树，manifest 标记 dirty，不上传为正式 release。推送后的四目标 CI 负责验证 Ubuntu 24.04 / Debian 13 的 amd64 / arm64 原生包安装，通过后发布对应提交的 canary 集成包；结果以该提交 Actions run 与 release 为准。实际宿主初始化/容器创建与 Panel 联通仍待节点验收。之前已记录的上游全仓静态/内核测试限制继续适用，本轮未重复运行无关的完整上游测试。
+
+## 节点 CLI 诱捕、持续通信与控制端恢复（2026-10-26）
+
+### 行为与边界
+
+- 可选扩展 `payincus_security_v1`，由定制包 `INCUS_PAYINCUS=1` 启用。关键命令诱捕默认关闭，不要求安装 ZFS，DIR 节点同样可启用。所有受管本机 Linux CLI 调用均提交脱敏分类、UID/PID、时间与诱捕判定；不保存参数值、stdin、密码或密钥。非 Linux CLI 保留原行为。
+- exec/shell/console、file、导出/发布/复制/移动、配置写入及启动/恢复等关键命令在执行前触发；普通 list/info/help/version 和明确的只读元数据子命令只审计。`info --show-log` 也属于敏感访问。未知命令、别名及外部别名按敏感调用处理，别名展开前再次检查；审计不覆盖被替换的二进制或绕开 CLI 的宿主操作。
+- 触发先原子持久化统一 `locked` 状态，再异步停止本节点全部 LXC 容器。已有认证授权之后的 API 检查覆盖 Unix、TLS 与反向隧道；启动驱动、启动任务与 ZFS 挂载入口另行检查，启动读锁确保正在启动的容器不会晚于停止核验完成才启动。
+- 普通 CLI、受限接口及新扩展的失败统一返回 HTTP 500 / `Internal server error`，不包含审计或锁定原因，不伪造成功。专用管理状态/上报接口保留真实状态供控制端诊断；这不是对宿主 root 隐藏程序、状态文件或源码的保证。
+- incusd、连接 Agent、状态/告警/恢复接口及 LXC 必需的 onstop/onstopns 回调继续运行；onstart 不放行。状态不是各接口独立副本；关闭诱捕、断网、重连和重启均不解除已存在的锁定。开启诱捕或存在注册加密存储的节点重启时，在存储导入与自动启动前进入锁定。
+- 未配置 ZFS 时报告 `storage/not_configured`，只宣称 API 锁定与容器停止；不宣称明文 DIR 获得加密保护。存储占用、停止失败、卸载失败均独立上报，API 锁定继续保持。失败后控制端可再次发起锁定以重试。
+- 恢复需要已有 Incus 管理权限的远程 mTLS 身份、当前 revision、已完成的容器停止核验及所有注册存储密钥可用。Unix socket 不允许修改策略或批准恢复。这里复用的是 Incus 信任管理身份，并不是独立的硬件控制端身份；持有其它受信任管理员私钥的人也有相同权限。恢复不自动拉起容器，管理员应在控制端确认存储就绪后再启动。
+- 主机完整 root 仍可读取运行中明文/密钥、篡改程序、状态或信任数据库、直接挂载/访问容器与绕过此机制。本功能用于告警、限制常规操作与增加取数成本，不提供抵御恶意宿主的隔离保证；既有数据流和执行中的文件传输也不保证被瞬间撤回。
+
+### 状态、告警与密钥链路
+
+- 状态、跨进程锁和最多 2048 条本地事件位于 `$INCUS_DIR/payincus-security/`（默认 `/var/lib/incus`），原子替换、0600 文件、目录同步；损坏/不可读时 API 拒绝敏感操作。队列满时 CLI 返回普通内部错误，关键操作触发的锁定不回滚。
+- `/payincus-audit.socket` 仅接收单个命令分类，使用内核 SO_PEERCRED 获取真实 UID/PID；原始参数在 CLI 内分类后即丢弃。socket 不提供恢复能力；可访问者可制造告警/拒绝服务，无法据此获得数据访问权。daemon 离线时 root CLI 可持久排队，但不清除已有锁定。
+- 连接 Agent 每 2 秒检查状态/待发送事件，变化立即投递，未变化状态最多每 30 秒发送一次；每批最多 128 条。控制端 `POST /api/agent/security-report` 校验实际请求体 HMAC、时间戳及 nonce，数据库事务持久化/去重后才 ACK。断网保留事件重试；日志只输出通用投递失败。节点上报时控制端清理 30 天前事件（离线期间不主动清理），页面展示最近 100 条；告警进入管理日志。
+- ZFS 仅注册独立子数据集加密根：AES-256-GCM、hex、`keylocation=prompt`。身份绑定 dataset GUID 和 SHA256 密钥指纹。创建使用随机 32 字节密钥，必须先由管理员保存控制端并在 TUI 输入相同指纹；节点以 stdin 将密钥交给 ZFS，不生成密钥文件。`load-key -n` 验证已加载状态下的密钥，依据 OpenZFS 正式手册契约。
+- 告警时在停止核验后，按后代优先顺序卸载已挂载文件系统，执行 `zfs unload-key -r` 并核验根 `keystatus=unavailable`。不销毁池或数据。busy 会失败并保留锁定；LXC 外的进程/VM 占用及独立加密子根可能阻止卸载，需管理员处理，不能误报完全清钥。
+- 加载密钥和告警动作互斥；TUI/控制端加载密钥不会清除 API 锁定。控制端批准恢复前检查所有注册根的身份和密钥状态；无需提供不存在的 DIR 密钥。保护现有数据须管理员自行迁移，不能原地把未加密 ZFS/DIR 变成加密。
+- PayIncus 控制端配套使用现有 `ENCRYPTION_KEY` 经独立用途 HKDF 派生 AES-256-GCM 托管密钥，绑定 hostId/dataset/version；解密失败不兼容返回明文，不新增 KMS 技术栈。新管理链路必须先人工核对并保存节点服务端证书 SHA256，再使用指纹校验的 mTLS（直连及隧道均校验）；旧节点客户端的宽松证书处理不用于本链路。控制端迁移、权限、备份说明见配套仓库 `docs/NODE_SECURITY.md`。
+- 管理员可在控制端领取原始密钥，经持久敏感操作审计后提供，再到 TUI 隐藏输入。原始密钥没有自动过期/即时撤销属性；已复制者需换钥才能撤销。本次没有实现换钥、托管主密钥在线轮换或自动迁移。
+- “不存盘”指程序不主动写明文密钥文件或普通日志，不保证 Go/JS 内存副本、宿主 swap/core dump、终端录屏、剪贴板或外部运维软件没有副本；生产管理员需单独配置这些系统策略。控制端主密钥及数据库必须分别备份，丢失主密钥无法解密托管数据。
+
+### TUI ZFS 管理与本地 API 适配
+
+- 入口 `tools/incus-tui/{zfs,local_api}.go`。Debian 13 安装 zfsutils-linux/zfs-dkms/匹配内核 headers/util-linux，在标准 deb822 源添加 contrib 前独占备份原文件并保留 URI/签名配置；自定义 sources.list 由管理员配置。Ubuntu 24.04 优先系统模块，缺失时补 DKMS/headers。失败保留诊断，不绕过 Secure Boot 或更换内核。
+- 显式确认后创建专用磁盘/分区池，或预分配测试文件池；拒绝已有文件系统/挂载，不使用 zpool `-f`，不自动挑盘。文件池不是生产推荐，失败时保留预分配文件供检查。池、加密根、Incus 绑定分步执行；默认一键初始化仍是 DIR，不自动迁移或修改已有实例配置。
+- 创建加密根时在专用 TUI 页展示随机密钥，后续确认页不重复展示；解除存储时隐藏输入。TUI 状态提供本地 API 返回的服务端证书 SHA256，管理员通过可信终端核对后保存控制端。终端/剪贴板由管理员管理。
+- TUI 的生产实现已改为 Unix socket API 适配，避免管理动作误触 CLI 诱捕。保留原 Runner fixture 接口；集中处理 ETag、原生请求、异步 Pending/Running/Success/Failure、格式错误与取消，不盲目重试写操作。此前安装器/TUI 记录中的 CLI 接线由此适配层替代。
+
+### 接口、测试与上游同步核对
+
+| 接口/接入点 | 测试与核对内容 |
+| --- | --- |
+| CLI 分类、持久状态、revision、队列/ACK、无 ZFS、启动与停止并发 | `internal/server/payincus/security/security_test.go`：`TestPersistentTripwireWithoutZFS`、`TestRestartCorruptionAndFailedStop`、`TestConcurrentEventsDoNotLoseLock`、`TestCommandPolicyAndNoArgumentLeaks`、`TestContainmentWaitsForInFlightStart` |
+| GET `/1.0/payincus/security`、`/report`，POST `/policy`、`/lock`、`/recover`、`/ack` | 同文件 `TestHTTPAuthorityReplayAndFormats`：Unix 与远程授权、参数/格式、过期 revision、节点上报保活；`service_test.go/TestPublicNodeErrorsRemainGeneric` 验证实际扩展响应不泄露失败原因 |
+| POST `/create`、`/register`、`/unlock`；ZFS create/load-key/unmount/unload-key/get | `TestStorageKeyLifecycleAndBusyFailure`、`TestStorageHTTPEnrollmentUnlockAndRecovery`、`storage_live_test.go/TestZFSNativeLifecycle`；stdin 交钥、指纹/GUID、已加载密钥验证、busy/错误/取消、互斥、恢复不自动清锁 |
+| `/1.0/payincus` 子路径原生路由 | `cmd/incusd/payincus_test.go/TestPayIncusAuthenticatedRoute`：实际 daemon 子路由、扩展能力和未认证拒绝；修复此前 ServeMux 缺少末尾斜线子树导致子路由 404 的问题 |
+| Agent HMAC 上报 | `internal/server/payincus/panel/client_test.go/TestSecurityReportSignedContract`：规范路径/请求体签名、ACK、错误与取消；控制端报告验证/事务/去重测试 |
+| TUI 原生 `/1.0`、storage-pools、networks、profiles/default、certificates、operations/*/wait | `tools/incus-tui/local_api_test.go`：真实 LTS JSON、请求/ETag、Pending 到 Success、失败/异步错误/取消/格式变化；现有 `backend_test.go` 保留不覆盖已有资源等回归 |
+| TUI ZFS 安装、确认、池创建及指纹展示 | 同文件与 `backend_test.go`：发行版、APT 备份、内核依赖、模块失败回退、危险请求拒绝、密钥只读展示/确认/隐藏 |
+
+必要上游修改仅为：`cmd/incus/{main,main_aliases}.go` 的执行前观察；`cmd/incusd/daemon.go` 的认证后检查/启动前锁定/密钥请求禁用 debug body 捕获；`cmd/incusd/instances.go` 的启动任务检查；`internal/server/instance/drivers/driver_lxc.go` 的启动围栏；ZFS `driver_zfs.go` 的 Mount 和 `driver_zfs_volumes.go` 的 MountVolume 检查。各处保留 PayIncus 注释。上游 LTS 同步必须复核授权顺序、停止内部回调方法/路径、Start 签名与失败清理、池挂载重试、API JSON/ETag/异步 operation 及别名执行顺序，避免恢复时重放旧启动任务。安全模块和 TUI 独立文件承担实现；不修改上游数据库格式或依赖模块。
+
+### 本地验证记录
+
+- 扩展模块/连接 Agent race 测试、TUI race 与 lint、前后端类型检查及双端构建已完成；详细结果以本次最终测试记录为准。全量上游静态检查既有许可和内核限制仍按前文记录，不将其算作通过。
+- 在隔离 Debian 13 中编译真实 daemon/CLI，运行 daemon 测试；实际启动 LXC fixture，验证关键 CLI 返回通用错误、容器停止、锁定期间文件 API 拒绝、报告保活、控制端 mTLS 恢复、关闭诱捕不清锁、重启保持锁定且不延迟自动启动。
+- 配套控制端使用独立 PostgreSQL 测试库与真实 incusd 联通，验证指纹、策略、手动锁定、停止核验、恢复授权、密钥加密入库/领取；测试中没有连接生产。
+- 在独立 QEMU TCG 虚拟机中运行 Debian 13 6.12.113 内核与 OpenZFS 2.3.9，使用预分配匿名文件 vdev，真实验证 AES 创建、已加载密钥验证、错误密钥、busy 卸载拒绝、数据卸载不可见、密钥加载与 API 恢复分离、恢复后内容完整，以及文件池 export/import-N/加载的回归。`scripts/payincus/test-zfs-vm.sh` 将该测试接入 Debian amd64 CI；仅 guest 内加载模块，不接触宿主磁盘。磁盘池、Ubuntu 内核/Secure Boot、真实服务升级仍需相应目标验收，不将本地文件 vdev 当作这些场景的证据。
+- 真实 PTY 验证新增 ZFS 密钥创建页、已有加密根注册、取消与终端恢复；捕获的测试密钥仅在内存中校验，不保存终端录屏。真实 daemon debug 模式下确认拒绝的密钥请求仍返回通用错误，日志不包含提交的密钥。
+- 新增脚本 ShellCheck、workflow actionlint 及改动范围 native lint 通过。原全仓静态/内核测试限制仍适用。发布、推送、CI run 和生产部署需独立记录，以对应提交的 Actions 与 Release 为准；本地验收未操作生产。

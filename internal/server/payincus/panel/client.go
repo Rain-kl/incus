@@ -155,3 +155,44 @@ func (client *Client) Heartbeat(ctx context.Context, payload map[string]any) (He
 
 	return result, nil
 }
+
+// SecurityReport authenticates event batches and accepts only explicit durable-delivery acknowledgements.
+func (client *Client) SecurityReport(ctx context.Context, payload map[string]any) ([]string, error) {
+	const path = "/api/agent/security-report"
+	body, err := protocol.CanonicalJSON(payload)
+	if err != nil {
+		return nil, err
+	}
+	timestamp := protocol.NewTimestamp()
+	nonce, err := protocol.NewNonce()
+	if err != nil {
+		return nil, err
+	}
+	hash := protocol.BodySHA256(body)
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, client.panelURL+path, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("x-incudal-agent-id", client.agentID)
+	request.Header.Set("x-incudal-timestamp", timestamp)
+	request.Header.Set("x-incudal-nonce", nonce)
+	request.Header.Set("x-incudal-body-sha256", hash)
+	request.Header.Set("x-incudal-signature", protocol.Signature(client.agentSecret, protocol.SigningPayload("POST", path, timestamp, nonce, hash)))
+	response, err := client.httpClient.Do(request)
+	if err != nil {
+		return nil, fmt.Errorf("report transport failed")
+	}
+	defer response.Body.Close()
+	if response.StatusCode != 200 {
+		return nil, fmt.Errorf("report status %d", response.StatusCode)
+	}
+	var result struct {
+		Ack []string `json:"ack"`
+	}
+	err = json.NewDecoder(io.LimitReader(response.Body, 32768)).Decode(&result)
+	if err != nil || result.Ack == nil || len(result.Ack) > 128 {
+		return nil, fmt.Errorf("invalid acknowledgement")
+	}
+	return result.Ack, nil
+}

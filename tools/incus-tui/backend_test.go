@@ -387,6 +387,9 @@ func TestStatusCapabilityAndFailure(t *testing.T) {
 			if c.name == "systemctl" {
 				return []byte("ActiveState=active\nSubState=running"), nil
 			}
+			if reflect.DeepEqual(c.args, []string{"query", "/1.0"}) {
+				return []byte(`{"environment":{"certificate_fingerprint":"` + strings.Repeat("a", 64) + `"}}`), nil
+			}
 			return []byte(body), nil
 		}}
 		result := (&backend{runner: f}).status(context.Background())
@@ -394,7 +397,10 @@ func TestStatusCapabilityAndFailure(t *testing.T) {
 		if strings.Contains(result, "节点 API: 可连接") != want {
 			t.Fatal("incorrect capability state", result)
 		}
-		if len(f.calls) != 3 {
+		if !strings.Contains(result, strings.Repeat("a", 64)) {
+			t.Fatal("node identity missing")
+		}
+		if len(f.calls) != 4 {
 			t.Fatal("status contract missing")
 		}
 	}

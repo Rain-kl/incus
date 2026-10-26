@@ -51,3 +51,11 @@ sudo bash /tmp/incus-install.sh canary
 TUI 支持 Incus 和连接 Agent 的启动、停止、重启、启用并启动、关闭开机启动；所有写操作需界面内确认。查看日志使用 `journalctl -u incus` / `incudal-agent -n 100 -f`，退出日志后返回面板。服务操作最多等待三分钟，Esc 可取消等待；已经提交给 systemd 或 Incus 的变更不会自动回滚。Incus 停止命令可能由 systemd 在后台继续处理。
 
 Incus 本地服务仅依赖 `network.target`，不因 DNS 的 `wait-online` 超时阻塞本地 socket；连接器仍等待网络在线。已有自定义 systemd 覆盖配置保持有效，需要自行检查。
+
+## 可选 ZFS 与节点管理
+
+默认初始化仍使用 DIR。运行 `incus-tui` 可显式安装 ZFS 依赖、创建专用磁盘或测试文件池、创建/注册 AES-256-GCM 子数据集并绑定到 Incus。不会自动挑盘、迁移或覆盖已有数据。Debian 13 标准 deb822 源补 contrib 前会备份原文件；特殊内核、Secure Boot 和自定义源需管理员处理。
+
+创建根之前，将 TUI 显示的随机 hex 密钥保存到配套控制端，复制 SHA256 指纹回 TUI 核对。节点不主动保存明文密钥文件；终端录屏、剪贴板、swap/core dump 仍由管理员管理。可信终端中的 TUI 状态区同时提供节点服务端证书 SHA256，控制端需先人工核对保存，才允许新的管理/发钥链路连接。
+
+关键 CLI 诱捕默认关闭，DIR 节点也可在控制端开启。触发后全部 LXC 停止、API 持续锁定，ZFS 按注册情况卸载/清钥；Agent 与 incusd 保持通信。TUI 加载密钥不会批准节点恢复，须控制端授权后按需启动容器。重启、重连、关闭诱捕均不清除已有锁定。详情与限制见根目录 FEATURES.md 及配套 PayIncus 仓库 `docs/NODE_SECURITY.md`。

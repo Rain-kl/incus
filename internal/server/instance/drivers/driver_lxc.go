@@ -66,6 +66,7 @@ import (
 	localMigration "github.com/lxc/incus/v7/internal/server/migration"
 	"github.com/lxc/incus/v7/internal/server/network"
 	"github.com/lxc/incus/v7/internal/server/operations"
+	nodesecurity "github.com/lxc/incus/v7/internal/server/payincus/security"
 	"github.com/lxc/incus/v7/internal/server/project"
 	"github.com/lxc/incus/v7/internal/server/response"
 	"github.com/lxc/incus/v7/internal/server/seccomp"
@@ -3042,6 +3043,13 @@ func (d *lxc) detachInterfaceRename(netns string, ifName string, hostName string
 
 // Start starts the instance.
 func (d *lxc) Start(stateful bool) error {
+	// PayIncus: include boot, retry, migration and restore paths that do not enter through HTTP.
+	releaseStart, guardErr := nodesecurity.BeginStart()
+	if guardErr != nil {
+		return errors.New("Internal server error")
+	}
+	defer releaseStart()
+
 	// Check that migration.stateful is set for stateful actions.
 	if stateful && !d.CanLiveMigrate() {
 		return errors.New("Stateful start requires that the instance migration.stateful be set to true")
@@ -3199,6 +3207,13 @@ func (d *lxc) Start(stateful bool) error {
 	env := make([]string, 0, len(envDict))
 	for k, v := range envDict {
 		env = append(env, fmt.Sprintf("%s=%s", k, v))
+	}
+
+	// PayIncus: recheck after preparation to close the long startup window before fork.
+	if nodesecurity.Check() != nil {
+		err = errors.New("Internal server error")
+		op.Done(err)
+		return err
 	}
 
 	// Start the LXC container.

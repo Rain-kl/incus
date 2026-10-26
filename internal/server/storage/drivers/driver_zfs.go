@@ -16,6 +16,7 @@ import (
 	deviceConfig "github.com/lxc/incus/v7/internal/server/device/config"
 	localMigration "github.com/lxc/incus/v7/internal/server/migration"
 	"github.com/lxc/incus/v7/internal/server/operations"
+	nodesecurity "github.com/lxc/incus/v7/internal/server/payincus/security"
 	internalUtil "github.com/lxc/incus/v7/internal/util"
 	"github.com/lxc/incus/v7/internal/version"
 	"github.com/lxc/incus/v7/shared/api"
@@ -691,6 +692,11 @@ func (d *zfs) importPool() (bool, error) {
 
 // Mount mounts the storage pool.
 func (d *zfs) Mount() (bool, error) {
+	// PayIncus: background pool retries must not reload keys after a tripwire.
+	if nodesecurity.Check() != nil {
+		return false, errors.New("Internal server error")
+	}
+
 	// Import the pool if not already imported.
 	imported, err := d.importPool()
 	if err != nil {

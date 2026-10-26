@@ -24,7 +24,7 @@ import (
 
 const configPath = "/etc/incudal-agent/config.yaml"
 
-// Runner centralizes the stable upstream CLI and systemd interfaces.
+// Runner centralizes node API and system command adapters.
 type Runner interface {
 	Run(context.Context, string, []string, string) ([]byte, error)
 }
@@ -32,6 +32,9 @@ type Runner interface {
 type commandRunner struct{}
 
 func (commandRunner) Run(ctx context.Context, name string, args []string, input string) ([]byte, error) {
+	if name == "/usr/bin/incus" {
+		return runIncusAdapter(ctx, args, input)
+	}
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.WaitDelay = 3 * time.Second
 	cmd.Stdin = strings.NewReader(input)
@@ -43,9 +46,11 @@ func (commandRunner) Run(ctx context.Context, name string, args []string, input 
 }
 
 type backend struct {
-	runner Runner
-	path   string
-	client *http.Client
+	runner      Runner
+	path        string
+	client      *http.Client
+	releasePath string
+	sourcePath  string
 }
 
 func newBackend() *backend {
@@ -133,6 +138,18 @@ func (b *backend) status(ctx context.Context) string {
 		lines = append(lines, "节点 API: 不可用，请启动 Incus 或查看日志")
 	} else {
 		lines = append(lines, "节点 API: 可连接")
+	}
+	data, err = b.run(ctx, "/usr/bin/incus", "query", "/1.0")
+	var identity struct {
+		Environment struct {
+			Fingerprint string `json:"certificate_fingerprint"`
+		} `json:"environment"`
+	}
+	if err == nil {
+		err = json.Unmarshal(data, &identity)
+	}
+	if err == nil && regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(identity.Environment.Fingerprint) {
+		lines = append(lines, "节点证书 SHA256（控制端核对）："+identity.Environment.Fingerprint)
 	}
 	return strings.Join(lines, "\n")
 }

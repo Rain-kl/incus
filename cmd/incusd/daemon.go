@@ -58,6 +58,7 @@ import (
 	"github.com/lxc/incus/v7/internal/server/network/ovs"
 	networkZone "github.com/lxc/incus/v7/internal/server/network/zone"
 	"github.com/lxc/incus/v7/internal/server/node"
+	nodesecurity "github.com/lxc/incus/v7/internal/server/payincus/security"
 	"github.com/lxc/incus/v7/internal/server/project"
 	"github.com/lxc/incus/v7/internal/server/request"
 	"github.com/lxc/incus/v7/internal/server/response"
@@ -848,8 +849,8 @@ func (d *Daemon) createCmd(restAPI *http.ServeMux, apiVersion string, c APIEndpo
 			return
 		}
 
-		// Dump full request JSON when in debug mode
-		if daemon.Debug && r.Method != "GET" && localUtil.IsJSONRequest(r) {
+		// PayIncus: never capture key-handoff bodies in upstream debug logs, including malformed requests.
+		if daemon.Debug && r.Method != "GET" && localUtil.IsJSONRequest(r) && !nodesecurity.SensitivePath(r.URL.Path) {
 			newBody := &bytes.Buffer{}
 			captured := &bytes.Buffer{}
 			multiW := io.MultiWriter(newBody, captured)
@@ -922,6 +923,11 @@ func (d *Daemon) createCmd(restAPI *http.ServeMux, apiVersion string, c APIEndpo
 				if resp != response.EmptySyncResponse {
 					return resp
 				}
+			}
+
+			// PayIncus: all authenticated entry transports share one persistent lock; retain control recovery only.
+			if !nodesecurity.AllowedWhileLocked(r.Method, r.URL.Path) && nodesecurity.Check() != nil {
+				return response.InternalError(errors.New("Internal server error"))
 			}
 
 			// Limit request body size unless the endpoint requires a large body.
@@ -1391,6 +1397,14 @@ func (d *Daemon) init() error {
 	}
 
 	d.events.SetLocalLocation(d.serverName)
+
+	// PayIncus: persist restart lock before any pool import or instance auto-recovery.
+	if os.Getenv("INCUS_PAYINCUS") == "1" {
+		guardErr := nodesecurity.Default().Boot()
+		if guardErr != nil {
+			logger.Error("Node initialization failed")
+		}
+	}
 
 	// Mount the storage pools.
 	logger.Infof("Initializing storage pools")

@@ -1,4 +1,4 @@
-// incus-tui provides local installation setup without changing upstream daemon code.
+// incus-tui provides local setup and storage management using the node API.
 package main
 
 import (
@@ -19,6 +19,7 @@ var version = "development"
 type field struct {
 	label, value string
 	secret       bool
+	readonly     bool
 }
 type resultMsg struct {
 	text string
@@ -35,6 +36,7 @@ type (
 		confirm               func(context.Context) error
 		cancel                context.CancelFunc
 		width                 int
+		height                int
 	}
 )
 
@@ -49,6 +51,13 @@ var menu = []string{
 	"查看 Incus 实时日志",
 	"查看连接 Agent 实时日志",
 	"刷新状态",
+	"安装并检查 ZFS 依赖",
+	"创建 ZFS 池（磁盘或测试文件）",
+	"创建加密数据集并显示密钥",
+	"输入密钥解锁 ZFS",
+	"将 ZFS 数据集绑定到 Incus",
+	"查看 ZFS 池状态",
+	"注册已有加密数据集",
 	"退出",
 }
 
@@ -73,6 +82,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
+		m.height = msg.Height
 	case statusMsg:
 		m.status = string(msg)
 	case resultMsg:
@@ -113,7 +123,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.page == "confirm" {
 			if msg.String() == "y" || msg.String() == "Y" {
 				m.busy = true
-				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 				m.cancel = cancel
 				return m, operation(ctx, cancel, m.confirm)
 			}
@@ -125,6 +135,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if len(m.fields) > 0 {
+			if m.fields[m.focus].readonly && msg.Type != tea.KeyTab && msg.Type != tea.KeyDown && msg.Type != tea.KeyShiftTab && msg.Type != tea.KeyUp && msg.Type != tea.KeyEnter {
+				return m, nil
+			}
 			switch msg.Type {
 			case tea.KeyTab, tea.KeyDown:
 				m.focus = (m.focus + 1) % len(m.fields)
@@ -180,6 +193,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m model) selectMenu() (tea.Model, tea.Cmd) {
 	m.message = ""
 	m.focus = 0
+	if m.cursor >= 10 && m.cursor <= 16 {
+		return m.zfsMenu()
+	}
 	switch m.cursor {
 	case 0:
 		m.page = "confirm"
@@ -216,7 +232,7 @@ func (m model) selectMenu() (tea.Model, tea.Cmd) {
 		return m, tea.ExecProcess(cmd, func(err error) tea.Msg { return resultMsg{text: "日志查看已结束", err: err} })
 	case 9:
 		return m, m.refresh()
-	case 10:
+	case 17:
 		return m, tea.Quit
 	}
 	return m, nil
@@ -233,6 +249,9 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 	values := make([]string, len(m.fields))
 	for i, f := range m.fields {
 		values[i] = strings.TrimSpace(f.value)
+	}
+	if strings.HasPrefix(m.page, "zfs-") || m.page == "zpool" {
+		return m.submitZFS(values)
 	}
 	switch m.page {
 	case "credentials":
@@ -345,14 +364,24 @@ func (m model) render() string {
 	case m.page == "incus" || m.page == "incudal-agent":
 		out.WriteString(m.page + " 服务：\n1. 启用并启动\n2. 启动\n3. 停止\n4. 重启\n5. 取消开机启动\n\nEsc 返回\n")
 	default:
-		for i, label := range menu {
+		visible := m.height - 12
+		if visible < 6 {
+			visible = 6
+		}
+		first := 0
+		if m.cursor >= visible {
+			first = m.cursor - visible + 1
+		}
+		last := min(first+visible, len(menu))
+		for i := first; i < last; i++ {
+			label := menu[i]
 			prefix := "  "
 			if i == m.cursor {
 				prefix = "> "
 			}
 			out.WriteString(prefix + label + "\n")
 		}
-		out.WriteString("\n↑/↓ 选择 · Enter 确认 · q 退出\n")
+		out.WriteString("\n↑/↓ 选择 · Enter 确认 · q 退出（菜单可滚动）\n")
 	}
 	return out.String()
 }

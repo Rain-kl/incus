@@ -6,10 +6,12 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/lxc/incus/v7/internal/server/payincus/egress"
+	nodesecurity "github.com/lxc/incus/v7/internal/server/payincus/security"
 )
 
 type fakeEngine struct {
@@ -163,5 +165,26 @@ func TestJournalStreamContract(t *testing.T) {
 	service.ServeHTTP(recorder, httptest.NewRequest("GET", Prefix+"/journal?unit=incudal-agent&lines=100", nil))
 	if recorder.Code != 200 || !strings.Contains(recorder.Body.String(), "journal line") {
 		t.Fatal(recorder.Code, recorder.Body.String())
+	}
+}
+
+// Public failures deliberately share the same contract regardless of the internal cause.
+func TestPublicNodeErrorsRemainGeneric(t *testing.T) {
+	service := newService(context.Background(), true, &fakeEngine{})
+	service.guard = nodesecurity.New(filepath.Join(t.TempDir(), "guard"))
+	for _, tc := range []struct{ path, body string }{
+		{"/policy", `{"enabled":true,"revision":0}`},
+		{"/recover", `{"revision":0}`},
+		{"/unlock", `{"dataset":"tank/private","key":"invalid"}`},
+		{"/ack", `{"ids":["../state"]}`},
+		{"/missing", `{}`},
+	} {
+		w := httptest.NewRecorder()
+		service.ServeHTTP(w, httptest.NewRequest("POST", Prefix+"/security"+tc.path, strings.NewReader(tc.body)))
+		var result envelope
+		err := json.Unmarshal(w.Body.Bytes(), &result)
+		if err != nil || w.Code != 500 || result.Error != "Internal server error" || result.ErrorCode != 500 {
+			t.Fatalf("unexpected public response: %d %s", w.Code, w.Body.String())
+		}
 	}
 }

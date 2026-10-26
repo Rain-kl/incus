@@ -2,7 +2,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -42,6 +44,7 @@ func main() {
 	remote := panel.New(cfg)
 	worker := tunnel.NewWorker(tunnel.WorkerConfig{PanelURL: cfg.PanelURL, AgentID: cfg.AgentID, AgentSecret: cfg.AgentSecret, ControlHandler: local.Control, NodeClient: local})
 	defer worker.SyncConfig(false, "", 0)
+	go securityReports(ctx, local, remote)
 	var caddyPending atomic.Bool
 	tick := time.NewTicker(cfg.HeartbeatInterval)
 	defer tick.Stop()
@@ -109,4 +112,42 @@ func heartbeat(ctx context.Context, local *nodeclient.Client, remote *panel.Clie
 	}
 
 	return nil
+}
+
+// securityReports uses a separate bounded cadence so alarms are not delayed by resource collection.
+func securityReports(ctx context.Context, local *nodeclient.Client, remote *panel.Client) {
+	var lastPayload []byte
+	var deliveredAt time.Time
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		var report map[string]any
+		err := local.Call(callCtx, "GET", "/security/report", nil, &report)
+		if err == nil {
+			payload, marshalErr := json.Marshal(report)
+			if marshalErr == nil && bytes.Equal(payload, lastPayload) && time.Since(deliveredAt) < 30*time.Second {
+				cancel()
+				continue
+			}
+			var ids []string
+			ids, err = remote.SecurityReport(callCtx, report)
+			if err == nil {
+				lastPayload = payload
+				deliveredAt = time.Now()
+			}
+			if err == nil && len(ids) > 0 {
+				err = local.Call(callCtx, "POST", "/security/ack", map[string]any{"ids": ids}, nil)
+			}
+		}
+		cancel()
+		if err != nil {
+			log.Print("Node report delivery failed")
+		}
+	}
 }
