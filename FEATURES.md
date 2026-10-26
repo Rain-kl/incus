@@ -238,3 +238,14 @@ CI 权限隔离：daemon 测试先由普通 runner 编译测试程序，再以 r
 - 适用平台仍为 Debian 13 / Ubuntu 24.04 的 amd64、arm64。面向全新节点；旧节点不提供原地升级、数据迁移、配置继承或协议回退。节点凭据接口沿用同一 HMAC 身份契约，不修改现有上游代码、数据库或依赖。
 - 测试：`cmd/payincus-agent/main_test.go/TestNativeHeartbeatContractIncludesLockedNodes` 真实 Unix/HTTP 验证普通与锁定心跳、能力保留；`tunnel/control_test.go/TestNativeIncusStreamAndRejectedRPC` 真实签名 WebSocket 验证握手、字节中继、旧 RPC 不执行及断线取消；`nodeclient/client_test.go` 直接验证原生 HTTP 请求；`tools/incus-tui/main_test.go/TestInstallerTokenPrefillIsMaskedAndRemovedFromEnvironment` 验证交接不暴露 token。控制端另有分发边界、安装脚本双渠道、HMAC、超时/取消与并发控制契约测试。
 - 上游 API/扩展仍为 7.0.2 LTS 原生 API 和 `payincus_node_v1`，无新增上游修改点。后续同步核对 HELLO 帧、原生请求及 TUI 初始化/凭据确认行为。移除的旧 RPC 测试由原生传输与拒绝旧 RPC 的契约测试替代；不把删除兼容代码视为旧节点迁移验收。
+
+## 默认 10 秒心跳与即时配置下发（2026-10-26）
+
+- 目的：降低节点状态上报延迟；实例配置写入继续走常驻反向隧道上的原生 mTLS API，不等待心跳轮询。
+- `internal/server/payincus/config/config.go` 默认心跳改为 10 秒，允许范围 5–3600 秒；显式配置及 `INCUDAL_HEARTBEAT_INTERVAL_SECONDS` 仍优先，不强制重写已有节点配置。
+- `report/report.go` 复用同一组默认值及范围，`service.go` 的 `GET /1.0/payincus/report?interval=` 接受 10 秒，TUI 保存新连接配置时写入 10 秒。认证、授权、签名和隧道协议不变；锁定节点仍可保持管理通信。
+- 控制端新增已创建实例高级配置编辑，集中适配 Incus 7.0.2 的 `GET/PATCH /1.0/instances/{name}`，等待原生异步 operation 成功后保存实例覆盖值。涉及磁盘吞吐/IOPS、主网卡入站/出站带宽、LXC 进程数、CPU 优先级及启动配置。保留实际设备名称、存储池、网络和 MAC 等属性；继承 profile 的设备通过实例级覆盖更新，不修改共享 profile。
+- 控制端独立保存管理员带宽意图与实际流量限速，超额期间保留较严格限速，恢复后重用管理员设置。详见 Rain-kl/payincus `docs/INSTANCE_ADVANCED_CONFIG.md`；这些变动不加入节点二次业务转换层。
+- 接口测试：`config/config_test.go` 覆盖缺省值、10 秒及上下界；`report/report_test.go` 覆盖指标默认值及范围；`service_test.go/TestEndpointContracts` 覆盖报告接口 5/10/60 秒及非法间隔。上述包及 `cmd/payincus-agent` 的 race 测试、golangci-lint 和独立 TUI 测试通过。
+- 上游基线：2026-10-26 再次核对官方正式 LTS 为 v7.0.2。本次不修改上游运行时代码，无新增上游挂钩；同步时核对原生实例 PATCH 的设备合并语义、配置热更新支持和 operation 响应契约。
+- 限制：10 秒是正常工作时的采集周期，不是网络故障或慢采集下的交付时限。启动参数只用于后续启动/宿主关机；磁盘及网卡热更新取决于存储驱动、NIC 类型、内核 I/O 控制器和 HTB 支持。隔离原生 daemon 已验证停止实例配置；当前嵌套环境缺少 HTB 且 cgroup 委派不足，运行中完整热更新尚需具备这些能力的节点验证。未发布或部署本次改动。

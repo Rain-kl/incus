@@ -13,6 +13,8 @@ func TestLoadClampsHeartbeatInterval(t *testing.T) {
 		value    string
 		expected int
 	}{
+		{name: "default", value: "", expected: 10},
+		{name: "ten seconds", value: "10", expected: 10},
 		{name: "too low", value: "1", expected: MinHeartbeatIntervalSeconds},
 		{name: "too high", value: "7200", expected: MaxHeartbeatIntervalSeconds},
 		{name: "valid", value: "60", expected: 60},

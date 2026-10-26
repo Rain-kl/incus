@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/lxc/incus/v7/internal/server/payincus/caddy"
+	"github.com/lxc/incus/v7/internal/server/payincus/config"
 	"github.com/lxc/incus/v7/internal/server/payincus/diagnostics"
 	"github.com/lxc/incus/v7/internal/server/payincus/egress"
 	"github.com/lxc/incus/v7/internal/server/payincus/report"
@@ -155,8 +156,8 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 
 		interval, err := strconv.Atoi(r.URL.Query().Get("interval"))
-		if err != nil || interval < 30 || interval > 3600 {
-			respond(w, 400, "interval must be between 30 and 3600")
+		if err != nil || interval < config.MinHeartbeatIntervalSeconds || interval > config.MaxHeartbeatIntervalSeconds {
+			respond(w, 400, "interval must be between 5 and 3600")
 			return
 		}
 

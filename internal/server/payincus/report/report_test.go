@@ -128,8 +128,8 @@ func TestHeartbeatPayloadClampsHeartbeatInterval(t *testing.T) {
 		input    int
 		expected int
 	}{
-		{name: "zero falls back", input: 0, expected: 60},
-		{name: "too low clamps to min", input: 1, expected: 30},
+		{name: "zero falls back", input: 0, expected: 10},
+		{name: "too low clamps to min", input: 1, expected: 5},
 		{name: "too high clamps to max", input: 7200, expected: 3600},
 		{name: "valid stays unchanged", input: 60, expected: 60},
 	}
