@@ -42,7 +42,7 @@ func main() {
 	defer stop()
 	local := nodeclient.New(*socket)
 	remote := panel.New(cfg)
-	worker := tunnel.NewWorker(tunnel.WorkerConfig{PanelURL: cfg.PanelURL, AgentID: cfg.AgentID, AgentSecret: cfg.AgentSecret, ControlHandler: local.Control, NodeClient: local})
+	worker := tunnel.NewWorker(tunnel.WorkerConfig{PanelURL: cfg.PanelURL, AgentID: cfg.AgentID, AgentSecret: cfg.AgentSecret, NodeClient: local})
 	defer worker.SyncConfig(false, "", 0)
 	go securityReports(ctx, local, remote)
 	var caddyPending atomic.Bool
@@ -85,6 +85,12 @@ func heartbeat(ctx context.Context, local *nodeclient.Client, remote *panel.Clie
 	}
 
 	payload["version"] = version
+	payload["nodeApi"] = "payincus_node_v1"
+	capabilities, ok := payload["capabilities"].([]any)
+	if !ok {
+		capabilities = nil
+	}
+	payload["capabilities"] = append(capabilities, "network-control", "payincus_node_v1")
 	result, err := remote.Heartbeat(requestCtx, payload)
 	if err != nil {
 		return err
@@ -92,10 +98,6 @@ func heartbeat(ctx context.Context, local *nodeclient.Client, remote *panel.Clie
 
 	if result.Tunnel != nil {
 		worker.SyncConfig(result.Tunnel.Enabled, result.Tunnel.TargetHost, result.Tunnel.TargetPort)
-	}
-	// Package-managed binaries must never be replaced by the legacy Agent self-updater.
-	if result.Upgrade != nil && result.Upgrade.Available {
-		log.Print("node upgrade requested; upgrade the custom Incus package")
 	}
 
 	if result.Caddy != nil && (result.Caddy.Command == "install" || result.Caddy.Command == "uninstall") && caddyPending.CompareAndSwap(false, true) {

@@ -8,19 +8,16 @@ import (
 
 // Constants define protocol identifiers and timing limits.
 const (
-	FrameTypeOpen            byte = 0x01 // 新建连接流（Server -> Agent），Payload 为 JSON { targetHost, targetPort }
-	FrameTypeData            byte = 0x02 // 数据传输（双向），Payload 为数据分片（<= 64KB）
-	FrameTypeClose           byte = 0x03 // 关闭流（双向，发送端结束 / EOF）
-	FrameTypeReset           byte = 0x04 // 重置流（双向，连接中断或错误）
-	FrameTypeConfig          byte = 0x05 // 动态热配置（Server -> Agent），StreamID = 0，Payload 为 JSON { targetHost, targetPort }
-	FrameTypeLogCtl          byte = 0x06 // 日志流控制（Server -> Agent），StreamID = 0，Payload 为 JSON { action: 'start' | 'stop', lines?: number }
-	FrameTypeLogData         byte = 0x07 // 日志流数据（Agent -> Server），StreamID = 0，Payload 为一行 UTF-8 文本；空 Payload 表示流结束
-	FrameTypeControlRequest  byte = 0x08
-	FrameTypeControlResponse byte = 0x09
-	FrameTypeControlHello    byte = 0x0a
-	FrameTypeControlCancel   byte = 0x0b
-	FrameTypeTaskLogCtl      byte = 0x0c
-	FrameTypeTaskLogData     byte = 0x0d
+	FrameTypeOpen         byte = 0x01 // 新建连接流（Server -> Agent），Payload 为 JSON { targetHost, targetPort }
+	FrameTypeData         byte = 0x02 // 数据传输（双向），Payload 为数据分片（<= 64KB）
+	FrameTypeClose        byte = 0x03 // 关闭流（双向，发送端结束 / EOF）
+	FrameTypeReset        byte = 0x04 // 重置流（双向，连接中断或错误）
+	FrameTypeConfig       byte = 0x05 // 动态热配置（Server -> Agent），StreamID = 0，Payload 为 JSON { targetHost, targetPort }
+	FrameTypeLogCtl       byte = 0x06 // 日志流控制（Server -> Agent），StreamID = 0，Payload 为 JSON { action: 'start' | 'stop', lines?: number }
+	FrameTypeLogData      byte = 0x07 // 日志流数据（Agent -> Server），StreamID = 0，Payload 为一行 UTF-8 文本；空 Payload 表示流结束
+	FrameTypeControlHello byte = 0x0a
+	FrameTypeTaskLogCtl   byte = 0x0c
+	FrameTypeTaskLogData  byte = 0x0d
 )
 
 // HeaderLength is the byte size of the multiplexed frame header.

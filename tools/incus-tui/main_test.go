@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -95,5 +96,17 @@ func TestJournalAndOperationCancellation(t *testing.T) {
 	result, ok := cmd().(resultMsg)
 	if !ok || !errors.Is(result.err, context.Canceled) || !m.busy {
 		t.Fatal("operation cancellation lost")
+	}
+}
+
+func TestInstallerTokenPrefillIsMaskedAndRemovedFromEnvironment(t *testing.T) {
+	t.Setenv("INCUDAL_PANEL_URL", "https://panel.example.com")
+	t.Setenv("INCUDAL_AGENT_INSTALL_TOKEN", "ait_fixture_not_a_real_secret")
+	m := initialModel(&backend{runner: &fakeRunner{}})
+	if m.page != "token" || len(m.fields) != 2 || m.fields[0].value != "https://panel.example.com" || !m.fields[1].secret {
+		t.Fatal("missing installer handoff")
+	}
+	if strings.Contains(m.View(), "ait_fixture_not_a_real_secret") || os.Getenv("INCUDAL_AGENT_INSTALL_TOKEN") != "" {
+		t.Fatal("token was exposed or inherited")
 	}
 }

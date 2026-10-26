@@ -56,8 +56,9 @@ func TestRequestsAndResponseContracts(t *testing.T) {
 			}))
 			defer server.Close()
 			c := testClient(server)
-			value, err := c.Control(context.Background(), tc.method, json.RawMessage(`{"revision":4}`))
-			if err != nil || value.(map[string]any)["appliedRevision"] != float64(4) {
+			var value map[string]any
+			err := c.Call(context.Background(), tc.wireMethod, tc.wirePath, json.RawMessage(`{"revision":4}`), &value)
+			if err != nil || value["appliedRevision"] != float64(4) {
 				t.Fatal(value, err)
 			}
 		})

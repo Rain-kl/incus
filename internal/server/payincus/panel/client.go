@@ -29,7 +29,6 @@ type HeartbeatResult struct {
 	StatusCode int
 	Body       string
 	OK         bool
-	Upgrade    *UpgradeInstruction
 	Tunnel     *TunnelInstruction
 	Caddy      *CaddyInstruction
 	LatencyMs  int64
@@ -48,20 +47,9 @@ type TunnelInstruction struct {
 	TargetPort int    `json:"targetPort"`
 }
 
-// UpgradeInstruction describes legacy upgrade metadata, never applied by the connector.
-type UpgradeInstruction struct {
-	Available bool   `json:"available"`
-	Version   string `json:"version"`
-	URL       string `json:"url"`
-	SHA256    string `json:"sha256"`
-	Gzip      bool   `json:"gzip"`
-	Size      int64  `json:"size"`
-}
-
 type heartbeatResponse struct {
-	Upgrade *UpgradeInstruction `json:"upgrade"`
-	Tunnel  *TunnelInstruction  `json:"tunnel"`
-	Caddy   *CaddyInstruction   `json:"caddy"`
+	Tunnel *TunnelInstruction `json:"tunnel"`
+	Caddy  *CaddyInstruction  `json:"caddy"`
 }
 
 // New creates an API client using the supplied connection configuration.
@@ -133,7 +121,6 @@ func (client *Client) Heartbeat(ctx context.Context, payload map[string]any) (He
 	{
 		err := json.Unmarshal(responseBody, &parsedResponse)
 		if err == nil {
-			result.Upgrade = parsedResponse.Upgrade
 			result.Tunnel = parsedResponse.Tunnel
 			result.Caddy = parsedResponse.Caddy
 		}

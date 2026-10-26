@@ -21,14 +21,13 @@ import (
 
 // WorkerConfig contains panel authentication and reverse-connection settings.
 type WorkerConfig struct {
-	PanelURL       string
-	AgentID        string
-	AgentSecret    string
-	TargetHost     string
-	TargetPort     int
-	InsecureTLS    bool
-	ControlHandler ControlHandler
-	NodeClient     *nodeclient.Client
+	PanelURL    string
+	AgentID     string
+	AgentSecret string
+	TargetHost  string
+	TargetPort  int
+	InsecureTLS bool
+	NodeClient  *nodeclient.Client
 }
 
 // Worker maintains the authenticated reverse connection.
@@ -217,8 +216,6 @@ func (w *Worker) connectAndServe(ctx context.Context) error {
 
 	writeChan := make(chan []byte, 128)
 	writeErrChan := make(chan error, 1)
-	controls := newControlSession(connCtx, w.cfg.ControlHandler, writeChan)
-	controls.nodeAPI = w.cfg.NodeClient != nil
 
 	taskStreams := make(map[int]context.CancelFunc)
 	defer func() {
@@ -310,8 +307,14 @@ func (w *Worker) connectAndServe(ctx context.Context) error {
 		}
 
 		switch frameType {
-		case FrameTypeControlRequest, FrameTypeControlHello, FrameTypeControlCancel:
-			controls.handle(frameType, streamID, payload)
+		case FrameTypeControlHello:
+			if streamID == 0 && len(payload) <= 4096 {
+				select {
+				case writeChan <- EncodeFrame(FrameTypeControlHello, 0, []byte(`{"capabilities":["payincus_node_v1"]}`)):
+				case <-connCtx.Done():
+					return connCtx.Err()
+				}
+			}
 		case FrameTypeOpen:
 			var openCfg TargetConfig
 			if len(payload) > 0 {

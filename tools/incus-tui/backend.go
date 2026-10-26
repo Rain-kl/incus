@@ -90,7 +90,7 @@ func (b *backend) connectorReady(ctx context.Context) error {
 		return err
 	}
 	if !strings.Contains(string(output), "/usr/libexec/incus/payincus-agent") {
-		return errors.New("连接服务被旧版 unit 覆盖或缺失；请检查 systemctl cat incudal-agent，备份并移除旧覆盖配置后执行 systemctl daemon-reload")
+		return errors.New("节点连接服务配置不匹配，请检查 Incus 软件包与 systemd 配置")
 	}
 	return nil
 }

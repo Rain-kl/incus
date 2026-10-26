@@ -228,3 +228,13 @@ CI 权限隔离：daemon 测试先由普通 runner 编译测试程序，再以 r
 - 在独立 QEMU TCG 虚拟机中运行 Debian 13 6.12.113 内核与 OpenZFS 2.3.9，使用预分配匿名文件 vdev，真实验证 AES 创建、已加载密钥验证、错误密钥、busy 卸载拒绝、数据卸载不可见、密钥加载与 API 恢复分离、恢复后内容完整，以及文件池 export/import-N/加载的回归。`scripts/payincus/test-zfs-vm.sh` 将该测试接入 Debian amd64 CI；仅 guest 内加载模块，不接触宿主磁盘。磁盘池、Ubuntu 内核/Secure Boot、真实服务升级仍需相应目标验收，不将本地文件 vdev 当作这些场景的证据。
 - 真实 PTY 验证新增 ZFS 密钥创建页、已有加密根注册、取消与终端恢复；捕获的测试密钥仅在内存中校验，不保存终端录屏。真实 daemon debug 模式下确认拒绝的密钥请求仍返回通用错误，日志不包含提交的密钥。
 - 新增脚本 ShellCheck、workflow actionlint 及改动范围 native lint 通过。原全仓静态/内核测试限制仍适用。发布、推送、CI run 和生产部署需独立记录，以对应提交的 Actions 与 Release 为准；本地验收未操作生产。
+
+## 节点程序统一归属 Incus，移除独立 Agent 链路（2026-10-26）
+
+- 配套 PayIncus 控制端已移除 `agent/` 源码、独立 Agent 编译/发布、binary/manifest 代理、自更新 API 与旧业务 RPC 回退；控制端镜像不再包含 Agent 构建产物。此前记录的新旧兼容过渡方案由本条替代，不新增升级迁移程序、旧配置搬运或历史协议兼容层。
+- 唯一宿主连接器为本仓库 `cmd/payincus-agent`，随 incus-payincus deb 管理。删除 WebSocket 业务 RPC 执行器、局部方法转换适配和心跳独立升级指令；保留原生 API 字节转发、`payincus_node_v1` 能力握手和节点日志转发。控制端通过原生 mTLS API 执行业务操作，旧 RPC 不再可用。
+- 心跳始终携带 `nodeApi=payincus_node_v1` 及能力声明，包含告警锁定时的最小报告；保留正常报告的资源能力。控制端拒绝缺失原生节点声明的报告，不触发旧节点更新。
+- 控制端安装入口仅下载并执行本仓库 `scripts/payincus/install.sh latest|canary`。安装脚本职责仍仅为选择正式 release 包、校验、apt 安装和进入 TUI。Panel 地址与一次性 token 从环境交给 TUI，字段掩码显示并在进入界面时移除 token 环境变量，用户确认后才兑换；没有交互终端时由管理员稍后手工配置。服务 unit 必须匹配软件包提供的连接器；不接管、迁移或修复旧服务配置。
+- 适用平台仍为 Debian 13 / Ubuntu 24.04 的 amd64、arm64。面向全新节点；旧节点不提供原地升级、数据迁移、配置继承或协议回退。节点凭据接口沿用同一 HMAC 身份契约，不修改现有上游代码、数据库或依赖。
+- 测试：`cmd/payincus-agent/main_test.go/TestNativeHeartbeatContractIncludesLockedNodes` 真实 Unix/HTTP 验证普通与锁定心跳、能力保留；`tunnel/control_test.go/TestNativeIncusStreamAndRejectedRPC` 真实签名 WebSocket 验证握手、字节中继、旧 RPC 不执行及断线取消；`nodeclient/client_test.go` 直接验证原生 HTTP 请求；`tools/incus-tui/main_test.go/TestInstallerTokenPrefillIsMaskedAndRemovedFromEnvironment` 验证交接不暴露 token。控制端另有分发边界、安装脚本双渠道、HMAC、超时/取消与并发控制契约测试。
+- 上游 API/扩展仍为 7.0.2 LTS 原生 API 和 `payincus_node_v1`，无新增上游修改点。后续同步核对 HELLO 帧、原生请求及 TUI 初始化/凭据确认行为。移除的旧 RPC 测试由原生传输与拒绝旧 RPC 的契约测试替代；不把删除兼容代码视为旧节点迁移验收。

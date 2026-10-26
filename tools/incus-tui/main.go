@@ -386,6 +386,19 @@ func (m model) render() string {
 	return out.String()
 }
 
+func initialModel(b *backend) model {
+	m := model{backend: b, status: "正在读取服务状态…"}
+	panel, token := os.Getenv("INCUDAL_PANEL_URL"), os.Getenv("INCUDAL_AGENT_INSTALL_TOKEN")
+	_ = os.Unsetenv("INCUDAL_AGENT_INSTALL_TOKEN")
+	if panel != "" && token != "" {
+		_ = os.Unsetenv("INCUDAL_PANEL_URL")
+		m.page = "token"
+		m.message = "请确认连接信息。初始化存储与导入 Panel 公钥证书可在主菜单完成。"
+		m.fields = []field{{label: "Panel 根地址", value: panel}, {label: "一次性安装 token（ait_，只使用一次）", value: token, secret: true}}
+	}
+	return m
+}
+
 func main() {
 	showVersion := flag.Bool("version", false, "print version")
 	flag.Parse()
@@ -397,7 +410,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "请使用 sudo incus-tui")
 		os.Exit(1)
 	}
-	m := model{backend: newBackend(), status: "正在读取服务状态…"}
+	m := initialModel(newBackend())
 	_, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "无法启动终端界面：", err)

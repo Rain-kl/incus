@@ -97,22 +97,6 @@ func (c *Client) Check(ctx context.Context) error {
 	return fmt.Errorf("local incusd does not support payincus_node_v1")
 }
 
-// Control preserves the existing panel wire protocol during rolling node upgrades.
-func (c *Client) Control(ctx context.Context, method string, params json.RawMessage) (any, error) {
-	verb, path := http.MethodPut, "/network"
-	switch method {
-	case "network.apply", "network.apply.v2":
-	case "proxy.probe":
-		verb, path = http.MethodPost, "/proxy-probes"
-	default:
-		return nil, fmt.Errorf("invalid_request")
-	}
-
-	var value any
-	err := c.Call(ctx, verb, path, params, &value)
-	return value, err
-}
-
 // Stream follows bounded instance diagnostics until cancellation.
 func (c *Client) Stream(ctx context.Context, instance string, emit func(string)) error {
 	return c.stream(ctx, "/logs?instance="+url.QueryEscape(instance), emit)

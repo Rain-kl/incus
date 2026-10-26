@@ -39,7 +39,7 @@ sudo bash /tmp/incus-install.sh canary
 
 1. 执行 `sudo incus-tui`，选择“一键初始化”。确认后启用并启动 Incus，等待本地 API 就绪；为全新非集群节点创建 `default`（dir 驱动）和 `incusbr0`（自动 IPv4 + NAT、IPv6 禁用），给 default profile 添加根磁盘和 eth0。已有存储池、任意项目实例、托管网络、同名网桥或 default profile 配置时拒绝覆盖。
 2. 在 Panel 创建或选择宿主机，启用 Agent，取得 `agt_` ID 和 `ias_` 密钥，或生成一次性 `ait_` token。TUI 可直接粘贴 token，不需要运行旧安装命令。此 token 通常 30 分钟有效且只能消费一次；不要粘贴整条 shell 安装命令。
-3. 选择配置 Panel 连接。根地址必须 HTTPS（本机调试允许 HTTP）；密钥/token 输入掩码显示。确认后原子写入 `/etc/incudal-agent/config.yaml`（0600），启用并重启 `incudal-agent.service`。旧版 `/etc/systemd/system` unit 覆盖新连接器时，先提示人工处理，不消费 token。
+3. 选择配置 Panel 连接。根地址必须 HTTPS（本机调试允许 HTTP）；密钥/token 输入掩码显示。确认后原子写入 `/etc/incudal-agent/config.yaml`（0600），启用并重启 `incudal-agent.service`。连接服务配置必须匹配软件包提供的 unit，不匹配时拒绝操作且不消费 token；不执行旧服务迁移。
 4. 如果使用反向隧道，在 Panel 启用隧道，目标为 `127.0.0.1:8443`；TUI 选择“设置反向隧道本地监听”。该操作不会覆盖已有其他 HTTPS 监听地址。
 5. 把 Panel 客户端的 PEM **公钥证书**放到节点，选择“导入 Panel 客户端证书”，核对 SHA256 指纹后确认。此证书将授予 Panel 节点管理权限；不导入私钥，不删除已有信任。证书和 Agent token 是不同用途，Agent 心跳在线不等于 mTLS 实例管理连接已验证。
 6. 在 Panel 验证宿主机连接。
@@ -59,3 +59,5 @@ Incus 本地服务仅依赖 `network.target`，不因 DNS 的 `wait-online` 超�
 创建根之前，将 TUI 显示的随机 hex 密钥保存到配套控制端，复制 SHA256 指纹回 TUI 核对。节点不主动保存明文密钥文件；终端录屏、剪贴板、swap/core dump 仍由管理员管理。可信终端中的 TUI 状态区同时提供节点服务端证书 SHA256，控制端需先人工核对保存，才允许新的管理/发钥链路连接。
 
 关键 CLI 诱捕默认关闭，DIR 节点也可在控制端开启。触发后全部 LXC 停止、API 持续锁定，ZFS 按注册情况卸载/清钥；Agent 与 incusd 保持通信。TUI 加载密钥不会批准节点恢复，须控制端授权后按需启动容器。重启、重连、关闭诱捕均不清除已有锁定。详情与限制见根目录 FEATURES.md 及配套 PayIncus 仓库 `docs/NODE_SECURITY.md`。
+
+控制端不再分发独立 Agent。由控制端安装命令传入的 Panel 地址和一次性 token 会在 TUI 中预填并隐藏 token，确认后才兑换；无终端时稍后手工配置。此流程面向全新节点，不提供旧 Agent 或旧节点升级迁移。
