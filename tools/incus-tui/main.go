@@ -83,6 +83,7 @@ var repairMenu = []menuItem{
 var updateMenu = []menuItem{
 	{"开发版（canary）", "update-canary"},
 	{"稳定版（正式 Release）", "update-latest"},
+	{"应用已安装更新（无需下载）", "apply-installed"},
 	{"返回主菜单", "back"},
 }
 
@@ -276,7 +277,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				unit := m.page
 				m.page = "confirm"
 				m.message = "确认对 " + unit + " 执行 " + action + "？停止或重启可能中断控制连接或实例管理。"
-				m.confirm = func(ctx context.Context) error { return m.backend.service(ctx, unit, action) }
+				m.confirm = func(ctx context.Context) error { return m.backend.manageService(ctx, unit, action) }
 			}
 			return m, nil
 		}
@@ -328,6 +329,10 @@ func (m model) selectMenu() (tea.Model, tea.Cmd) {
 		m.updateChannel = strings.TrimPrefix(action, "update-")
 		m.page = "confirm"
 		m.message = "更新至" + updateChannelName(m.updateChannel) + "的最新 GitHub Release：下载并校验完整节点软件包，安装后自动重启原本运行的 Incus 和连接器，保持原开机启用状态，最后重新打开新版 TUI。渠道切换可能安装版本号更低的包。Incus 重启会执行节点 shutdown，可能停止实例；重新启动由已有启动策略和安全锁定状态决定。请安排维护窗口；更新开始后不能在界面中取消 apt/dpkg。"
+	case "apply-installed":
+		m.updateChannel = "installed"
+		m.page = "confirm"
+		m.message = "应用已安装的软件包：只读检查 root UID/GID 映射，重启原本运行的 Incus 和连接器，使新版二进制及映射生效；保持开机启用状态，不下载、不安装、不改映射。Incus shutdown 可能停止实例，后续启动按已有策略及安全锁决定。请安排维护窗口。"
 	case "credentials":
 		c := m.backend.loadConnection()
 		m.page = "credentials"

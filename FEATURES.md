@@ -111,6 +111,8 @@
 
 ## 集成 CI 与预发布
 
+- 2026-10-27 用户授权的 debian-test 全流程验收发现：仅通过 dpkg-shlibdeps 引入 `liblxc1t64` 不包含 `/usr/lib/<multiarch>/lxc/rootfs` 及 liblxc 运行辅助程序，真实非特权 LXC 在 forklxc 启动时失败。`scripts/payincus/package.sh` 增加 Debian 13 / Ubuntu 24.04 的 `liblxc-common` 显式运行依赖，由发行版包提供目录/工具，不手工造空目录或启用特权容器。测试节点安装该依赖后，用户前端成功创建实例 #7 `e2e-20261027-lxc-fixed`，节点 ID `u2-fbhgstgw`，Alpine 3.21 aarch64、10.10.1.210，真实运行且浏览器终端执行 id/uname/ip 命令通过。完整功能验收仍在进行，未将已完成的创建/终端步骤当作全组件通过。
+- 同次验收发现原任务采集只跟随 journal/QEMU，LXC 根因留在节点 lxc.log，面板仅见 `forklxc exit status 1`。`internal/server/payincus/diagnostics/task_logs.go` 增加 lxc.log/forklxc.log 并发跟随，共用原有按实例约束、日志边界与取消回收；轮询 250ms，取消时最后读取剩余内容以降低快速失败漏日志。原有 4000 行/7500 字符与单次 64 KiB 边界仍保留，不将此称为无限日志。diagnostics/tunnel race tests 通过，`TestLXCLogDrainsLastFailureWhenTaskEnds` 覆盖末尾错误保留。新连接器已在测试节点本地安装，未发布；传输层最终送达与整条失败流程仍需验收。
 - `.github/workflows/payincus.yml` 在 fork 的 main/canary、PR 和 `payincus-v*` tag 上运行；使用 GitHub 托管的 Ubuntu 24.04 amd64/arm64 原生 runner，Go 版本读取 LTS go.mod。
 - 按 owner 2026-10-27 要求，集成 CI 仅保留 LTS tag/提交校验、固定 Xray、四目标原生构建/打包、包信息/内容与 SHA256 检查、产物上传及原发布接线。移除竞态/单元/daemon/CLI/TUI 测试、go vet、ZFS 虚拟机测试、安装器 fixtures、脚本检查及干净系统安装验收；不新增替代自动测试工作流，测试源码保留供单独运行。Debian 目标的构建依赖仅在 Debian 构建容器中安装，Ubuntu 目标保留本机构建依赖，去掉仅用于已移除测试的工具及失去用途的 matrix.image。CI 成功仅证明构建与产物检查通过，不代表测试、安装或真实节点验收通过。
 - 上游 `.github/workflows/build.yml`、`tests.yml`、`release.yml` 各 job 增加带注释的官方仓库条件；保留上游定义，由 fork 专用流程承担构建与服务端发布，避免等待仅上游有的自托管 runner 或误发布客户端包。
@@ -129,6 +131,11 @@ CI 接线修正：fork 初始没有官方 release tag，校验步骤从官方仓
 
 ### 非特权容器 root ID 映射准备（2026-10-27）
 
+- 23:18 重启后的短暂 socket 错误另有根因：`incus.service` 为 Type=simple，systemctl 于进程启动即返回，而旧 TUI 的服务管理立即记录“操作完成”并刷新，早于 Unix socket 创建。只读核实新 PID 1009、启动前 root mapping 检查通过、socket 存在且 `/1.0/payincus` 已返回能力；不再把该瞬时提示当作 ID 映射修复失败。`backend.go/manageService` 为 TUI 的 Incus start/restart/enable 增加有界真实 API 就绪等待，复用更新流程的轮询；停止/禁用和连接器操作不等待 Incus。等待期间完整记录原始错误，超时/取消带最后 API 原因，未修改服务类型或上游启动逻辑。
+- 就绪等待验证：`service_ready_test.go` 覆盖真实 UI 确认/完成路径、socket 首次不存在随后可用、三种启动动作、超时保留原始错误、systemctl 失败后不轮询，以及停止/连接器动作不轮询。TUI race suite（仅跳过上述既有菜单文案断言）、go vet、Linux arm64/amd64 编译、根 make check、diff 检查通过。仅只读观察 owner 已执行的真实节点重启，没有再次重启或部署本地修改；等待逻辑仍是未发布源码，不把这次只读观察算作新版节点验收。
+- 23:09 再次失败的只读证据：节点已安装 `7.0.2~integration.be665dd0aa8f`，映射文件于 23:09:11 正确生成，但 PID 196 于 23:06:19 启动时缓存 `ErrNoUserMap`，`/proc/196/exe` 仍为 `incusd (deleted)`；重载后的 ExecStartPre 未在该旧进程启动时执行。常规安装器不主动重启的边界没有闭环展示。本轮不改节点，修复集中在安装完成提示和 TUI：`installed_update.go/installedUpdatePending` 通过 systemctl MainPID 和只读 `/proc/<pid>/exe` 检查已被替换的运行程序；API 可连接时也明确显示待应用更新，检测失败保留具体错误。
+- 更新菜单增加“应用已安装更新（无需下载）”：危险操作确认后共用软件包更新锁，只读执行 `prepare-idmap --check`，复用 `update.go/restartUpdatedServices` 重启原本运行的 Incus/连接器、等节点 API、核对启用状态并重新打开已安装 TUI；不下载、不安装、不写映射。原本停止的服务保持停止；重启可能停止实例，必须维护窗口执行。普通安装模式检测已有运行中的 Incus 后打印待重启提示，包括 `--no-tui`；`--update` 仍由 TUI 管理重启，postinst 不自动重启。未改变发布或上游 API。
+- 待应用更新回归：`installed_update_test.go` 覆盖真实命令参数、deleted/当前/停止/无效 PID、读取错误、API 可连接仍警告、仅重启原运行服务、先只读检查、失败传播、共享更新锁及确认后执行；安装器 fixtures 六项覆盖运行服务提示与原更新流程。`go test -race ./... -skip '^TestMenuGroupsKeepMaintenanceAndZFSOffHome$'`、`go vet ./...`、Linux arm64/amd64 编译、根 `make check`、Bash 语法和 diff 检查通过。完整 TUI 测试的既有菜单文案守卫仍要求“ZFS 管理/高级维护”，与当前“ZFS/更多”不符，该项单独跳过，未恢复用户菜单文案；未把跳过算作全量通过。没有在 debian-test 执行重启、替换二进制或创建实例；新入口尚未发布。
 - 根因：原包依赖 `uidmap`，但 postinst 仅创建权限组，未落实正式 LTS `doc/installing.md` 的 root subuid/subgid 分配。`shared/idmap/set_load.go/NewSetFromSystem("root")` 在两文件和映射工具存在、但无 root 条目时返回 `ErrNoUserMap`；`internal/server/sys/os.go/getIdmapset` 因此缓存 nil，LXC `findIdmap` 返回 `System doesn't have a functional idmap setup`。只读检查 debian-test 证实两文件均为 0 字节，启动日志为 `Unable to parse system idmap: No map found for user`，未修改节点。
 - 修复集中于独立 `scripts/payincus/prepare-idmap.py`，包内路径 `/usr/libexec/incus/prepare-idmap`；`package.sh` 声明 `uidmap`/`passwd`/`python3` 运行依赖并在 postinst 准备映射，`deploy/payincus/incus.service` 的 ExecStartPre 仅执行 `--check` 只读验证，不在启动时补配置、创建锁或备份。干净安装使用官方默认 `root:1000000:1000000000`；已有至少 65536 个 ID 的 root/数字 UID 0 分配按上游用户名优先规则原样保留，一侧缺失时沿用另一侧有效范围。保留小范围 raw.idmap 委托，不缩减或替换旧范围，不修改容器权限模式、磁盘 UID/GID 或实例配置；不主动重启服务。
 - 自动补充前验证两文件格式、范围、现有委托与宿主用户/组 ID 冲突；冲突、缺失工具、非普通文件或写入失败均带路径/原始错误退出，不改用特权容器或绕过 namespace 隔离。新增条目前独占备份原文件（0600），缺失文件仅独占创建空文件；映射条目通过一次 `usermod --add-subuids/--add-subgids` 操作写入，复用 shadow 的系统账户数据库锁，不自行实现文件替换。随后回读确认新分配存在且旧分配未减少。自身准备调用另用文件锁协调；不实现跨文件失败回滚，usermod 部分失败保留原始输出和备份。标准系统 subid 文件为目标，特殊 NSS/subid 插件和并发外部账户管理需管理员协调，未实现迁移或在线重载。
@@ -294,3 +301,9 @@ CI 接线修正：fork 初始没有官方 release tag，校验步骤从官方仓
 - 接口测试：`config/config_test.go` 覆盖缺省值、10 秒及上下界；`report/report_test.go` 覆盖指标默认值及范围；`service_test.go/TestEndpointContracts` 覆盖报告接口 5/10/60 秒及非法间隔。上述包及 `cmd/payincus-agent` 的 race 测试、golangci-lint 和独立 TUI 测试通过。
 - 上游基线：2026-10-26 再次核对官方正式 LTS 为 v7.0.2。本次不修改上游运行时代码，无新增上游挂钩；同步时核对原生实例 PATCH 的设备合并语义、配置热更新支持和 operation 响应契约。
 - 限制：10 秒是正常工作时的采集周期，不是网络故障或慢采集下的交付时限。启动参数只用于后续启动/宿主关机；磁盘及网卡热更新取决于存储驱动、NIC 类型、内核 I/O 控制器和 HTB 支持。隔离原生 daemon 已验证停止实例配置；当前嵌套环境缺少 HTB 且 cgroup 委派不足，运行中完整热更新尚需具备这些能力的节点验证。未发布或部署本次改动。
+
+## 套餐代理网关启动健康检查（2026-10-28）
+
+- 测试节点上发现 systemd 返回启动成功后，代理核心仍可能尚未就绪，第一次检测失败导致创建任务立即回滚；同一网络命名空间稍后检测可成功。
+- 网关在原有操作超时内重试实际 HTTPS 探测，未成功时始终保持出口阻断；记录不含节点凭据的检查错误类别。取消或超时仍返回未就绪，不允许直连回退。
+- Linux 节点包测试覆盖首次失败后恢复和取消时不再检测。完整实例出口验收结果须以实际部署后的测试为准；源代码改动尚未发布。

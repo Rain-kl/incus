@@ -7,7 +7,22 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestGroupHealthWaitsForStartupAndHonorsCancellation(t *testing.T) {
+	attempts := 0
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if !retryGroupHealth(ctx, func() bool { attempts++; return attempts == 2 }) || attempts != 2 {
+		t.Fatal("group did not recover after its initial startup failure")
+	}
+	ctx, cancel = context.WithCancel(context.Background())
+	cancel()
+	if retryGroupHealth(ctx, func() bool { t.Fatal("probe ran after cancellation"); return true }) {
+		t.Fatal("cancelled group must remain blocked")
+	}
+}
 
 func testGroups() Instruction {
 	policy := Policy{Mode: "proxy", Strategy: "balance", ProbeURL: "https://www.gstatic.com/generate_204", ProbeIntervalSeconds: 30, ProxyNodeIDs: []int{1}}

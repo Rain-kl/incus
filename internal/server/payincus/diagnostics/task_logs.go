@@ -42,7 +42,7 @@ func Stream(parent context.Context, name string, emit func(string)) {
 	send("节点日志采集已启动: " + name)
 	// Incus already records these files on the node. Persist the scoped copy in the panel task log.
 	done := make(chan struct{})
-	go func() { defer close(done); followQemuLog(ctx, name, send) }()
+	go func() { defer close(done); followInstanceLogs(ctx, name, send) }()
 	defer func() { cancel(); <-done }()
 	cmd := exec.CommandContext(ctx, "journalctl", "-u", "incus", "--since", "1 minute ago", "-f", "--no-pager", "-o", "short-iso")
 	var stderr bytes.Buffer
@@ -85,21 +85,33 @@ func Stream(parent context.Context, name string, emit func(string)) {
 	}
 
 	if ctx.Err() == nil {
-		send("Incus journal 采集结束；继续等待 QEMU 日志")
+		send("Incus journal 采集结束；继续等待实例日志")
 		<-ctx.Done()
 	}
 }
 
-func followQemuLog(ctx context.Context, name string, send func(string)) {
-	followQemuLogFile(ctx, filepath.Join("/var/log/incus", name, "qemu.log"), send)
+func followInstanceLogs(ctx context.Context, name string, send func(string)) {
+	var workers sync.WaitGroup
+	for _, source := range []string{"qemu", "lxc", "forklxc"} {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			followInstanceLogFile(ctx, filepath.Join("/var/log/incus", name, source+".log"), source, send)
+		}()
+	}
+	workers.Wait()
 }
 
 func followQemuLogFile(ctx context.Context, path string, send func(string)) {
+	followInstanceLogFile(ctx, path, "qemu", send)
+}
+
+func followInstanceLogFile(ctx context.Context, path, source string, send func(string)) {
 	var offset int64
-	ticker := time.NewTicker(2 * time.Second)
+	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
 	reportedError := false
-	for {
+	readAvailable := func() {
 		file, err := os.Open(path)
 		if err == nil {
 			info, statErr := file.Stat()
@@ -110,31 +122,37 @@ func followQemuLogFile(ctx context.Context, path string, send func(string)) {
 				// Bound reads even if a VM generates huge logs. Do not keep file descriptors across rotation.
 				if info.Size()-offset > 64*1024 {
 					offset = info.Size() - 64*1024
-					send("[qemu] 日志较大，仅采集最近 64 KiB")
+					send("[" + source + "] 日志较大，仅采集最近 64 KiB")
 				}
 
 				_, _ = file.Seek(offset, io.SeekStart)
 				data, readErr := io.ReadAll(io.LimitReader(file, 64*1024))
 				offset += int64(len(data))
 				if readErr != nil {
-					send("QEMU 日志读取失败: " + readErr.Error())
+					send(source + " 日志读取失败: " + readErr.Error())
 				}
 
 				for _, line := range strings.Split(string(data), "\n") {
 					if line != "" {
-						send("[qemu] " + line)
+						send("[" + source + "] " + line)
 					}
 				}
+			} else {
+				send(source + " 日志状态读取失败: " + statErr.Error())
 			}
 
 			_ = file.Close()
 		} else if !os.IsNotExist(err) && !reportedError {
 			reportedError = true
-			send(fmt.Sprintf("QEMU 日志不可读: %v", err))
+			send(fmt.Sprintf("%s 日志不可读: %v", source, err))
 		}
-
+	}
+	for {
+		readAvailable()
 		select {
 		case <-ctx.Done():
+			// Fast failed starts may write their only useful error immediately before task cancellation.
+			readAvailable()
 			return
 		case <-ticker.C:
 		}

@@ -91,6 +91,10 @@ if [[ "${2:-}" == --update ]]; then
   exit 0
 fi
 apt-get install -y "$stage/$package"
+if command -v systemctl >/dev/null && systemctl is-active --quiet incus; then
+  echo '软件包已安装；正在运行的 Incus 尚未由本安装器重启，新二进制和 ID 映射可能未生效。'
+  echo '请在维护窗口进入 TUI：更新 → 应用已安装更新（无需下载）。Incus 重启可能停止实例。'
+fi
 if [[ "${2:-}" == --no-tui ]]; then exit 0; fi
 if ! ( : </dev/tty ) 2>/dev/null; then
   echo 'Installation complete. Run sudo incus-tui in an interactive terminal.'

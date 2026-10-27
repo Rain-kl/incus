@@ -68,7 +68,7 @@ Architecture: $arch
 Section: admin
 Priority: optional
 Maintainer: PayIncus maintainers <noreply@payincus.com>
-Depends: $shlibs, adduser, ca-certificates, iproute2, rsync, attr, tar, squashfs-tools, xz-utils, nftables, iptables, dnsmasq-base, uidmap, passwd, python3, systemd
+Depends: $shlibs, liblxc-common, adduser, ca-certificates, iproute2, rsync, attr, tar, squashfs-tools, xz-utils, nftables, iptables, dnsmasq-base, uidmap, passwd, python3, systemd
 Recommends: virtiofsd
 Provides: incus, incus-base, incus-client
 Conflicts: incus, incus-base, incus-client

@@ -48,24 +48,32 @@ func (b *backend) updateServiceState(ctx context.Context, unit string) (updateSe
 	return updateServiceState{active: values["ActiveState"] == "active", enabled: values["UnitFileState"]}, nil
 }
 
-// PayIncus: package selection and SHA256 checks share the installer shipped with this package.
-func (b *backend) updateNode(ctx context.Context, channel string) (err error) {
-	name := updateChannelName(channel)
-	if name == "" {
-		return fmt.Errorf("不支持的更新渠道 %q", channel)
-	}
+func (b *backend) lockNodeUpdate() (*os.File, error) {
 	lockPath := b.updateLockPath
 	if lockPath == "" {
 		lockPath = "/run/lock/incus-tui-update.lock"
 	}
 	lock, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
-		return fmt.Errorf("打开节点更新锁失败：%w", err)
+		return nil, fmt.Errorf("打开节点更新锁失败：%w", err)
 	}
 	err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 	if err != nil {
 		closeErr := lock.Close()
-		return fmt.Errorf("无法独占更新锁 %s；请检查其它更新任务：%w", lockPath, errors.Join(err, closeErr))
+		return nil, fmt.Errorf("无法独占更新锁 %s；请检查其它更新任务：%w", lockPath, errors.Join(err, closeErr))
+	}
+	return lock, nil
+}
+
+// PayIncus: package selection and SHA256 checks share the installer shipped with this package.
+func (b *backend) updateNode(ctx context.Context, channel string) (err error) {
+	name := updateChannelName(channel)
+	if name == "" {
+		return fmt.Errorf("不支持的更新渠道 %q", channel)
+	}
+	lock, err := b.lockNodeUpdate()
+	if err != nil {
+		return err
 	}
 	defer func() { err = errors.Join(err, lock.Close()) }()
 	states := map[string]updateServiceState{}
@@ -93,13 +101,17 @@ func (b *backend) updateNode(ctx context.Context, channel string) (err error) {
 		return fmt.Errorf("软件包安装后读取 TUI 版本失败：%w", err)
 	}
 	logOperation(ctx, "已安装：%s", strings.TrimSpace(string(installed)))
+	return b.restartUpdatedServices(ctx, states)
+}
+
+func (b *backend) restartUpdatedServices(ctx context.Context, states map[string]updateServiceState) error {
 	for _, unit := range []string{"incus", "incudal-agent"} {
 		if !states[unit].active {
 			logOperation(ctx, "%s 原本未运行，保持停止状态", unit)
 			continue
 		}
 		logOperation(ctx, "重启原本运行的服务：%s", unit)
-		err = b.service(ctx, unit, "restart")
+		err := b.service(ctx, unit, "restart")
 		if err != nil {
 			return fmt.Errorf("软件包已安装，但 %s 重启失败：%w", unit, err)
 		}
@@ -119,7 +131,7 @@ func (b *backend) updateNode(ctx context.Context, channel string) (err error) {
 			return fmt.Errorf("更新后 %s 服务状态与更新前不一致（运行=%t，启用=%s），请检查 systemd 日志", unit, state.active, state.enabled)
 		}
 	}
-	logOperation(ctx, "节点更新完成，服务启用状态保持不变，正在重新打开新版 TUI")
+	logOperation(ctx, "节点更新已应用，服务启用状态保持不变，正在重新打开新版 TUI")
 	return nil
 }
 
@@ -131,10 +143,10 @@ func (b *backend) waitUpdatedNode(ctx context.Context) error {
 		if err == nil {
 			return nil
 		}
-		logOperation(ctx, "等待新版节点 API：%v", err)
+		logOperation(ctx, "等待节点 API：%v", err)
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("%w；最后错误：%w", ctx.Err(), err)
+			return fmt.Errorf("等待节点 API 就绪超时或取消：%w；最后错误：%w", ctx.Err(), err)
 		case <-time.After(time.Second):
 		}
 	}
@@ -145,7 +157,12 @@ func nodeUpdateCommand(b *backend, channel string) tea.Cmd {
 	ctx := context.WithValue(context.Background(), operationLogKey{}, b.logs)
 	return func() tea.Msg {
 		logOperation(ctx, "节点更新开始")
-		err := b.updateNode(ctx, channel)
+		var err error
+		if channel == "installed" {
+			err = b.applyInstalledUpdate(ctx)
+		} else {
+			err = b.updateNode(ctx, channel)
+		}
 		if err != nil {
 			logOperation(ctx, "节点更新失败：%v", err)
 		}

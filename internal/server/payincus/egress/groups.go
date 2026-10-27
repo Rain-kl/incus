@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -255,7 +256,7 @@ func protectGroupPool(ctx context.Context, all map[string]groupRuntime) error {
 
 func ensureGroupCore(ctx context.Context, group EgressGroup, g groupRuntime, resolvers []string) error {
 	if !Available() {
-		return fmt.Errorf("xray")
+		return fmt.Errorf("embedded Xray payload is unavailable for this architecture")
 	}
 
 	previousResolver, _ := os.ReadFile(filepath.Join("/etc/netns", g.ns(), "resolv.conf"))
@@ -336,12 +337,46 @@ func ensureGroupCore(ctx context.Context, group EgressGroup, g groupRuntime, res
 func groupHealthy(ctx context.Context, group EgressGroup, g groupRuntime) bool {
 	exe, err := workerExecutable()
 	if err != nil {
+		log.Printf("[egress] group %s health worker unavailable: %v", group.Key, err)
 		return false
 	}
 
-	out, err := networkCommand(ctx, "ip", "netns", "exec", g.ns(), exe, "-network-probe-port", "21000", "-network-probe-url", group.Egress.ProbeURL).Output()
-	var result ProbeResult
-	return err == nil && json.Unmarshal(out, &result) == nil && result.Success
+	return retryGroupHealth(ctx, func() bool {
+		out, err := networkCommand(ctx, "ip", "netns", "exec", g.ns(), exe, "-network-probe-port", "21000", "-network-probe-url", group.Egress.ProbeURL).Output()
+		var result ProbeResult
+		if err != nil {
+			log.Printf("[egress] group %s health worker failed: %v", group.Key, err)
+			return false
+		}
+		if err := json.Unmarshal(out, &result); err != nil {
+			log.Printf("[egress] group %s health worker response invalid: %v", group.Key, err)
+			return false
+		}
+		if !result.Success {
+			log.Printf("[egress] group %s health probe failed: %s", group.Key, result.Error)
+		}
+		return result.Success
+	})
+}
+
+// systemctl restart returns before Xray is ready to accept and route traffic.
+// Keep the group blocked while retrying; never allow direct fallback.
+func retryGroupHealth(ctx context.Context, probe func() bool) bool {
+	for {
+		if ctx.Err() != nil {
+			return false
+		}
+		if probe() {
+			return true
+		}
+		timer := time.NewTimer(300 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return false
+		case <-timer.C:
+		}
+	}
 }
 
 func groupHash(group EgressGroup) string {
@@ -503,6 +538,7 @@ func (m *Manager) reconcileGroups(ctx context.Context, in Instruction, inv inven
 			{
 				e := ensureGroupCore(groupCtx, group, g, resolvers)
 				if e != nil {
+					log.Printf("[egress] group %s core setup failed: %v", group.Key, e)
 					result.state.State = "error"
 					result.state.Error = "xray"
 					return

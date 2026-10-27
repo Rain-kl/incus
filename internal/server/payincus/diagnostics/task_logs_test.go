@@ -83,3 +83,50 @@ func TestJournalInstanceBoundary(t *testing.T) {
 		t.Fatal("missing matching log")
 	}
 }
+
+func TestLXCLogDrainsLastFailureWhenTaskEnds(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lxc.log")
+	err := os.WriteFile(path, []byte("starting\n"), 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	lines := make(chan string, 8)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		followInstanceLogFile(ctx, path, "lxc", func(line string) { lines <- line })
+	}()
+	select {
+	case line := <-lines:
+		if line != "[lxc] starting" {
+			t.Fatal(line)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("LXC log did not start")
+	}
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = file.WriteString("Failed to access lxc/rootfs\n")
+	_ = file.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("LXC log collector did not stop")
+	}
+	select {
+	case line := <-lines:
+		if line != "[lxc] Failed to access lxc/rootfs" {
+			t.Fatal(line)
+		}
+	default:
+		t.Fatal("task cancellation lost the actual LXC failure")
+	}
+}

@@ -106,6 +106,19 @@ func (b *backend) service(ctx context.Context, unit, action string) error {
 	return err
 }
 
+// PayIncus: Type=simple becoming active does not mean that the Unix API is ready.
+func (b *backend) manageService(ctx context.Context, unit, action string) error {
+	err := b.service(ctx, unit, action)
+	if err != nil {
+		return err
+	}
+	if unit == "incus" && (action == "start" || action == "restart" || action == "enable") {
+		logOperation(ctx, "Incus 服务命令已完成，等待节点 API 就绪")
+		return b.waitUpdatedNode(ctx)
+	}
+	return nil
+}
+
 func (b *backend) connectorReady(ctx context.Context) error {
 	output, err := b.run(ctx, "systemctl", "show", "incudal-agent", "--property=ExecStart", "--value")
 	if err != nil {
@@ -165,6 +178,12 @@ func (b *backend) status(ctx context.Context) string {
 		}
 	} else {
 		lines = append(lines, "节点 API: 可连接")
+	}
+	pending, pendingErr := b.installedUpdatePending(ctx)
+	if pendingErr != nil {
+		lines = append(lines, "运行版本检查失败："+pendingErr.Error())
+	} else if pending {
+		lines = append(lines, "待应用更新：Incus 仍运行已被替换的旧二进制，ID 映射等启动配置可能未生效。请在维护窗口选择“更新 → 应用已安装更新（无需下载）”。")
 	}
 	data, err = b.run(ctx, "/usr/bin/incus", "query", "/1.0")
 	var identity struct {

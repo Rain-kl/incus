@@ -38,7 +38,7 @@ def evaluate_publish_condition(node, github):
 class InstallerTests(unittest.TestCase):
     def run_installer(self, channel='canary', target='debian-13', arch='amd64', damage=False,
                       missing=False, bad_url=False, distro=None, draft=False, wrong_channel=False,
-                      mode='--no-tui', apt_failure=False):
+                      mode='--no-tui', apt_failure=False, service_active=False):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             binary = root / 'bin'
@@ -84,13 +84,15 @@ if '--allow-downgrades' in sys.argv and os.environ.get('NEEDRESTART_MODE') != 'l
     sys.exit(102)
 ''',
                 'dpkg': "import os\nprint(os.environ['TEST_ARCH'])\n",
+                'systemctl': "import os,sys\nassert sys.argv[1:] == ['is-active', '--quiet', 'incus']\nsys.exit(0 if os.environ['TEST_SERVICE_ACTIVE'] == '1' else 3)\n",
             }
             for name_, source in mocks.items():
                 path = binary / name_
                 path.write_text(f'#!{sys.executable}\n' + source)
                 path.chmod(0o755)
             env = {**os.environ, 'PATH': f'{binary}:' + os.environ['PATH'], 'FIXTURE': str(root), 'TEST_ARCH': arch,
-                   'TEST_APT_FAILURE': '1' if apt_failure else '0'}
+                   'TEST_APT_FAILURE': '1' if apt_failure else '0',
+                   'TEST_SERVICE_ACTIVE': '1' if service_active else '0'}
             result = subprocess.run(['bash', str(root/'install.sh'), channel, mode],
                                     env=env, text=True, capture_output=True, timeout=15)
             log = (root / 'apt.log').read_text() if (root / 'apt.log').exists() else ''
@@ -133,6 +135,15 @@ if '--allow-downgrades' in sys.argv and os.environ.get('NEEDRESTART_MODE') != 'l
                 result, log = self.run_installer(mode='--update', **kwargs)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(log, '')
+
+    def test_normal_install_warns_running_node_needs_apply(self):
+        result, _ = self.run_installer(service_active=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('应用已安装更新（无需下载）', result.stdout)
+        self.assertIn('尚未由本安装器重启', result.stdout)
+        result, _ = self.run_installer(service_active=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('尚未由本安装器重启', result.stdout)
 
     def test_publish_gate_allows_trusted_manual_canary_builds(self):
         workflow = Path(__file__).resolve().parents[2] / '.github/workflows/payincus-publish.yml'

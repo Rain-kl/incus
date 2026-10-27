@@ -385,6 +385,9 @@ func TestConnectorPreflightAndConnection(t *testing.T) {
 func TestStatusCapabilityAndFailure(t *testing.T) {
 	for _, body := range []string{`{"api_extensions":["payincus_node_v1"]}`, `{"api_extensions":[]}`, `{"api_extensions":"payincus_node_v1"}`, `{}`} {
 		f := &fakeRunner{reply: func(c call) ([]byte, error) {
+			if c.name == "systemctl" && reflect.DeepEqual(c.args, []string{"show", "incus", "--property=MainPID", "--value"}) {
+				return []byte("0\n"), nil
+			}
 			if c.name == "systemctl" {
 				return []byte("ActiveState=active\nSubState=running"), nil
 			}
@@ -404,7 +407,7 @@ func TestStatusCapabilityAndFailure(t *testing.T) {
 		if !strings.Contains(result, strings.Repeat("a", 64)) {
 			t.Fatal("node identity missing")
 		}
-		if len(f.calls) != 5 || !strings.Contains(result, "NAT 网桥：缺失或配置不匹配") {
+		if len(f.calls) != 6 || !strings.Contains(result, "NAT 网桥：缺失或配置不匹配") {
 			t.Fatal("status contract missing")
 		}
 	}
