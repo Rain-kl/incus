@@ -423,6 +423,8 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 }
 
 func cleanText(value string) string {
+	// PayIncus: strip the whole terminal sequence before removing individual control characters.
+	value = ansi.Strip(value)
 	return strings.Map(func(r rune) rune {
 		if r == '\n' || (r >= 32 && r != 127 && (r < 0x80 || r > 0x9f)) {
 			return r

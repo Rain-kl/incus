@@ -161,7 +161,7 @@ func (b *backend) prepareZFS(ctx context.Context) error {
 	}
 	_, err = b.run(ctx, "apt-get", packages...)
 	if err != nil {
-		return fmt.Errorf("ZFS 依赖安装失败，请检查 contrib 软件源和当前内核 headers：%w", err)
+		return fmt.Errorf("ZFS 依赖安装失败（APT/DKMS 原始输出见操作日志）：%w", err)
 	}
 	_, err = b.run(ctx, "modprobe", "zfs")
 	if err != nil {

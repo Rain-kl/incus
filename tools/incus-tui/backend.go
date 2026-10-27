@@ -32,11 +32,20 @@ type Runner interface {
 type commandRunner struct{}
 
 func (commandRunner) Run(ctx context.Context, name string, args []string, input string) ([]byte, error) {
+	// PayIncus: package frontends must not open a second terminal UI inside operation logs.
+	packageCommand := filepath.Base(name) == "apt-get"
+	if packageCommand {
+		args = append([]string{"-o", "Dpkg::Use-Pty=0", "-o", "Dpkg::Progress-Fancy=0"}, args...)
+	}
 	logOperation(ctx, "$ %s %s", name, strings.Join(args, " "))
 	if name == "/usr/bin/incus" {
 		return runIncusAdapter(ctx, args, input)
 	}
 	cmd := exec.CommandContext(ctx, name, args...)
+	if packageCommand {
+		cmd.Env = append(cmd.Environ(), "DEBIAN_FRONTEND=noninteractive", "DEBIAN_PRIORITY=critical", "APT_LISTCHANGES_FRONTEND=text", "NEEDRESTART_MODE=l", "TERM=dumb")
+		logOperation(ctx, "软件包安装使用非交互配置；采用包默认答案，needrestart 仅列出待重启服务；保留全部 stdout/stderr")
+	}
 	cmd.WaitDelay = 3 * time.Second
 	cmd.Stdin = strings.NewReader(input)
 	var output bytes.Buffer
