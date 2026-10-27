@@ -1,15 +1,38 @@
 #!/usr/bin/env python3
 """Run the actual installer with fixture OS metadata, GitHub transport and apt."""
+import ast
 import hashlib
+import itertools
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 
 SCRIPT = Path(__file__).with_name('install.sh').read_text()
+
+
+def evaluate_publish_condition(node, github):
+    """Evaluate only boolean comparisons from the actual workflow job gate."""
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, ast.Name) and node.id == 'github':
+        return github
+    if isinstance(node, ast.Attribute) and not node.attr.startswith('_'):
+        return getattr(evaluate_publish_condition(node.value, github), node.attr)
+    if isinstance(node, ast.BoolOp):
+        values = [evaluate_publish_condition(value, github) for value in node.values]
+        if isinstance(node.op, ast.And):
+            return all(values)
+        if isinstance(node.op, ast.Or):
+            return any(values)
+    if isinstance(node, ast.Compare) and len(node.ops) == 1 and isinstance(node.ops[0], ast.Eq):
+        return evaluate_publish_condition(node.left, github) == evaluate_publish_condition(node.comparators[0], github)
+    raise AssertionError(f'Unsupported publish condition: {ast.dump(node)}')
 
 
 class InstallerTests(unittest.TestCase):
@@ -78,6 +101,25 @@ with (Path(os.environ['FIXTURE'])/'apt.log').open('a') as f: f.write(' '.join(sy
                 result, log = self.run_installer(**kwargs)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(log, '', result.stdout + result.stderr)
+
+    def test_publish_gate_allows_trusted_manual_canary_builds(self):
+        workflow = Path(__file__).resolve().parents[2] / '.github/workflows/payincus-publish.yml'
+        match = re.search(r'\n    if: >-\n((?:      .+\n)+)', workflow.read_text())
+        self.assertIsNotNone(match, 'Missing integration publish job gate')
+        expression = ' '.join(match[1].split()).replace('&&', ' and ').replace('||', ' or ')
+        condition = ast.parse(expression, mode='eval').body
+        cases = itertools.product(
+            ('push', 'workflow_dispatch', 'pull_request', 'pull_request_target', 'schedule'),
+            ('success', 'failure', 'cancelled'), ('canary', 'main', 'payincus-v7.0.2'),
+            ('Rain-kl/incus', 'untrusted/fork'))
+        for event, conclusion, branch, repository in cases:
+            with self.subTest(event=event, conclusion=conclusion, branch=branch, repository=repository):
+                run = SimpleNamespace(event=event, conclusion=conclusion, head_branch=branch,
+                                      head_repository=SimpleNamespace(full_name=repository))
+                github = SimpleNamespace(repository='Rain-kl/incus', event=SimpleNamespace(workflow_run=run))
+                expected = (event in ('push', 'workflow_dispatch') and conclusion == 'success'
+                            and branch == 'canary' and repository == 'Rain-kl/incus')
+                self.assertEqual(evaluate_publish_condition(condition, github), expected)
 
 
 if __name__ == '__main__':
