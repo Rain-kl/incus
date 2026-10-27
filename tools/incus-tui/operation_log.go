@@ -76,6 +76,9 @@ func (l *operationLog) secret(value string) {
 
 func secretField(key string) bool {
 	key = strings.ToLower(key)
+	if key == "user.user-data" || key == "user.vendor-data" || key == "cloud-init.user-data" || key == "cloud-init.vendor-data" {
+		return true
+	}
 	return key == "key" || key == "authorization" || strings.Contains(key, "secret") || strings.Contains(key, "password") || strings.Contains(key, "token") || strings.Contains(key, "cookie")
 }
 

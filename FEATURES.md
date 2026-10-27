@@ -141,13 +141,15 @@ CI 权限隔离：daemon 测试先由普通 runner 编译测试程序，再以 r
 - `latest` 只接受正式 `payincus-vX.Y.Z` release，`canary` 只接受集成 prerelease；无包、错误平台、无校验文件、校验失败均不安装，不跨渠道或回退旧包。canary 搜索最近 100 个 release。旧发布的通用包名不再被新安装器选中。
 - 包名增加 `linux-<ID>-<VERSION_ID>-<arch>`，manifest 新增 `targetDistribution`、实际 channel，Debian 13 使用 Debian 原生依赖构建及安装验证。稳定 tag `payincus-v7.0.2` 发布稳定版并标 latest，RC 继续 prerelease，canary 仍只发布已验证 push 的唯一集成 tag；上游基线仍为官方 v7.0.2 LTS，不改为普通功能版。
 - TUI 提供 Panel 凭据配置及一次性 token 兑换、原子 0600 配置保存、连接服务启动、服务生命周期、实时 journal、固定基础初始化、mTLS 公钥证书指纹确认及本地隧道监听。仅写入确认过的配置，不运行旧 Agent 安装器，不在终端或错误信息显示 token/密钥；已有旧连接服务覆盖时在兑换前停止并给出诊断。
-- 一键初始化只面向全新非集群节点：dir 存储、IPv4 NAT 网桥、default profile；拒绝覆盖已有资源，失败不自动删除资源，部分写入需人工检查。内核、KVM、AppArmor、外层嵌套权限及 UID/GID 映射不由安装器/TUI 自动修改。Agent 在线与实例管理的 mTLS 验证分开。
+- 一键初始化面向无实例的非集群节点：dir 存储、固定 IPv4 NAT 网桥、default profile；相匹配的 default(dir)/incusbr0/基础 profile 可以复用以继续未完成的初始化，其它资源拒绝覆盖。失败不自动删除资源。内核、KVM、AppArmor、外层嵌套权限及 UID/GID 映射不由安装器/TUI 自动修改。Agent 在线与实例管理的 mTLS 验证分开。
 - 仅调整本 fork 自有 `deploy/payincus/incus.service`，改为 `network.target`，避免 DNS wait-online 阻塞本地 daemon；连接器的网络等待保持原有行为。包安装仍不自动启动/重启服务，避免升级时直接影响运行中的节点。
 
 ### 操作诊断与自选 HTTP 连接（2026-10-27）
 
 - 目的：解决一键初始化将原始 Incus 错误替换为“本机服务内部错误”、成功命令输出不可见和退出后日志消失的问题。`tools/incus-tui/{operation_log,backend,local_api,main,zfs}.go` 在普通终端屏幕持续打印全部 stdout/stderr、API 方法/路径/状态及完整响应，同时写入 `/var/log/incus-tui/session-*.log`（目录 0700、文件 0600）。不截断长行；日志不能写入时在终端明确报错。凭据字段、一次性 token、Agent 密钥及本次提交的 ZFS 密钥遮蔽，其他故障诊断保留。
 - HTTP 错误保留 Incus error envelope；异步 operation 保留原始 `err` 与状态码；传输、取消、ZFS 命令及文件操作错误保留原始原因。仍拒绝覆盖已有资源，初始化部分失败后不自动删除存储池或网桥。Ctrl+C 在操作中取消并等待日志收尾，空闲时退出。
+- 启动和操作结束后的自动状态检查只更新界面状态摘要（含证书指纹与检查错误），不输出命令/API 诊断，也不写入操作日志；主动选择“刷新状态”及其它新操作仍完整打印并保存本次输出。接入点仅为 `tools/incus-tui/main.go` 的刷新调度，不改变服务、Incus API 或错误返回契约，无新增配置。
+- 2026-10-27 静默启动验证：TUI module 的 `go test -race ./...`、`go vet ./...`、Linux arm64 构建及控制仓库 `make check` 通过。`debian-test` 已替换为 `b3c523812079+local-quiet-startup`；真实 PTY 验证启动显示摘要/证书且操作日志为空，主动刷新完整记录命令/API，查看 ZFS 池时保留当前未安装 zpool 的原始错误，随后的自动状态刷新不追加诊断。未改变节点服务或存储；旧二进制备份为 `/var/backups/incus-tui/incus-tui-before-quiet-startup-20261027`。
 - Panel 根地址允许用户自行选择 HTTP 或 HTTPS，包括非回环地址；不额外要求 TLS。保留 URL 结构校验、一次性 token 语义和禁止凭据兑换重定向。连接器的 HTTP/HTTPS 契约不变，无新增配置键或数据库格式。
 - 上游接口仍为已记录的 7.0.2 LTS 原生 API 与 `payincus_node_v1`，没有上游源码接入点变更。后续同步核对 error envelope、operation `status_code/err` 和 Bubble Tea 普通屏幕输出行为。
 - 验证：`go test -race ./...`（独立 TUI module）通过；`local_api_test.go/TestLocalAPIPreservesErrorsAndFullLogs` 覆盖 HTTP/异步失败与取消原因；`operation_log_test.go` 覆盖实时 stdout/stderr、退出码、128 KB 长行、密钥遮蔽和非回环 HTTP。OrbStack 真机与二进制替换结果另行记录，不以单元测试代替真实初始化成功。
@@ -155,12 +157,22 @@ CI 权限隔离：daemon 测试先由普通 runner 编译测试程序，再以 r
 
 ### 一次性 token 接入与菜单收敛（2026-10-27）
 
-- 主菜单收敛为初始化、一次性 token 接入、ZFS 管理、高级维护、刷新和退出。七项 ZFS 操作保留在 ZFS 管理子菜单；手填凭据、手动证书导入、本地监听修复及服务/日志管理移到高级维护。子菜单 Esc/q 返回主菜单，操作结束仍留在所属分组；原有危险操作确认与密钥保护保持。
+- 主菜单收敛为初始化、一次性 token 接入、ZFS 管理、修复、高级维护、刷新和退出。七项 ZFS 操作保留在 ZFS 管理子菜单；手填凭据、手动证书导入、本地监听修复及服务/日志管理移到高级维护。子菜单 Esc/q 返回主菜单，操作结束仍留在所属分组；原有危险操作确认与密钥保护保持。
 - `tools/incus-tui/enrollment.go` 在确认后检查连接器 unit，启用 Incus 并最多等待一分钟 API 就绪，再校验已有监听；随后单次兑换 token、校验证书 SHA256 与有效期、保留既有信任并幂等导入 Panel 公钥证书、设置回环监听、原子保存 0600 凭据、启用并重启连接器。预检查失败不消费 token；后续失败保留原始错误和成功步骤，不自动重复兑换。接入不覆盖已有其它监听、不删除已有信任或存储，存储初始化仍为独立操作。
 - 控制端 `GET /api/agent/install-config/:token?format=json` 返回 schemaVersion=1、连接凭据、Panel 公钥证书和指纹；服务端在消费 token 前校验证书就绪，不分发私钥。证书路径与 Incus 验证连接共享来源。无 format 的旧文本响应仍兼容旧版 TUI；新版完整接入需要配套控制端 JSON 契约。HTTP/HTTPS 继续由管理员选择，兑换禁止重定向。
 - Bubble Tea v1 延迟的 OSC 颜色响应在输入层识别为终端协议数据，不能写入 Panel 地址或 token；普通 Esc 行为保留。入口为 `main.go`，不修改第三方模块或上游 Incus 源码。
 - 验证：独立 TUI module 的 `go test -race ./...`、`go vet ./...` 和 Linux arm64 编译通过；`enrollment_test.go` 覆盖完整步骤、已有证书、各阶段失败、预检查不消费 token、真实本地控制端协议；`main_test.go` 覆盖 OSC 回复隔离。配套控制端类型检查、证书/安装/响应脱敏/路由 ID 守卫及根目录 make check 通过。全局管理路由守卫在未修改的 admin-tasks.ts/egress.ts 上存在既有失败，未按本轮修复完成计入。
 - OrbStack `debian-test` 已本地替换并真实 PTY 验证版本 `2a8c290cdc00+local-enrollment`、token 确认页、ZFS/高级维护子菜单、返回及 OSC 输入隔离；测试未消费实际节点 token。旧 TUI 备份于 `/var/backups/incus-tui/incus-tui-02fc62644b01-20261027`。这是本地替换，尚未把该二进制发布为 GitHub canary 包。
+
+### 基础网络初始化与“修复 → 修复网桥”（2026-10-27）
+
+- 原因与修正：安装脚本只交接 TUI，旧 token 接入不检查 NAT 网络；旧初始化逐步写入资源，失败后又拒绝一切已有资源，且 `ipv4.address=auto` 与面板固定地址池不一致。`tools/incus-tui/{backend,local_api,network_setup,enrollment}.go` 改为 `incusbr0=10.10.0.1/22`、IPv4 NAT/DHCP；基础初始化先检查/创建桥，再创建或复用 default(dir)，最后补齐 profile。匹配的部分结果可重试；其它池、其它 profile 配置、已有实例和集群不被基础初始化覆盖。token 兑换前检查网络：缺失才创建，已有不兼容网络明确要求修复，不消费 token。不自动初始化存储。启动摘要同时显示桥是否就绪，自动检查保持静默。
+- 新菜单在确认后调用独立 `tools/incus-tui/network_repair.go`。清点所有项目实例/profile，仅处理引用 incusbr0 的 NIC 和没有 NIC 的 LXC；先在 `/var/lib/incus-tui/repairs/bridge-*/state.json` 保存原网络、原配置、地址计划及阶段（目录 0700、文件 0600），再正常停止原本运行的持久 LXC，临时改为不引用网桥的 p2p NIC，删除旧桥、重建受管 NAT 网络、恢复 profile/NIC，最后只启动原本运行的容器。临时 NIC 保持接口名与 MAC，避免仅因解绑网桥触发 cloud-init 重跑。磁盘、根设备、其它 NIC、限速、profile 配置保持；共享 profile 的静态租约改为容器各自持有。
+- 保留有效且唯一的 IPv4，缺失时优先保留运行中地址；仅缺失/冲突/不属于新网段的地址从 10.10.1.1—10.10.3.254 分配。变更时同步该容器的 Incus proxy connect 地址和已有 cloud-init network-config 的地址/网关。需要重新应用 cloud-init 网络配置时 Incus 会重置 cloud-init instance-id，来宾启动行为由镜像决定；不编辑来宾手工维护的网络文件。控制端心跳不会改写 IPAM 登记，地址变更映射会完整输出并保存，管理员须核对面板地址记录。修复前需在面板暂停节点上的新实例交付，TUI 不代替面板事务锁。
+- 保留受管桥原有其它配置（含已配置 IPv6）；IPv4 网段改变时移除不适配的旧 DHCP 动态范围。非托管同名 Linux bridge 仅在端口均可确认为目标容器、停机解绑后端口为空时用无 shell 的 `ip link delete` 删除；拒绝物理上联网卡、外部接口/FAN、集群、VM 占用、运行中的 ephemeral 实例及未知 profile 引用。存在网络级 forward 时在停止容器前拒绝，避免删除规则；本轮不迁移这些规则。
+- Incus 接口仍为正式 7.0.2 LTS：`GET /1.0` 探测 `profiles_all_projects/instance_all_projects`，跨项目 `GET /instances`、`GET /profiles`，`GET/PATCH /instances/:name?project=` 与 `/profiles/:name?project=`，`PUT /instances/:name/state?project=`、`GET/POST/DELETE /networks`、可用时 `GET /networks/incusbr0/forwards`。写回前重读并使用 ETag，异步等待与错误继续由 `local_api.go` 集中处理。无上游源码修改、数据库迁移或新依赖。修复失败/取消保留原始错误、失败阶段、备份及已完成变更，不继续自动启动；没有宣称自动回滚。重试前先按备份检查残留配置，不盲目丢弃备份。
+- 测试：`network_setup_test.go` 覆盖各阶段部分失败后重试、不重复创建、固定网段、已有网络不被接入覆盖；`enrollment_test.go` 验证网络预检查失败不消费 token。`network_repair_test.go` 使用隔离 HTTP 服务执行真实请求，覆盖跨项目、继承 NIC、IP/MAC/根盘保留、冲突分配、proxy/cloud-init 地址变更、缺失/非托管桥、外部端口拒绝、766 地址池耗尽、备份权限、取消与原始错误保留、菜单确认。按 owner 要求，本轮不在 debian-test 执行修复，也不替换程序；隔离 API 测试不作为真实内核/来宾联网验收。
+- 验证结果：独立 TUI module 的 `go test -race ./...`、`go vet ./...`、Linux arm64/amd64 编译，安装器隔离测试 `python3 scripts/payincus/test-install.py` 及控制仓库 `make check` 均通过。未发布或执行本轮真实节点修复；真实桥设备、来宾网络重新配置及停止/启动的验收仍需在 owner 指定的独立验证步骤完成。
 
 ### 上游/API 接入与测试
 

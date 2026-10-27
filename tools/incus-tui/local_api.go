@@ -51,7 +51,7 @@ func (c *localClient) call(ctx context.Context, method, path string, input any) 
 		return nil, err
 	}
 	request.Header.Set("Content-Type", "application/json")
-	if method == "PUT" && c.etags != nil && c.etags[path] != "" {
+	if (method == "PUT" || method == "PATCH" || method == "DELETE") && c.etags != nil && c.etags[path] != "" {
 		request.Header.Set("If-Match", c.etags[path])
 	}
 	response, err := c.http.Do(request)
@@ -150,34 +150,14 @@ func (c *localClient) runAdapter(ctx context.Context, args []string, input strin
 	if len(args) == 2 && args[0] == "query" {
 		return c.call(ctx, "GET", args[1], nil)
 	}
+	if len(args) == 2 && args[0] == "network" && args[1] == "ensure-panel-bridge" {
+		return nil, c.ensurePanelNetwork(ctx)
+	}
 	if len(args) == 3 && args[0] == "admin" && args[1] == "init" && args[2] == "--preseed" {
 		if input != preseed {
 			return nil, errors.New("不支持的初始化配置")
 		}
-		_, err := c.call(ctx, "POST", "/1.0/storage-pools", map[string]any{"name": "default", "driver": "dir", "config": map[string]string{}})
-		if err != nil {
-			return nil, err
-		}
-		_, err = c.call(ctx, "POST", "/1.0/networks", map[string]any{"name": "incusbr0", "type": "bridge", "config": map[string]string{"ipv4.address": "auto", "ipv4.nat": "true", "ipv6.address": "none"}})
-		if err != nil {
-			return nil, err
-		}
-		profile, err := c.call(ctx, "GET", "/1.0/profiles/default", nil)
-		if err != nil {
-			return nil, err
-		}
-		var current struct {
-			Config  map[string]string `json:"config"`
-			Devices map[string]any    `json:"devices"`
-		}
-		err = json.Unmarshal(profile, &current)
-		if err != nil {
-			return nil, fmt.Errorf("解析默认 profile：%w", err)
-		}
-		if current.Config == nil || current.Devices == nil || len(current.Config) > 0 || len(current.Devices) > 0 {
-			return nil, errors.New("默认 profile 已变化，拒绝覆盖")
-		}
-		return c.call(ctx, "PUT", "/1.0/profiles/default", map[string]any{"config": map[string]string{}, "devices": map[string]any{"root": map[string]string{"type": "disk", "path": "/", "pool": "default"}, "eth0": map[string]string{"type": "nic", "name": "eth0", "network": "incusbr0"}}})
+		return c.initializeNode(ctx)
 	}
 	if len(args) >= 3 && args[0] == "config" {
 		if args[1] == "get" && len(args) == 3 {

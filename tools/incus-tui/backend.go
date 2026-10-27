@@ -168,6 +168,27 @@ func (b *backend) status(ctx context.Context) string {
 	if err == nil && regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(identity.Environment.Fingerprint) {
 		lines = append(lines, "节点证书 SHA256（控制端核对）："+identity.Environment.Fingerprint)
 	}
+	data, err = b.run(ctx, "/usr/bin/incus", "query", "/1.0/networks?recursion=1")
+	if err != nil {
+		lines = append(lines, "NAT 网桥检查失败："+err.Error())
+	} else {
+		var networks []nodeNetwork
+		if json.Unmarshal(data, &networks) != nil || networks == nil {
+			lines = append(lines, "NAT 网桥：网络列表格式不兼容")
+		} else {
+			ready := false
+			for _, network := range networks {
+				if network.Name == panelBridge && compatiblePanelNetwork(&network) {
+					ready = true
+				}
+			}
+			if ready {
+				lines = append(lines, "NAT 网桥：incusbr0 · 10.10.0.1/22 · 就绪")
+			} else {
+				lines = append(lines, "NAT 网桥：缺失或配置不匹配，请使用“修复 → 修复网桥”")
+			}
+		}
+	}
 	return strings.Join(lines, "\n")
 }
 
@@ -333,7 +354,7 @@ networks:
 - name: incusbr0
   type: bridge
   config:
-    ipv4.address: auto
+    ipv4.address: 10.10.0.1/22
     ipv4.nat: "true"
     ipv6.address: none
 storage_pools:
@@ -400,7 +421,19 @@ func (b *backend) initialize(ctx context.Context) error {
 			return fmt.Errorf("Incus %s 响应格式不兼容", path)
 		}
 		if len(entries) != 0 {
-			return errors.New("已有存储池或实例，拒绝覆盖；请使用 incus admin init 手动管理")
+			if path != "/1.0/storage-pools" || len(entries) != 1 || entries[0] != "/1.0/storage-pools/default" {
+				return errors.New("已有其它存储池或实例，拒绝基础初始化；网络缺失请使用“修复 → 修复网桥”")
+			}
+			data, queryErr = b.run(ctx, "/usr/bin/incus", "query", entries[0])
+			if queryErr != nil {
+				return queryErr
+			}
+			var pool struct {
+				Driver string `json:"driver"`
+			}
+			if json.Unmarshal(data, &pool) != nil || pool.Driver != "dir" {
+				return errors.New("已有 default 存储池不是 dir，拒绝基础初始化")
+			}
 		}
 	}
 	data, err := b.run(ctx, "/usr/bin/incus", "query", "/1.0/networks?recursion=1")
@@ -408,8 +441,10 @@ func (b *backend) initialize(ctx context.Context) error {
 		return err
 	}
 	var networks []struct {
-		Name    string `json:"name"`
-		Managed *bool  `json:"managed"`
+		Name    string            `json:"name"`
+		Managed *bool             `json:"managed"`
+		Type    string            `json:"type"`
+		Config  map[string]string `json:"config"`
 	}
 	err = json.Unmarshal(data, &networks)
 	if err != nil {
@@ -422,8 +457,10 @@ func (b *backend) initialize(ctx context.Context) error {
 		if network.Managed == nil || network.Name == "" {
 			return errors.New("Incus 网络响应缺少必要字段")
 		}
-		if *network.Managed || network.Name == "incusbr0" {
-			return errors.New("已有托管网络或 incusbr0，拒绝覆盖")
+		if *network.Managed || network.Name == panelBridge {
+			if !compatiblePanelNetwork(&nodeNetwork{Name: network.Name, Managed: *network.Managed, Type: network.Type, Config: network.Config}) || network.Name != panelBridge {
+				return errors.New("已有其它网络或不匹配的 incusbr0，拒绝覆盖；请使用“修复 → 修复网桥”")
+			}
 		}
 	}
 	data, err = b.run(ctx, "/usr/bin/incus", "query", "/1.0/profiles/default")
@@ -441,13 +478,13 @@ func (b *backend) initialize(ctx context.Context) error {
 	if profile.Config == nil || profile.Devices == nil {
 		return errors.New("Incus profile 响应格式不兼容")
 	}
-	if len(profile.Config) != 0 || len(profile.Devices) != 0 {
+	if !compatibleInitialProfile(profile.Config, profile.Devices) {
 		return errors.New("default profile 已有配置，拒绝覆盖")
 	}
 	logOperation(ctx, "初始化配置：\n%s", preseed)
 	_, err = b.runner.Run(ctx, "/usr/bin/incus", []string{"--force-local", "admin", "init", "--preseed"}, preseed)
 	if err != nil {
-		return fmt.Errorf("初始化失败，可能已有部分资源，请手动检查后再操作：%w", err)
+		return fmt.Errorf("初始化失败，已完成步骤保留；基础资源匹配时可重试，已有实例请使用“修复 → 修复网桥”：%w", err)
 	}
 	return nil
 }

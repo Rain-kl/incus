@@ -391,6 +391,9 @@ func TestStatusCapabilityAndFailure(t *testing.T) {
 			if reflect.DeepEqual(c.args, []string{"query", "/1.0"}) {
 				return []byte(`{"environment":{"certificate_fingerprint":"` + strings.Repeat("a", 64) + `"}}`), nil
 			}
+			if reflect.DeepEqual(c.args, []string{"query", "/1.0/networks?recursion=1"}) {
+				return []byte(`[]`), nil
+			}
 			return []byte(body), nil
 		}}
 		result := (&backend{runner: f}).status(context.Background())
@@ -401,7 +404,7 @@ func TestStatusCapabilityAndFailure(t *testing.T) {
 		if !strings.Contains(result, strings.Repeat("a", 64)) {
 			t.Fatal("node identity missing")
 		}
-		if len(f.calls) != 4 {
+		if len(f.calls) != 5 || !strings.Contains(result, "NAT 网桥：缺失或配置不匹配") {
 			t.Fatal("status contract missing")
 		}
 	}

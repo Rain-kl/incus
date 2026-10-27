@@ -111,7 +111,7 @@ func TestEnrollmentCompletesAllStepsAndPreservesTrust(t *testing.T) {
 }
 
 func TestEnrollmentPreflightAndStageFailures(t *testing.T) {
-	for _, failure := range []string{"preflight", "trust", "listener", "enable", "restart"} {
+	for _, failure := range []string{"preflight", "network", "trust", "listener", "enable", "restart"} {
 		payload, _, _ := enrollmentFixture(t, goodConnection())
 		requests := 0
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { requests++; _, _ = w.Write([]byte(payload)) }))
@@ -123,6 +123,9 @@ func TestEnrollmentPreflightAndStageFailures(t *testing.T) {
 			}
 			if failure == "preflight" && strings.HasPrefix(args, "config get") {
 				return []byte("[::]:8443"), nil
+			}
+			if failure == "network" && args == "network ensure-panel-bridge" {
+				return nil, failureCause
 			}
 			if strings.HasPrefix(args, "query /1.0/certificates") {
 				if failure == "trust" {
@@ -143,7 +146,7 @@ func TestEnrollmentPreflightAndStageFailures(t *testing.T) {
 		if err == nil || (failure != "preflight" && !errors.Is(err, failureCause)) {
 			t.Fatalf("stage failure swallowed: %s: %v", failure, err)
 		}
-		if (failure == "preflight" && requests != 0) || requests > 1 {
+		if ((failure == "preflight" || failure == "network") && requests != 0) || requests > 1 {
 			t.Fatal("preflight consumed token or token request was retried")
 		}
 		if failure == "trust" || failure == "listener" {
@@ -160,7 +163,7 @@ func TestMenuGroupsKeepMaintenanceAndZFSOffHome(t *testing.T) {
 	if strings.Contains(root, "导入 Panel 客户端证书") || strings.Contains(root, "安装并检查 ZFS") || !strings.Contains(root, "ZFS 管理") || !strings.Contains(root, "高级维护") {
 		t.Fatal("home menu was not consolidated")
 	}
-	for _, group := range []string{"zfs", "advanced"} {
+	for _, group := range []string{"zfs", "advanced", "repair"} {
 		for i, item := range menu {
 			if item.action == group {
 				m.cursor = i

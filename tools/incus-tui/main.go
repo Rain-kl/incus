@@ -52,6 +52,7 @@ var menu = []menuItem{
 	{"一键初始化", "initialize"},
 	{"面板接入", "token"},
 	{"ZFS 管理", "zfs"},
+	{"修复", "repair"},
 	{"高级维护", "advanced"},
 	{"刷新状态", "refresh"},
 	{"退出", "quit"},
@@ -65,6 +66,11 @@ var advancedMenu = []menuItem{
 	{"连接器服务管理", "incudal-agent"},
 	{"查看 Incus 实时日志", "incus-journal"},
 	{"查看连接器实时日志", "connector-journal"},
+	{"返回主菜单", "back"},
+}
+
+var repairMenu = []menuItem{
+	{"修复网桥", "repair-bridge"},
 	{"返回主菜单", "back"},
 }
 
@@ -85,6 +91,8 @@ func (m model) currentMenu() []menuItem {
 		return advancedMenu
 	case "zfs":
 		return zfsManagementMenu
+	case "repair":
+		return repairMenu
 	default:
 		return menu
 	}
@@ -107,12 +115,15 @@ func (m *model) backToMenu() {
 	m.confirm = nil
 }
 
-func (m model) Init() tea.Cmd { return m.refresh() }
-func (m model) refresh() tea.Cmd {
+func (m model) Init() tea.Cmd { return m.refresh(false) }
+func (m model) refresh(showLogs bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 		defer cancel()
-		ctx = context.WithValue(ctx, operationLogKey{}, m.backend.logs)
+		// PayIncus: automatic status checks update the summary without operation output.
+		if showLogs {
+			ctx = context.WithValue(ctx, operationLogKey{}, m.backend.logs)
+		}
 		return statusMsg(m.backend.status(ctx))
 	}
 }
@@ -151,7 +162,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.message = "操作失败：" + m.backend.logs.redact(msg.err.Error())
 		}
-		return m, m.refresh()
+		return m, m.refresh(false)
 	case tea.KeyMsg:
 		// PayIncus: delayed terminal color reports are protocol replies, never form input.
 		if msg.Type == tea.KeyRunes && msg.Alt && string(msg.Runes) == "]" {
@@ -270,15 +281,19 @@ func (m model) selectMenu() (tea.Model, tea.Cmd) {
 		return m.zfsMenu(action)
 	}
 	switch action {
-	case "zfs", "advanced":
+	case "zfs", "advanced", "repair":
 		m.menuGroup = action
 		m.cursor = 0
 	case "back":
 		m.backToMenu()
 	case "initialize":
 		m.page = "confirm"
-		m.message = "为全新节点启用 Incus，创建 default(dir)、incusbr0(IPv4 NAT，禁用 IPv6)，配置 default profile。已有资源将拒绝自动初始化。"
+		m.message = "启用 Incus，创建 default(dir)、incusbr0(10.10.0.1/22 NAT，禁用 IPv6)，补齐 default profile。匹配的基础资源可复用，已有实例或其它配置时拒绝覆盖。"
 		m.confirm = m.backend.initialize
+	case "repair-bridge":
+		m.page = "confirm"
+		m.message = "请先在面板开启节点维护，暂停创建实例。修复 incusbr0：备份配置，停止受影响的持久 LXC，删除旧网桥并重建 10.10.0.1/22 NAT 网络，恢复网卡及原运行状态。保留有效 IP，仅重新分配缺失/冲突地址；会中断网络。集群、VM 占用或运行中的临时容器将拒绝自动修复。"
+		m.confirm = m.backend.repairBridge
 	case "credentials":
 		c := m.backend.loadConnection()
 		m.page = "credentials"
@@ -309,7 +324,7 @@ func (m model) selectMenu() (tea.Model, tea.Cmd) {
 		}
 		return m, tea.ExecProcess(cmd, func(err error) tea.Msg { return resultMsg{text: "日志查看已结束", err: err} })
 	case "refresh":
-		return m, m.refresh()
+		return m, m.refresh(true)
 	case "quit":
 		return m, tea.Quit
 	}
@@ -436,6 +451,8 @@ func (m model) render() string {
 			out.WriteString("高级维护\n\n")
 		} else if m.menuGroup == "zfs" {
 			out.WriteString("ZFS 管理\n\n")
+		} else if m.menuGroup == "repair" {
+			out.WriteString("修复\n\n")
 		}
 		last := min(first+visible, len(items))
 		for i := first; i < last; i++ {
@@ -462,7 +479,7 @@ func initialModel(b *backend) model {
 	if panel != "" && token != "" {
 		_ = os.Unsetenv("INCUDAL_PANEL_URL")
 		m.page = "token"
-		m.message = "请确认面板地址和一次性 token。确认后自动配置凭据、证书信任、本地监听并启动连接器；节点存储初始化可在主菜单完成。"
+		m.message = "请确认面板地址和一次性 token。确认后检查并补建 NAT 网桥，配置凭据、证书信任、本地监听并启动连接器；节点存储初始化可在主菜单完成。"
 		m.fields = []field{{label: "Panel 根地址", value: panel}, {label: "一次性安装 token（ait_，只使用一次）", value: token, secret: true}}
 	}
 	return m

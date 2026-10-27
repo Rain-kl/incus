@@ -44,6 +44,10 @@ func TestLocalAdapterQueryInitAndAsyncContract(t *testing.T) {
 	wait := 0
 	c := apiFixture(t, func(w http.ResponseWriter, r *http.Request) {
 		calls = append(calls, r.Method+" "+r.URL.RequestURI())
+		if r.Method == "GET" && (r.URL.Path == "/1.0/storage-pools" || r.URL.Path == "/1.0/networks") {
+			syncJSON(w, []any{})
+			return
+		}
 		if r.URL.Path == "/1.0/operations/op/wait" {
 			wait++
 			code := 105
@@ -66,6 +70,12 @@ func TestLocalAdapterQueryInitAndAsyncContract(t *testing.T) {
 			if r.URL.Path == "/1.0/storage-pools" && data["driver"] != "dir" {
 				t.Error("unexpected default driver")
 			}
+			if r.URL.Path == "/1.0/networks" {
+				config, _ := data["config"].(map[string]any)
+				if config["ipv4.address"] != panelGateway || config["ipv4.nat"] != "true" {
+					t.Error("initialization must use the panel IPv4 pool, never a random subnet")
+				}
+			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"type": "async", "operation": "/1.0/operations/op"})
 			return
 		}
@@ -78,7 +88,7 @@ func TestLocalAdapterQueryInitAndAsyncContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	expected := []string{"POST /1.0/storage-pools", "GET /1.0/operations/op/wait?timeout=30", "GET /1.0/operations/op/wait?timeout=30", "POST /1.0/networks", "GET /1.0/operations/op/wait?timeout=30", "GET /1.0/profiles/default", "PUT /1.0/profiles/default"}
+	expected := []string{"GET /1.0/storage-pools", "GET /1.0/profiles/default", "GET /1.0/networks?recursion=1", "POST /1.0/networks", "GET /1.0/operations/op/wait?timeout=30", "GET /1.0/operations/op/wait?timeout=30", "POST /1.0/storage-pools", "GET /1.0/operations/op/wait?timeout=30", "PUT /1.0/profiles/default"}
 	if !reflect.DeepEqual(calls, expected) {
 		t.Fatal(calls)
 	}

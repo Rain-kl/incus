@@ -22,6 +22,11 @@ func (b *backend) enroll(ctx context.Context, panel, token string) error {
 	if err != nil {
 		return err
 	}
+	logOperation(ctx, "检查 NAT 网桥与固定 IPv4 地址池，缺失时创建")
+	_, err = b.run(ctx, "/usr/bin/incus", "network", "ensure-panel-bridge")
+	if err != nil {
+		return fmt.Errorf("面板接入网络预检查失败，尚未兑换 token：%w", err)
+	}
 
 	logOperation(ctx, "[2/5] 兑换一次性 token 与 Panel 公钥证书")
 	config, err := b.exchange(ctx, panel, token)
