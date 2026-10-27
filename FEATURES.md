@@ -153,6 +153,15 @@ CI 权限隔离：daemon 测试先由普通 runner 编译测试程序，再以 r
 - 验证：`go test -race ./...`（独立 TUI module）通过；`local_api_test.go/TestLocalAPIPreservesErrorsAndFullLogs` 覆盖 HTTP/异步失败与取消原因；`operation_log_test.go` 覆盖实时 stdout/stderr、退出码、128 KB 长行、密钥遮蔽和非回环 HTTP。OrbStack 真机与二进制替换结果另行记录，不以单元测试代替真实初始化成功。
 - 本地 OrbStack Debian 13 arm64 真机已验证：新 TUI 正常启动、完整命令/API 日志持续输出并保存，`http://100.75.147.95:3000` 可进入凭据兑换确认页（取消确认，未消费实际 token）。`go vet ./...` 与 Linux arm64 编译通过，安装版本为 `02fc62644b01+local-diagnostics`，旧 TUI 备份在 `/var/backups/incus-tui/incus-tui-02fc62644b01`。未重启 Incus/连接器，未宣称已完成节点初始化；虚拟机现有 default 存储池和空 profile 保留。
 
+### 一次性 token 接入与菜单收敛（2026-10-27）
+
+- 主菜单收敛为初始化、一次性 token 接入、ZFS 管理、高级维护、刷新和退出。七项 ZFS 操作保留在 ZFS 管理子菜单；手填凭据、手动证书导入、本地监听修复及服务/日志管理移到高级维护。子菜单 Esc/q 返回主菜单，操作结束仍留在所属分组；原有危险操作确认与密钥保护保持。
+- `tools/incus-tui/enrollment.go` 在确认后检查连接器 unit，启用 Incus 并最多等待一分钟 API 就绪，再校验已有监听；随后单次兑换 token、校验证书 SHA256 与有效期、保留既有信任并幂等导入 Panel 公钥证书、设置回环监听、原子保存 0600 凭据、启用并重启连接器。预检查失败不消费 token；后续失败保留原始错误和成功步骤，不自动重复兑换。接入不覆盖已有其它监听、不删除已有信任或存储，存储初始化仍为独立操作。
+- 控制端 `GET /api/agent/install-config/:token?format=json` 返回 schemaVersion=1、连接凭据、Panel 公钥证书和指纹；服务端在消费 token 前校验证书就绪，不分发私钥。证书路径与 Incus 验证连接共享来源。无 format 的旧文本响应仍兼容旧版 TUI；新版完整接入需要配套控制端 JSON 契约。HTTP/HTTPS 继续由管理员选择，兑换禁止重定向。
+- Bubble Tea v1 延迟的 OSC 颜色响应在输入层识别为终端协议数据，不能写入 Panel 地址或 token；普通 Esc 行为保留。入口为 `main.go`，不修改第三方模块或上游 Incus 源码。
+- 验证：独立 TUI module 的 `go test -race ./...`、`go vet ./...` 和 Linux arm64 编译通过；`enrollment_test.go` 覆盖完整步骤、已有证书、各阶段失败、预检查不消费 token、真实本地控制端协议；`main_test.go` 覆盖 OSC 回复隔离。配套控制端类型检查、证书/安装/响应脱敏/路由 ID 守卫及根目录 make check 通过。全局管理路由守卫在未修改的 admin-tasks.ts/egress.ts 上存在既有失败，未按本轮修复完成计入。
+- OrbStack `debian-test` 已本地替换并真实 PTY 验证版本 `2a8c290cdc00+local-enrollment`、token 确认页、ZFS/高级维护子菜单、返回及 OSC 输入隔离；测试未消费实际节点 token。旧 TUI 备份于 `/var/backups/incus-tui/incus-tui-02fc62644b01-20261027`。这是本地替换，尚未把该二进制发布为 GitHub canary 包。
+
 ### 上游/API 接入与测试
 
 该轮功能没有新增上游源码修改。其本地 CLI 接线在下文 2026-10-26 节点功能中已改为集中 Unix API 适配；管理员默认 remote 不参与本地操作。子进程无 shell 拼接，可取消。HTTP 兑换 20 秒超时，禁止重定向、限制响应大小、不自动重试一次性 token。
@@ -210,7 +219,9 @@ CI 权限隔离：daemon 测试先由普通 runner 编译测试程序，再以 r
 
 ### TUI ZFS 管理与本地 API 适配
 
-- 入口 `tools/incus-tui/{zfs,local_api}.go`。Debian 13 安装 zfsutils-linux/zfs-dkms/匹配内核 headers/util-linux，在标准 deb822 源添加 contrib 前独占备份原文件并保留 URI/签名配置；自定义 sources.list 由管理员配置。Ubuntu 24.04 优先系统模块，缺失时补 DKMS/headers。失败保留诊断，不绕过 Secure Boot 或更换内核。
+- 入口 `tools/incus-tui/{zfs,local_api}.go`。Debian 13 在标准 deb822 源添加 contrib 前独占备份原文件并保留 URI/签名配置；自定义 sources.list 由管理员配置。Debian 13 / Ubuntu 24.04 均先检测运行内核已有的 ZFS 模块与 `/lib/modules/<kernel>/build/Makefile`：模块可用时只补用户态工具、util-linux 和 kmod，模块缺失才安装 DKMS。已有匹配 headers 不重复安装；否则先用 APT 查询准确 headers 包，缺失则在安装前停止并保留内核版本及原始错误，不盲目安装拼出的包名。不绕过 Secure Boot 或更换内核。
+- OrbStack 定制内核的 headers 通常不在 Debian APT 源；`/sys/kernel/kheaders.tar.xz` 的存在不等于已具备 DKMS 所需的匹配构建目录。TUI 不自动解包或尝试不受 OrbStack 正式支持的自定义模块构建。没有现成 ZFS 模块和构建环境时明确提示需管理员准备环境或使用标准内核虚拟机；不宣称 ZFS 初始化成功。本次仅修改独立 TUI 模块，无上游 API、配置格式或 daemon 接入点变化。
+- 2026-10-27 验证：独立 TUI module 的 `go test -race ./...`、`go vet ./...`、Linux arm64 构建及控制仓库 `make check` 通过。已替换 `debian-test` 的 `/usr/bin/incus-tui` 为 `2a8c290cdc00+local-zfs-preflight`，前一版本备份到 `/var/backups/incus-tui/incus-tui-before-zfs-preflight-20261027`。真实 PTY 从 ZFS 菜单执行依赖检查，准确报告 OrbStack 内核缺少模块和匹配 headers，保留 APT 原始错误，未执行软件包安装；完整日志 `/var/log/incus-tui/session-20261027-124821-3370806038.log` 权限 0600。未创建池、加载自定义模块或更换内核；没有将环境限制当作 ZFS 成功验收。
 - 显式确认后创建专用磁盘/分区池，或预分配测试文件池；拒绝已有文件系统/挂载，不使用 zpool `-f`，不自动挑盘。文件池不是生产推荐，失败时保留预分配文件供检查。池、加密根、Incus 绑定分步执行；默认一键初始化仍是 DIR，不自动迁移或修改已有实例配置。
 - 创建加密根时在专用 TUI 页展示随机密钥，后续确认页不重复展示；解除存储时隐藏输入。TUI 状态提供本地 API 返回的服务端证书 SHA256，管理员通过可信终端核对后保存控制端。终端/剪贴板由管理员管理。
 - TUI 的生产实现已改为 Unix socket API 适配，避免管理动作误触 CLI 诱捕。保留原 Runner fixture 接口；集中处理 ETag、原生请求、异步 Pending/Running/Success/Failure、格式错误与取消，不盲目重试写操作。此前安装器/TUI 记录中的 CLI 接线由此适配层替代。
@@ -225,7 +236,7 @@ CI 权限隔离：daemon 测试先由普通 runner 编译测试程序，再以 r
 | `/1.0/payincus` 子路径原生路由 | `cmd/incusd/payincus_test.go/TestPayIncusAuthenticatedRoute`：实际 daemon 子路由、扩展能力和未认证拒绝；修复此前 ServeMux 缺少末尾斜线子树导致子路由 404 的问题 |
 | Agent HMAC 上报 | `internal/server/payincus/panel/client_test.go/TestSecurityReportSignedContract`：规范路径/请求体签名、ACK、错误与取消；控制端报告验证/事务/去重测试 |
 | TUI 原生 `/1.0`、storage-pools、networks、profiles/default、certificates、operations/*/wait | `tools/incus-tui/local_api_test.go`：真实 LTS JSON、请求/ETag、Pending 到 Success、失败/异步错误/取消/格式变化；现有 `backend_test.go` 保留不覆盖已有资源等回归 |
-| TUI ZFS 安装、确认、池创建及指纹展示 | 同文件与 `backend_test.go`：发行版、APT 备份、内核依赖、模块失败回退、危险请求拒绝、密钥只读展示/确认/隐藏 |
+| TUI ZFS 安装、确认、池创建及指纹展示 | 同文件、`backend_test.go` 与 `zfs_test.go`：发行版、APT 备份、已加载/压缩模块、已有 headers、APT headers 查询、缺失依赖安装前拒绝及原始错误保留、危险请求拒绝、密钥只读展示/确认/隐藏 |
 
 必要上游修改仅为：`cmd/incus/{main,main_aliases}.go` 的执行前观察；`cmd/incusd/daemon.go` 的认证后检查/启动前锁定/密钥请求禁用 debug body 捕获；`cmd/incusd/instances.go` 的启动任务检查；`internal/server/instance/drivers/driver_lxc.go` 的启动围栏；ZFS `driver_zfs.go` 的 Mount 和 `driver_zfs_volumes.go` 的 MountVolume 检查。各处保留 PayIncus 注释。上游 LTS 同步必须复核授权顺序、停止内部回调方法/路径、Start 签名与失败清理、池挂载重试、API JSON/ETag/异步 operation 及别名执行顺序，避免恢复时重放旧启动任务。安全模块和 TUI 独立文件承担实现；不修改上游数据库格式或依赖模块。
 

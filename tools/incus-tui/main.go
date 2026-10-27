@@ -33,6 +33,7 @@ type (
 		cursor, focus         int
 		page, message, status string
 		menuGroup             string
+		readingOSC            bool
 		fields                []field
 		busy                  bool
 		confirm               func(context.Context) error
@@ -48,8 +49,8 @@ type menuItem struct {
 }
 
 var menu = []menuItem{
-	{"一键初始化 Incus（dir 存储 + NAT 网桥）", "initialize"},
-	{"使用一次性 token 接入面板", "token"},
+	{"一键初始化", "initialize"},
+	{"面板接入", "token"},
 	{"ZFS 管理", "zfs"},
 	{"高级维护", "advanced"},
 	{"刷新状态", "refresh"},
@@ -152,6 +153,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.refresh()
 	case tea.KeyMsg:
+		// PayIncus: delayed terminal color reports are protocol replies, never form input.
+		if msg.Type == tea.KeyRunes && msg.Alt && string(msg.Runes) == "]" {
+			m.readingOSC = true
+			return m, nil
+		}
+		if m.readingOSC {
+			if msg.Type == tea.KeyCtrlG || msg.Type == tea.KeyEsc || (msg.Type == tea.KeyRunes && msg.Alt && string(msg.Runes) == "\\") {
+				m.readingOSC = false
+			}
+			return m, nil
+		}
 		if msg.String() == "ctrl+c" {
 			if m.cancel != nil {
 				m.cancel()
@@ -342,7 +354,7 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.confirm = func(ctx context.Context) error { return m.backend.enroll(ctx, values[0], values[1]) }
-		m.message = "使用一次性 token 接入所填面板：兑换凭据、导入面板公钥证书、配置本地监听 127.0.0.1:8443，保存配置并启动连接器。token 将被消费，已有其他监听地址将拒绝覆盖。"
+		m.message = "使用一次性 token 接入所填面板：启用 Incus 并等待 API，兑换凭据、导入面板公钥证书、配置本地监听 127.0.0.1:8443，保存配置并启动连接器。token 将被消费，已有其他监听地址将拒绝覆盖。"
 	case "certificate":
 		if !strings.HasPrefix(values[0], "/") {
 			m.message = "请输入绝对路径"

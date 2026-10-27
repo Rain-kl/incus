@@ -110,3 +110,24 @@ func TestInstallerTokenPrefillIsMaskedAndRemovedFromEnvironment(t *testing.T) {
 		t.Fatal("token was exposed or inherited")
 	}
 }
+
+func TestTerminalColorReplyCannotPollutePanelAddress(t *testing.T) {
+	address := "http://100.75.147.95:3000"
+	m := model{backend: &backend{runner: &fakeRunner{}}, page: "token", fields: []field{{label: "Panel", value: address}}}
+	for _, key := range []tea.KeyMsg{
+		{Type: tea.KeyRunes, Alt: true, Runes: []rune{']'}},
+		{Type: tea.KeyRunes, Runes: []rune("11;rgb:fefe/ffff/ffff")},
+		{Type: tea.KeyRunes, Alt: true, Runes: []rune{'\\'}},
+	} {
+		updated, _ := m.Update(key)
+		m = asModel(t, updated)
+	}
+	if m.fields[0].value != address || m.readingOSC {
+		t.Fatal("terminal protocol response entered the form")
+	}
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = asModel(t, updated)
+	if m.page != "" {
+		t.Fatal("ordinary Escape no longer returns to the menu")
+	}
+}

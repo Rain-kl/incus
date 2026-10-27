@@ -4,12 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 )
 
 // PayIncus: complete enrollment through one token and preserve existing Incus trust entries.
 func (b *backend) enroll(ctx context.Context, panel, token string) error {
-	logOperation(ctx, "[1/5] 检查连接器服务和本地监听")
+	logOperation(ctx, "[1/5] 检查连接器、启动 Incus 并等待本地 API")
 	err := b.connectorReady(ctx)
+	if err != nil {
+		return err
+	}
+	err = b.ensureIncusReady(ctx)
 	if err != nil {
 		return err
 	}
@@ -51,6 +56,27 @@ func (b *backend) enroll(ctx context.Context, panel, token string) error {
 	}
 	logOperation(ctx, "面板接入配置完成，连接器已启动；可在面板验证节点连接")
 	return nil
+}
+
+func (b *backend) ensureIncusReady(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+	err := b.service(ctx, "incus", "enable")
+	if err != nil {
+		return err
+	}
+	for {
+		_, err = b.run(ctx, "/usr/bin/incus", "query", "/1.0")
+		if err == nil {
+			return nil
+		}
+		logOperation(ctx, "等待 Incus API 就绪：%v", err)
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("等待 Incus API：%w；最后错误：%v", ctx.Err(), err)
+		case <-time.After(time.Second):
+		}
+	}
 }
 
 func (b *backend) ensureTrust(ctx context.Context, certificate []byte, fingerprint string) error {

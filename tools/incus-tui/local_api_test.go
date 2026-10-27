@@ -230,9 +230,12 @@ func TestZFSDependencyInstallationContracts(t *testing.T) {
 		if c.name == "uname" {
 			return []byte("6.12-fixture\n"), nil
 		}
+		if c.name == "apt-cache" {
+			return []byte("Package: linux-headers-6.12-fixture\n"), nil
+		}
 		return nil, nil
 	}}
-	b := &backend{runner: f, releasePath: release, sourcePath: source}
+	b := &backend{runner: f, releasePath: release, sourcePath: source, modulesPath: filepath.Join(dir, "modules"), sysModulesPath: filepath.Join(dir, "sys-module")}
 	{
 		err := b.prepareZFS(context.Background())
 		if err != nil {
@@ -266,16 +269,16 @@ func TestZFSDependencyInstallationContracts(t *testing.T) {
 		}
 		if c.name == "modprobe" {
 			moduleCalls++
-			if moduleCalls == 1 {
-				return nil, errors.New("missing module")
-			}
+		}
+		if c.name == "apt-cache" {
+			return []byte("Package: linux-headers-6.8-fixture\n"), nil
 		}
 		return nil, nil
 	}
 	{
 		err := b.prepareZFS(context.Background())
-		if err != nil || moduleCalls != 2 {
-			t.Fatal("Ubuntu module fallback failed", err)
+		if err != nil || moduleCalls != 1 {
+			t.Fatal("Ubuntu DKMS dependency check failed", err)
 		}
 	}
 	if os.WriteFile(release, []byte("ID=debian\nVERSION_ID=12\n"), 0o600) != nil {

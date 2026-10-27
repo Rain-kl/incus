@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -18,6 +19,49 @@ import (
 )
 
 var poolPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{0,39}$`)
+
+// PayIncus: DKMS needs headers for the running kernel, which may not be a distro kernel.
+func (b *backend) zfsKernelPrerequisites(ctx context.Context, kernel string) (bool, bool, error) {
+	modules := b.modulesPath
+	if modules == "" {
+		modules = "/lib/modules"
+	}
+	sysModules := b.sysModulesPath
+	if sysModules == "" {
+		sysModules = "/sys/module"
+	}
+	_, err := os.Stat(filepath.Join(sysModules, "zfs"))
+	loaded := err == nil
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, false, err
+	}
+	_, err = os.Stat(filepath.Join(modules, kernel, "build", "Makefile"))
+	headers := err == nil
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, false, err
+	}
+	if loaded {
+		return true, headers, nil
+	}
+	available := false
+	err = filepath.WalkDir(filepath.Join(modules, kernel), func(_ string, entry fs.DirEntry, walkErr error) error {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if walkErr != nil {
+			return walkErr
+		}
+		if !entry.IsDir() && (entry.Name() == "zfs.ko" || strings.HasPrefix(entry.Name(), "zfs.ko.")) {
+			available = true
+			return fs.SkipAll
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, false, fmt.Errorf("检查 ZFS 内核模块：%w", err)
+	}
+	return available, headers, nil
+}
 
 func (b *backend) prepareZFS(ctx context.Context) error {
 	releasePath := b.releasePath
@@ -40,6 +84,19 @@ func (b *backend) prepareZFS(ctx context.Context) error {
 	if !debian && !ubuntu {
 		return errors.New("仅支持 Debian 和 Ubuntu")
 	}
+	kernelOutput, err := b.run(ctx, "uname", "-r")
+	if err != nil {
+		return err
+	}
+	kernel := strings.TrimSpace(string(kernelOutput))
+	if kernel == "" || strings.ContainsAny(kernel, "/\\\n\r") {
+		return fmt.Errorf("无效的运行内核版本 %q", kernel)
+	}
+	moduleAvailable, headersAvailable, err := b.zfsKernelPrerequisites(ctx, kernel)
+	if err != nil {
+		return err
+	}
+	logOperation(ctx, "运行内核：%s；ZFS 模块可用：%t；已有匹配 headers：%t", kernel, moduleAvailable, headersAvailable)
 	if debian {
 		path := b.sourcePath
 		if path == "" {
@@ -83,29 +140,30 @@ func (b *backend) prepareZFS(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	packages := []string{"install", "-y", "--no-install-recommends", "zfsutils-linux", "util-linux"}
-	if debian {
-		kernel, err := b.run(ctx, "uname", "-r")
-		if err != nil {
-			return err
+	packages := []string{"install", "-y", "--no-install-recommends", "zfsutils-linux", "util-linux", "kmod"}
+	if !moduleAvailable {
+		packages = append(packages, "zfs-dkms")
+		if !headersAvailable {
+			headerPackage := "linux-headers-" + kernel
+			metadata, lookupErr := b.run(ctx, "apt-cache", "show", headerPackage)
+			if lookupErr == nil && !strings.Contains(string(metadata), "Package: "+headerPackage+"\n") {
+				lookupErr = fmt.Errorf("APT 未返回 %s 的软件包信息", headerPackage)
+			}
+			if lookupErr != nil {
+				environment := "请提供运行内核对应的 headers，或使用具备 ZFS 支持的标准内核虚拟机。"
+				if strings.Contains(kernel, "orbstack") {
+					environment = "当前为 OrbStack 管理的定制内核，Debian 通用 headers 不匹配；OrbStack 自定义模块构建不属正式支持范围，需自行准备匹配构建环境或使用标准内核虚拟机。"
+				}
+				return fmt.Errorf("运行内核 %s 没有可用的 ZFS 模块，且缺少匹配 headers。%s 本次未执行 ZFS 软件包安装。原始检查错误：%w", kernel, environment, lookupErr)
+			}
+			packages = append(packages, headerPackage)
 		}
-		packages = append(packages, "zfs-dkms", "linux-headers-"+strings.TrimSpace(string(kernel)))
 	}
 	_, err = b.run(ctx, "apt-get", packages...)
 	if err != nil {
 		return fmt.Errorf("ZFS 依赖安装失败，请检查 contrib 软件源和当前内核 headers：%w", err)
 	}
 	_, err = b.run(ctx, "modprobe", "zfs")
-	if err != nil && ubuntu {
-		kernel, kernelErr := b.run(ctx, "uname", "-r")
-		if kernelErr != nil {
-			return kernelErr
-		}
-		_, err = b.run(ctx, "apt-get", "install", "-y", "--no-install-recommends", "zfs-dkms", "linux-headers-"+strings.TrimSpace(string(kernel)))
-		if err == nil {
-			_, err = b.run(ctx, "modprobe", "zfs")
-		}
-	}
 	if err != nil {
 		return fmt.Errorf("ZFS 内核模块加载失败；未创建存储：%w", err)
 	}

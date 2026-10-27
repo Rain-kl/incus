@@ -40,10 +40,9 @@ sudo bash /tmp/incus-install.sh canary
 1. 执行 `sudo incus-tui`，选择“一键初始化”。确认后启用并启动 Incus，等待本地 API 就绪；为全新非集群节点创建 `default`（dir 驱动）和 `incusbr0`（自动 IPv4 + NAT、IPv6 禁用），给 default profile 添加根磁盘和 eth0。已有存储池、任意项目实例、托管网络、同名网桥或 default profile 配置时拒绝覆盖。
 
 TUI 的搭建、配置命令与本地 API 响应会完整实时输出到终端，并保存到界面显示的 `/var/log/incus-tui/session-*.log`。HTTP/异步 operation 失败保留原始错误；敏感凭据遮蔽，其他输出不截断。Panel 地址可使用 HTTP 或 HTTPS，由管理员自行选择；一次性凭据请求不跟随重定向。
-2. 在 Panel 创建或选择宿主机，启用 Agent，取得 `agt_` ID 和 `ias_` 密钥，或生成一次性 `ait_` token。TUI 可直接粘贴 token，不需要运行旧安装命令。此 token 通常 30 分钟有效且只能消费一次；不要粘贴整条 shell 安装命令。
-3. 选择配置 Panel 连接。根地址允许 HTTP 或 HTTPS，由管理员自行选择；密钥/token 输入掩码显示。确认后原子写入 `/etc/incudal-agent/config.yaml`（0600），启用并重启 `incudal-agent.service`。连接服务配置必须匹配软件包提供的 unit，不匹配时拒绝操作且不消费 token；不执行旧服务迁移。
-4. 如果使用反向隧道，在 Panel 启用隧道，目标为 `127.0.0.1:8443`；TUI 选择“设置反向隧道本地监听”。该操作不会覆盖已有其他 HTTPS 监听地址。
-5. 把 Panel 客户端的 PEM **公钥证书**放到节点，选择“导入 Panel 客户端证书”，核对 SHA256 指纹后确认。此证书将授予 Panel 节点管理权限；不导入私钥，不删除已有信任。证书和 Agent token 是不同用途，Agent 心跳在线不等于 mTLS 实例管理连接已验证。
+2. 在 Panel 创建或选择宿主机，生成一次性 `ait_` token。它通常在 30 分钟内有效且只能消费一次；粘贴 token 本身，不粘贴整条 shell 安装命令。
+3. 选择“使用一次性 token 接入面板”，确认 HTTP/HTTPS 根地址与 token。TUI 自动启动 Incus 并等待 API，就绪后兑换连接凭据和 Panel **公钥证书**、验证指纹、导入信任、设置 `127.0.0.1:8443` 回环监听、原子保存 `/etc/incudal-agent/config.yaml`（0600），再启用并重启连接器。既有其它监听不会被覆盖，既有证书不会被删除；不传输私钥。需要配套控制端的 JSON 接入响应。
+4. 在 Panel 验证节点连接。手填 ID/密钥、手动导入证书和监听检查/修复都位于“高级维护”，用于诊断和维护；正常 token 接入无需分别执行。Agent 心跳与 mTLS 管理连接仍是不同的验证证据。
 6. 在 Panel 验证宿主机连接。
 
 需要定制存储/ZFS/桥接网络/集群时，使用官方 `incus admin init`；TUI 的一键初始化是固定的基础配置，不自动迁移已有资源。dir 驱动的配额与快照能力有限，有存储配额需求时应选择经过验证的 ZFS/Btrfs 等方案。初始化失败可能留下部分资源，不会自动删除或盲目重试，请检查错误后手动处理。
@@ -56,7 +55,9 @@ Incus 本地服务仅依赖 `network.target`，不因 DNS 的 `wait-online` 超�
 
 ## 可选 ZFS 与节点管理
 
-默认初始化仍使用 DIR。运行 `incus-tui` 可显式安装 ZFS 依赖、创建专用磁盘或测试文件池、创建/注册 AES-256-GCM 子数据集并绑定到 Incus。不会自动挑盘、迁移或覆盖已有数据。Debian 13 标准 deb822 源补 contrib 前会备份原文件；特殊内核、Secure Boot 和自定义源需管理员处理。
+默认初始化仍使用 DIR。进入 `incus-tui` 的“ZFS 管理”子菜单，可安装检查依赖、创建专用磁盘或测试文件池、创建/注册加密数据集、解锁、绑定 Incus 和查看池状态。不会自动挑盘、迁移或覆盖已有数据。Debian 13 标准 deb822 源补 contrib 前会备份原文件；特殊内核、Secure Boot 和自定义源需管理员处理。
+
+依赖安装先检查运行内核的 ZFS 模块；已有模块时不安装 DKMS/headers。没有模块时，必须已有匹配内核的构建目录或 APT 中存在准确的 headers 包，否则停止并显示完整检查错误。OrbStack 使用定制内核，Debian 通用 headers 不能替代；其 `/sys/kernel/kheaders.tar.xz` 不是 TUI 已配置好的 DKMS 构建环境。TUI 不自动构建 OrbStack 自定义模块，也不更换内核；需管理员提供匹配环境或改用具备 ZFS 支持的标准内核虚拟机。限制说明：[OrbStack Linux machines](https://docs.orbstack.dev/machines/)。
 
 创建根之前，将 TUI 显示的随机 hex 密钥保存到配套控制端，复制 SHA256 指纹回 TUI 核对。节点不主动保存明文密钥文件；终端录屏、剪贴板、swap/core dump 仍由管理员管理。可信终端中的 TUI 状态区同时提供节点服务端证书 SHA256，控制端需先人工核对保存，才允许新的管理/发钥链路连接。
 

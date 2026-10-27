@@ -55,12 +55,14 @@ func (commandRunner) Run(ctx context.Context, name string, args []string, input 
 }
 
 type backend struct {
-	runner      Runner
-	path        string
-	client      *http.Client
-	releasePath string
-	sourcePath  string
-	logs        *operationLog
+	runner         Runner
+	path           string
+	client         *http.Client
+	releasePath    string
+	sourcePath     string
+	modulesPath    string
+	sysModulesPath string
+	logs           *operationLog
 }
 
 func newBackend() *backend {
