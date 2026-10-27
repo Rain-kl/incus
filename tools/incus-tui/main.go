@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -23,8 +24,9 @@ type field struct {
 	readonly     bool
 }
 type resultMsg struct {
-	text string
-	err  error
+	text       string
+	err        error
+	restartTUI bool
 }
 type (
 	statusMsg string
@@ -40,6 +42,9 @@ type (
 		cancel                context.CancelFunc
 		width                 int
 		height                int
+		updateChannel         string
+		updating              bool
+		relaunch              bool
 	}
 )
 
@@ -53,6 +58,7 @@ var menu = []menuItem{
 	{"面板接入", "token"},
 	{"ZFS 管理", "zfs"},
 	{"修复", "repair"},
+	{"更新", "update"},
 	{"高级维护", "advanced"},
 	{"刷新状态", "refresh"},
 	{"退出", "quit"},
@@ -71,6 +77,12 @@ var advancedMenu = []menuItem{
 
 var repairMenu = []menuItem{
 	{"修复网桥", "repair-bridge"},
+	{"返回主菜单", "back"},
+}
+
+var updateMenu = []menuItem{
+	{"开发版（canary）", "update-canary"},
+	{"稳定版（正式 Release）", "update-latest"},
 	{"返回主菜单", "back"},
 }
 
@@ -93,6 +105,8 @@ func (m model) currentMenu() []menuItem {
 		return zfsManagementMenu
 	case "repair":
 		return repairMenu
+	case "update":
+		return updateMenu
 	default:
 		return menu
 	}
@@ -113,6 +127,7 @@ func (m *model) backToMenu() {
 	m.message = ""
 	m.fields = nil
 	m.confirm = nil
+	m.updateChannel = ""
 }
 
 func (m model) Init() tea.Cmd { return m.refresh(false) }
@@ -150,6 +165,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case statusMsg:
 		m.status = string(msg)
 	case resultMsg:
+		m.updating = false
+		m.updateChannel = ""
+		if msg.restartTUI {
+			m.relaunch = true
+			return m, tea.Quit
+		}
 		if m.cancel != nil {
 			m.cancel()
 			m.cancel = nil
@@ -176,6 +197,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if msg.String() == "ctrl+c" {
+			if m.updating {
+				m.message = "正在更新软件包或重启服务，请勿中断；完整进度和错误会持续输出。"
+				return m, nil
+			}
 			if m.cancel != nil {
 				m.cancel()
 				m.message = "正在取消操作并保存日志…"
@@ -197,6 +222,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.page == "confirm" {
 			if msg.String() == "y" || msg.String() == "Y" {
 				m.busy = true
+				if m.updateChannel != "" {
+					m.updating = true
+					return m, nodeUpdateCommand(m.backend, m.updateChannel)
+				}
 				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 				ctx = context.WithValue(ctx, operationLogKey{}, m.backend.logs)
 				m.cancel = cancel
@@ -277,11 +306,12 @@ func (m model) selectMenu() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	action := items[m.cursor].action
+	m.updateChannel = ""
 	if strings.HasPrefix(action, "zfs-") || action == "zpool" {
 		return m.zfsMenu(action)
 	}
 	switch action {
-	case "zfs", "advanced", "repair":
+	case "zfs", "advanced", "repair", "update":
 		m.menuGroup = action
 		m.cursor = 0
 	case "back":
@@ -294,6 +324,10 @@ func (m model) selectMenu() (tea.Model, tea.Cmd) {
 		m.page = "confirm"
 		m.message = "请先在面板开启节点维护，暂停创建实例。修复 incusbr0：备份配置，停止受影响的持久 LXC，删除旧网桥并重建 10.10.0.1/22 NAT 网络，恢复网卡及原运行状态。保留有效 IP，仅重新分配缺失/冲突地址；会中断网络。集群、VM 占用或运行中的临时容器将拒绝自动修复。"
 		m.confirm = m.backend.repairBridge
+	case "update-canary", "update-latest":
+		m.updateChannel = strings.TrimPrefix(action, "update-")
+		m.page = "confirm"
+		m.message = "更新至" + updateChannelName(m.updateChannel) + "的最新 GitHub Release：下载并校验完整节点软件包，安装后自动重启原本运行的 Incus 和连接器，保持原开机启用状态，最后重新打开新版 TUI。渠道切换可能安装版本号更低的包。Incus 重启会执行节点 shutdown，可能停止实例；重新启动由已有启动策略和安全锁定状态决定。请安排维护窗口；更新开始后不能在界面中取消 apt/dpkg。"
 	case "credentials":
 		c := m.backend.loadConnection()
 		m.page = "credentials"
@@ -416,6 +450,10 @@ func (m model) render() string {
 		out.WriteString(cleanText(m.message) + "\n\n")
 	}
 	if m.busy {
+		if m.updating {
+			out.WriteString("正在更新软件包并重启原运行服务，请勿关闭终端…\n")
+			return out.String()
+		}
 		out.WriteString("正在执行，请稍候… Esc 取消等待\n")
 		return out.String()
 	}
@@ -453,6 +491,8 @@ func (m model) render() string {
 			out.WriteString("ZFS 管理\n\n")
 		} else if m.menuGroup == "repair" {
 			out.WriteString("修复\n\n")
+		} else if m.menuGroup == "update" {
+			out.WriteString("更新 Incus 节点软件包\n\n")
 		}
 		last := min(first+visible, len(items))
 		for i := first; i < last; i++ {
@@ -507,7 +547,11 @@ func main() {
 		fmt.Fprintln(os.Stderr, "无法创建日志文件：", err)
 		os.Exit(1)
 	}
+	logClosed := false
 	defer func() {
+		if logClosed {
+			return
+		}
 		err := logFile.Close()
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "关闭日志文件失败：", err)
@@ -517,9 +561,19 @@ func main() {
 	b.logs = &operationLog{writer: logFile, path: filepath.Clean(logFile.Name())}
 	program := tea.NewProgram(initialModel(b))
 	b.logs.emit = func(line string) { program.Println(line) }
-	_, err = program.Run()
+	finalModel, err := program.Run()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "无法启动终端界面：", err)
+		os.Exit(1)
+	}
+	result, ok := finalModel.(model)
+	if ok && result.relaunch {
+		err = logFile.Close()
+		logClosed = true
+		if err == nil {
+			err = syscall.Exec("/usr/bin/incus-tui", []string{"incus-tui"}, os.Environ())
+		}
+		fmt.Fprintln(os.Stderr, "更新完成，但重新打开新版 TUI 失败：", err)
 		os.Exit(1)
 	}
 }

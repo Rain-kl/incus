@@ -163,7 +163,7 @@ func TestMenuGroupsKeepMaintenanceAndZFSOffHome(t *testing.T) {
 	if strings.Contains(root, "导入 Panel 客户端证书") || strings.Contains(root, "安装并检查 ZFS") || !strings.Contains(root, "ZFS 管理") || !strings.Contains(root, "高级维护") {
 		t.Fatal("home menu was not consolidated")
 	}
-	for _, group := range []string{"zfs", "advanced", "repair"} {
+	for _, group := range []string{"zfs", "advanced", "repair", "update"} {
 		for i, item := range menu {
 			if item.action == group {
 				m.cursor = i

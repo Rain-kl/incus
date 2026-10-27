@@ -151,7 +151,7 @@ CI 接线修正：fork 初始没有官方 release tag，校验步骤从官方仓
 
 ### 一次性 token 接入与菜单收敛（2026-10-27）
 
-- 主菜单收敛为初始化、一次性 token 接入、ZFS 管理、修复、高级维护、刷新和退出。七项 ZFS 操作保留在 ZFS 管理子菜单；手填凭据、手动证书导入、本地监听修复及服务/日志管理移到高级维护。子菜单 Esc/q 返回主菜单，操作结束仍留在所属分组；原有危险操作确认与密钥保护保持。
+- 主菜单收敛为初始化、一次性 token 接入、ZFS 管理、修复、更新、高级维护、刷新和退出。七项 ZFS 操作保留在 ZFS 管理子菜单；手填凭据、手动证书导入、本地监听修复及服务/日志管理移到高级维护。子菜单 Esc/q 返回主菜单，操作结束仍留在所属分组；原有危险操作确认与密钥保护保持。
 - `tools/incus-tui/enrollment.go` 在确认后检查连接器 unit，启用 Incus 并最多等待一分钟 API 就绪，再校验已有监听；随后单次兑换 token、校验证书 SHA256 与有效期、保留既有信任并幂等导入 Panel 公钥证书、设置回环监听、原子保存 0600 凭据、启用并重启连接器。预检查失败不消费 token；后续失败保留原始错误和成功步骤，不自动重复兑换。接入不覆盖已有其它监听、不删除已有信任或存储，存储初始化仍为独立操作。
 - 控制端 `GET /api/agent/install-config/:token?format=json` 返回 schemaVersion=1、连接凭据、Panel 公钥证书和指纹；服务端在消费 token 前校验证书就绪，不分发私钥。证书路径与 Incus 验证连接共享来源。无 format 的旧文本响应仍兼容旧版 TUI；新版完整接入需要配套控制端 JSON 契约。HTTP/HTTPS 继续由管理员选择，兑换禁止重定向。
 - Bubble Tea v1 延迟的 OSC 颜色响应在输入层识别为终端协议数据，不能写入 Panel 地址或 token；普通 Esc 行为保留。入口为 `main.go`，不修改第三方模块或上游 Incus 源码。
@@ -167,6 +167,15 @@ CI 接线修正：fork 初始没有官方 release tag，校验步骤从官方仓
 - Incus 接口仍为正式 7.0.2 LTS：`GET /1.0` 探测 `profiles_all_projects/instance_all_projects`，跨项目 `GET /instances`、`GET /profiles`，`GET/PATCH /instances/:name?project=` 与 `/profiles/:name?project=`，`PUT /instances/:name/state?project=`、`GET/POST/DELETE /networks`、可用时 `GET /networks/incusbr0/forwards`。写回前重读并使用 ETag，异步等待与错误继续由 `local_api.go` 集中处理。无上游源码修改、数据库迁移或新依赖。修复失败/取消保留原始错误、失败阶段、备份及已完成变更，不继续自动启动；没有宣称自动回滚。重试前先按备份检查残留配置，不盲目丢弃备份。
 - 测试：`network_setup_test.go` 覆盖各阶段部分失败后重试、不重复创建、固定网段、已有网络不被接入覆盖；`enrollment_test.go` 验证网络预检查失败不消费 token。`network_repair_test.go` 使用隔离 HTTP 服务执行真实请求，覆盖跨项目、继承 NIC、IP/MAC/根盘保留、冲突分配、proxy/cloud-init 地址变更、缺失/非托管桥、外部端口拒绝、766 地址池耗尽、备份权限、取消与原始错误保留、菜单确认。按 owner 要求，本轮不在 debian-test 执行修复，也不替换程序；隔离 API 测试不作为真实内核/来宾联网验收。
 - 验证结果：独立 TUI module 的 `go test -race ./...`、`go vet ./...`、Linux arm64/amd64 编译，安装器隔离测试 `python3 scripts/payincus/test-install.py` 及控制仓库 `make check` 均通过。未发布或执行本轮真实节点修复；真实桥设备、来宾网络重新配置及停止/启动的验收仍需在 owner 指定的独立验证步骤完成。
+
+### TUI 节点更新与渠道选择（2026-10-27）
+
+- `tools/incus-tui/{main,update}.go` 新增“更新 → 开发版 / 稳定版”，分别映射 `canary` / `latest`；确认后从 Rain-kl/incus 的对应 GitHub Release 安装完整节点软件包。`scripts/payincus/package.sh` 将同一安装器随包放入 `/usr/libexec/incus/node-install.sh`，TUI 只调用此固定本地入口，不下载执行分支上的脚本。版本筛选、平台/架构限制、下载 HTTPS 和 SHA256 校验均复用 `scripts/payincus/install.sh`。
+- 新增安装器 `--update` 模式：不打开嵌套 TUI；非交互 apt、`needrestart` 仅列出待重启项，`--reinstall --allow-downgrades --no-remove` 允许切换渠道或处理非时间排序的 SHA 版本，并拒绝自动移除其它包。没有合适的渠道 Release、包、校验文件、合法 URL 或 SHA256 时失败，不回退到别的渠道/平台。原安装模式保持原契约；不自动初始化、兑换 token 或改凭据。
+- 更新前读取 Incus/连接器运行与开机启用状态并核对连接器 unit 为集成包版本；更新成功后仅重启原本运行的服务，先 Incus、等待原生节点 API 就绪，再连接器，最后核对运行及启用状态保持。原本停止的服务不主动启动；连接器运行而 Incus 停止的矛盾状态在安装前拒绝，避免 systemd Wants 连带启动 Incus。更新成功关闭旧 TUI 日志并 exec 新二进制，避免旧进程继续显示旧版本号；失败保留原始错误与已完成步骤，不伪装成回滚。
+- 包更新及服务重启在确认后不能通过界面 Ctrl+C/Esc 中断，完整 stdout/stderr 持续显示并保存；下载/apt 自身失败仍返回真实原因。`/run/lock/incus-tui-update.lock` 的进程级 flock 防止两个 TUI 更新交错，进程退出自动释放锁。维护窗口内操作：现有 `incus.service` 的 ExecStop 执行节点 shutdown，会触发实例关机，后续启动取决于既有 autostart 策略；安全锁定与面板批准恢复不会被更新流程绕过。此功能更新已经使用本集成包的节点，不迁移独立旧 Agent/旧协议，不修改上游守护进程源码或数据库格式。
+- 接口与验证：GitHub Releases/资产及系统 apt 由原安装器适配；就绪检查复用正式 7.0.2 LTS `GET /1.0/payincus`。`update_test.go` 覆盖渠道选择、确认、原运行服务集合与启用状态、各阶段错误传播、API 等待取消、事务不可在界面取消、成功重新打开 TUI/失败不重开；`scripts/payincus/test-install.py` 执行真实脚本的隔离 fixtures，覆盖两渠道×两系统×双架构更新、非交互环境、重新安装/渠道切换、APT 失败及校验拒绝。CI 干净目标系统的安装验收检查包内更新器存在且 `--help` 可执行。按 owner 要求不在 debian-test 执行更新或替换二进制；真实节点包替换/服务重启仍需独立验收，本地测试不代表发布生效。
+- 本地验证通过：TUI module 的 `go test -race ./...`、`go vet ./...`、Linux arm64/amd64 构建；安装器五项测试、Bash 语法检查及控制仓库 `make check`。另覆盖并发更新锁、失败后释放锁、旧连接器拒绝和意外启用状态变更。未运行真实节点更新，未推送或发布本轮代码。
 
 ### 上游/API 接入与测试
 
@@ -261,7 +270,7 @@ CI 接线修正：fork 初始没有官方 release tag，校验步骤从官方仓
 - 唯一宿主连接器为本仓库 `cmd/payincus-agent`，随 incus-payincus deb 管理。删除 WebSocket 业务 RPC 执行器、局部方法转换适配和心跳独立升级指令；保留原生 API 字节转发、`payincus_node_v1` 能力握手和节点日志转发。控制端通过原生 mTLS API 执行业务操作，旧 RPC 不再可用。
 - 心跳始终携带 `nodeApi=payincus_node_v1` 及能力声明，包含告警锁定时的最小报告；保留正常报告的资源能力。控制端拒绝缺失原生节点声明的报告，不触发旧节点更新。
 - 控制端安装入口仅下载并执行本仓库 `scripts/payincus/install.sh latest|canary`。安装脚本职责仍仅为选择正式 release 包、校验、apt 安装和进入 TUI。Panel 地址与一次性 token 从环境交给 TUI，字段掩码显示并在进入界面时移除 token 环境变量，用户确认后才兑换；没有交互终端时由管理员稍后手工配置。服务 unit 必须匹配软件包提供的连接器；不接管、迁移或修复旧服务配置。
-- 适用平台仍为 Debian 13 / Ubuntu 24.04 的 amd64、arm64。面向全新节点；旧节点不提供原地升级、数据迁移、配置继承或协议回退。节点凭据接口沿用同一 HMAC 身份契约，不修改现有上游代码、数据库或依赖。
+- 适用平台仍为 Debian 13 / Ubuntu 24.04 的 amd64、arm64。首次接入面向本集成包，不提供独立旧 Agent 的数据迁移、配置继承或协议回退；已经使用本集成包的节点可使用上文 TUI 更新功能。节点凭据接口沿用同一 HMAC 身份契约，不修改现有上游代码、数据库或依赖。
 - 测试：`cmd/payincus-agent/main_test.go/TestNativeHeartbeatContractIncludesLockedNodes` 真实 Unix/HTTP 验证普通与锁定心跳、能力保留；`tunnel/control_test.go/TestNativeIncusStreamAndRejectedRPC` 真实签名 WebSocket 验证握手、字节中继、旧 RPC 不执行及断线取消；`nodeclient/client_test.go` 直接验证原生 HTTP 请求；`tools/incus-tui/main_test.go/TestInstallerTokenPrefillIsMaskedAndRemovedFromEnvironment` 验证交接不暴露 token。控制端另有分发边界、安装脚本双渠道、HMAC、超时/取消与并发控制契约测试。
 - 上游 API/扩展仍为 7.0.2 LTS 原生 API 和 `payincus_node_v1`，无新增上游修改点。后续同步核对 HELLO 帧、原生请求及 TUI 初始化/凭据确认行为。移除的旧 RPC 测试由原生传输与拒绝旧 RPC 的契约测试替代；不把删除兼容代码视为旧节点迁移验收。
 

@@ -2,8 +2,13 @@
 # PayIncus: download a verified release package; configuration belongs to incus-tui.
 set -euo pipefail
 channel="${1:-latest}"
-case "$channel" in latest|canary) ;; -h|--help) echo 'Usage: install.sh [latest|canary] [--no-tui]'; exit 0 ;; *) echo 'Expected latest or canary' >&2; exit 1 ;; esac
-[[ $# -le 2 && ( $# -lt 2 || "$2" == --no-tui ) ]] || { echo 'Usage: install.sh [latest|canary] [--no-tui]' >&2; exit 1; }
+case "$channel" in latest|canary) ;; -h|--help) echo 'Usage: install.sh [latest|canary] [--no-tui|--update]'; exit 0 ;; *) echo 'Expected latest or canary' >&2; exit 1 ;; esac
+[[ $# -le 2 && ( $# -lt 2 || "$2" == --no-tui || "$2" == --update ) ]] || { echo 'Usage: install.sh [latest|canary] [--no-tui|--update]' >&2; exit 1; }
+if [[ "${2:-}" == --update ]]; then
+  # PayIncus: update runs unattended; service restarts are controlled by the TUI.
+  export DEBIAN_FRONTEND=noninteractive
+  export NEEDRESTART_MODE=l
+fi
 [[ $EUID -eq 0 ]] || { echo 'Run this installer as root.' >&2; exit 1; }
 # Only local, OS-managed metadata is sourced; remote content is never executed.
 # shellcheck source=/dev/null
@@ -79,6 +84,12 @@ if len(matches) != 1 or hashlib.file_digest((folder / name).open('rb'), 'sha256'
     sys.exit('Package checksum verification failed; installation aborted.')
 PY
 apt-get update
+if [[ "${2:-}" == --update ]]; then
+  # Channel selection authorizes switching versions; SHA suffixes are not chronological.
+  apt-get install -y --reinstall --allow-downgrades --no-remove "$stage/$package"
+  echo "Node package installed: $package"
+  exit 0
+fi
 apt-get install -y "$stage/$package"
 if [[ "${2:-}" == --no-tui ]]; then exit 0; fi
 if ! ( : </dev/tty ) 2>/dev/null; then

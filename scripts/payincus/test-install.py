@@ -37,13 +37,15 @@ def evaluate_publish_condition(node, github):
 
 class InstallerTests(unittest.TestCase):
     def run_installer(self, channel='canary', target='debian-13', arch='amd64', damage=False,
-                      missing=False, bad_url=False, distro=None, draft=False, wrong_channel=False):
+                      missing=False, bad_url=False, distro=None, draft=False, wrong_channel=False,
+                      mode='--no-tui', apt_failure=False):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             binary = root / 'bin'
             binary.mkdir()
             payload = b'deb fixture bytes'
-            name = f'payincus-incus-7.0.2-integration.abcdef012345-linux-{target}-{arch}.deb'
+            version = '7.0.2-integration.abcdef012345' if channel == 'canary' else '7.0.2'
+            name = f'payincus-incus-{version}-linux-{target}-{arch}.deb'
             checksum = hashlib.sha256(payload).hexdigest()
             (root / 'package').write_bytes(payload + (b'corrupt' if damage else b''))
             (root / 'checksum').write_text(f'{checksum}  {name}\n')
@@ -71,6 +73,15 @@ shutil.copyfile(Path(os.environ['FIXTURE'])/name,args[args.index('-o')+1])
                 'apt-get': '''import os,sys
 from pathlib import Path
 with (Path(os.environ['FIXTURE'])/'apt.log').open('a') as f: f.write(' '.join(sys.argv[1:])+'\\n')
+if 'install' in sys.argv and os.environ.get('TEST_APT_FAILURE') == '1':
+    print('APT fixture error: package installation failed', file=sys.stderr)
+    sys.exit(100)
+if '--allow-downgrades' in sys.argv and os.environ.get('DEBIAN_FRONTEND') != 'noninteractive':
+    print('Update unexpectedly allows interactive package prompts', file=sys.stderr)
+    sys.exit(101)
+if '--allow-downgrades' in sys.argv and os.environ.get('NEEDRESTART_MODE') != 'l':
+    print('Update delegates unexpected restarts to needrestart', file=sys.stderr)
+    sys.exit(102)
 ''',
                 'dpkg': "import os\nprint(os.environ['TEST_ARCH'])\n",
             }
@@ -78,8 +89,9 @@ with (Path(os.environ['FIXTURE'])/'apt.log').open('a') as f: f.write(' '.join(sy
                 path = binary / name_
                 path.write_text(f'#!{sys.executable}\n' + source)
                 path.chmod(0o755)
-            env = {**os.environ, 'PATH': f'{binary}:' + os.environ['PATH'], 'FIXTURE': str(root), 'TEST_ARCH': arch}
-            result = subprocess.run(['bash', str(root/'install.sh'), channel, '--no-tui'],
+            env = {**os.environ, 'PATH': f'{binary}:' + os.environ['PATH'], 'FIXTURE': str(root), 'TEST_ARCH': arch,
+                   'TEST_APT_FAILURE': '1' if apt_failure else '0'}
+            result = subprocess.run(['bash', str(root/'install.sh'), channel, mode],
                                     env=env, text=True, capture_output=True, timeout=15)
             log = (root / 'apt.log').read_text() if (root / 'apt.log').exists() else ''
             return result, log
@@ -101,6 +113,26 @@ with (Path(os.environ['FIXTURE'])/'apt.log').open('a') as f: f.write(' '.join(sy
                 result, log = self.run_installer(**kwargs)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(log, '', result.stdout + result.stderr)
+
+    def test_update_channel_switch_and_reinstall(self):
+        for channel, target, arch in itertools.product(('latest', 'canary'), ('debian-13', 'ubuntu-24.04'), ('amd64', 'arm64')):
+            with self.subTest(channel=channel, target=target, arch=arch):
+                result, log = self.run_installer(channel, target, arch, mode='--update')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn('--reinstall --allow-downgrades', log)
+                self.assertIn('Node package installed:', result.stdout)
+                self.assertNotIn('interactive terminal', result.stdout)
+        result, _ = self.run_installer(mode='--update', apt_failure=True)
+        self.assertEqual(result.returncode, 100)
+        self.assertIn('APT fixture error:', result.stderr)
+        self.assertNotIn('Node package installed:', result.stdout)
+
+    def test_update_failures_do_not_install(self):
+        for kwargs in ({'damage': True}, {'missing': True}, {'bad_url': True}, {'wrong_channel': True}, {'draft': True}):
+            with self.subTest(kwargs=kwargs):
+                result, log = self.run_installer(mode='--update', **kwargs)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(log, '')
 
     def test_publish_gate_allows_trusted_manual_canary_builds(self):
         workflow = Path(__file__).resolve().parents[2] / '.github/workflows/payincus-publish.yml'

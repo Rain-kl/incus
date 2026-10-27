@@ -33,6 +33,7 @@ for binary in incusd incus-user incus-agent payincus-agent payincus-network-work
 done
 install -m 0755 "$binaries/incus" "$stage/rootfs/usr/bin/incus"
 install -m 0755 "$binaries/incus-tui" "$stage/rootfs/usr/bin/incus-tui"
+install -m 0755 scripts/payincus/install.sh "$stage/rootfs/usr/libexec/incus/node-install.sh"
 for unit in incus.service incus-user.service incudal-agent.service; do
   install -m 0644 "deploy/payincus/$unit" "$stage/rootfs/usr/lib/systemd/system/$unit"
 done

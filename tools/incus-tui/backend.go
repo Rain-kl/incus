@@ -62,6 +62,7 @@ type backend struct {
 	sourcePath     string
 	modulesPath    string
 	sysModulesPath string
+	updateLockPath string
 	logs           *operationLog
 }
 

@@ -125,6 +125,8 @@ jobs:
             apt-get update -qq
             DEBIAN_FRONTEND=noninteractive apt-get install -y -qq /packages/*.deb
             incus-tui --version
+            test -x /usr/libexec/incus/node-install.sh
+            /usr/libexec/incus/node-install.sh --help
             incus --version
             /usr/libexec/incus/incusd --version
             /usr/libexec/incus/payincus-agent -h
