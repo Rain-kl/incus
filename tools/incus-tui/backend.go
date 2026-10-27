@@ -311,7 +311,7 @@ func (b *backend) saveConnection(c connection) error {
 		return err
 	}
 	defer os.Remove(file.Name())
-	content := fmt.Sprintf("panel_url: %s\nagent_id: %s\nagent_secret: %s\nheartbeat_interval_seconds: 60\nrequest_timeout_seconds: 10\n", strconv.Quote(c.Panel), strconv.Quote(c.ID), strconv.Quote(c.Secret))
+	content := fmt.Sprintf("panel_url: %s\nagent_id: %s\nagent_secret: %s\nheartbeat_interval_seconds: 10\nrequest_timeout_seconds: 10\n", strconv.Quote(c.Panel), strconv.Quote(c.ID), strconv.Quote(c.Secret))
 	_, err = file.WriteString(content)
 	if err == nil {
 		err = file.Sync()

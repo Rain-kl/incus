@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/lxc/incus/v7/internal/server/payincus/config"
 	"github.com/lxc/incus/v7/internal/server/payincus/localapi"
 )
 
@@ -108,11 +109,11 @@ func collectResources() map[string]any {
 func collectMetrics(heartbeatIntervalSeconds int) map[string]any {
 	switch {
 	case heartbeatIntervalSeconds <= 0:
-		heartbeatIntervalSeconds = 60
-	case heartbeatIntervalSeconds < 30:
-		heartbeatIntervalSeconds = 30
-	case heartbeatIntervalSeconds > 3600:
-		heartbeatIntervalSeconds = 3600
+		heartbeatIntervalSeconds = config.DefaultHeartbeatIntervalSeconds
+	case heartbeatIntervalSeconds < config.MinHeartbeatIntervalSeconds:
+		heartbeatIntervalSeconds = config.MinHeartbeatIntervalSeconds
+	case heartbeatIntervalSeconds > config.MaxHeartbeatIntervalSeconds:
+		heartbeatIntervalSeconds = config.MaxHeartbeatIntervalSeconds
 	}
 
 	metrics := map[string]any{
