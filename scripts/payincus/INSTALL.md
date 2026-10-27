@@ -68,9 +68,15 @@ TUI 支持 Incus 和连接 Agent 的启动、停止、重启、启用并启动�
 
 Incus 本地服务仅依赖 `network.target`，不因 DNS 的 `wait-online` 超时阻塞本地 socket；连接器仍等待网络在线。已有自定义 systemd 覆盖配置保持有效，需要自行检查。
 
+## 非特权容器的 UID/GID 映射
+
+节点包在安装/升级时，通过系统 `usermod` 准备 root 的 `/etc/subuid`、`/etc/subgid` 映射，避免非特权容器报 `System doesn't have a functional idmap setup`。每次 Incus 启动前只执行 `/usr/libexec/incus/prepare-idmap --check`，不会改写系统配置。干净系统采用官方默认 `root:1000000:1000000000`，已有有效分配原样保留；缺失条目补齐前检查冲突并备份原文件，发生冲突时保留配置并输出具体错误。不会修改已有容器文件所有权或改用特权容器。如果旧 incusd 已在缺少映射时启动，必须在维护窗口更新并重启 Incus，使其重新读取；只写文件不会刷新正在运行的 daemon。TUI 更新可按现有流程重启原本运行的服务，可能停止实例。
+
 ## 可选 ZFS 与节点管理
 
 默认初始化仍使用 DIR。进入 `incus-tui` 的“ZFS 管理”子菜单，可安装检查依赖、创建专用磁盘或测试文件池、创建/注册加密数据集、解锁、绑定 Incus 和查看池状态。不会自动挑盘、迁移或覆盖已有数据。Debian 13 标准 deb822 源补 contrib 前会备份原文件；特殊内核、Secure Boot 和自定义源需管理员处理。
+
+TUI 内 APT 使用 `DEBIAN_FRONTEND=noninteractive` 采用软件包默认配置，关闭 dpkg 伪终端和动态进度；OpenZFS 的 debconf 提示不会再等待隐藏的“确定”操作。apt-listchanges 使用文本输出，needrestart 只列出待重启服务。设置仅作用于 APT 子进程，不更改系统全局配置。安装和 DKMS 的全部 stdout/stderr、退出码及原始错误保留在操作日志；ANSI 终端控制序列完整清除，诊断文字保留。安装完成仍须通过 `modprobe zfs` 和 `zfs version` 才视为依赖就绪，非交互安装不能解决内核不兼容或编译失败。
 
 依赖安装先检查运行内核的 ZFS 模块；已有模块时不安装 DKMS/headers。没有模块时，必须已有匹配内核的构建目录或 APT 中存在准确的 headers 包，否则停止并显示完整检查错误。OrbStack 使用定制内核，Debian 通用 headers 不能替代；其 `/sys/kernel/kheaders.tar.xz` 不是 TUI 已配置好的 DKMS 构建环境。TUI 不自动构建 OrbStack 自定义模块，也不更换内核；需管理员提供匹配环境或改用具备 ZFS 支持的标准内核虚拟机。限制说明：[OrbStack Linux machines](https://docs.orbstack.dev/machines/)。
 

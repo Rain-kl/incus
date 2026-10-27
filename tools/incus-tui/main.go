@@ -54,13 +54,13 @@ type menuItem struct {
 }
 
 var menu = []menuItem{
-	{"一键初始化", "initialize"},
-	{"面板接入", "token"},
-	{"ZFS 管理", "zfs"},
+	{"初始化", "initialize"},
+	{"接入", "token"},
+	{"ZFS", "zfs"},
 	{"修复", "repair"},
 	{"更新", "update"},
-	{"高级维护", "advanced"},
-	{"刷新状态", "refresh"},
+	{"更多", "advanced"},
+	{"刷新", "refresh"},
 	{"退出", "quit"},
 }
 

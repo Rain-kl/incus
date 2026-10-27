@@ -34,6 +34,7 @@ done
 install -m 0755 "$binaries/incus" "$stage/rootfs/usr/bin/incus"
 install -m 0755 "$binaries/incus-tui" "$stage/rootfs/usr/bin/incus-tui"
 install -m 0755 scripts/payincus/install.sh "$stage/rootfs/usr/libexec/incus/node-install.sh"
+install -m 0755 scripts/payincus/prepare-idmap.py "$stage/rootfs/usr/libexec/incus/prepare-idmap"
 for unit in incus.service incus-user.service incudal-agent.service; do
   install -m 0644 "deploy/payincus/$unit" "$stage/rootfs/usr/lib/systemd/system/$unit"
 done
@@ -67,7 +68,7 @@ Architecture: $arch
 Section: admin
 Priority: optional
 Maintainer: PayIncus maintainers <noreply@payincus.com>
-Depends: $shlibs, adduser, ca-certificates, iproute2, rsync, attr, tar, squashfs-tools, xz-utils, nftables, iptables, dnsmasq-base, uidmap, systemd
+Depends: $shlibs, adduser, ca-certificates, iproute2, rsync, attr, tar, squashfs-tools, xz-utils, nftables, iptables, dnsmasq-base, uidmap, passwd, python3, systemd
 Recommends: virtiofsd
 Provides: incus, incus-base, incus-client
 Conflicts: incus, incus-base, incus-client
@@ -81,6 +82,7 @@ set -eu
 if [ "$1" = configure ]; then
   getent group incus-admin >/dev/null || addgroup --system incus-admin
   getent group incus >/dev/null || addgroup --system incus
+  /usr/libexec/incus/prepare-idmap
   if [ -d /run/systemd/system ]; then systemctl daemon-reload; fi
 fi
 # Starting or restarting instances and replacing the old connector require a maintenance window.

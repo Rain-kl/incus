@@ -112,19 +112,29 @@
 ## 集成 CI 与预发布
 
 - `.github/workflows/payincus.yml` 在 fork 的 main/canary、PR 和 `payincus-v*` tag 上运行；使用 GitHub 托管的 Ubuntu 24.04 amd64/arm64 原生 runner，Go 版本读取 LTS go.mod。
-- CI 校验 LTS tag 与提交，准备固定 Xray，运行定制模块竞态测试、真实 daemon 接线及全部 daemon 单元测试、上游 CLI/shared 测试，再构建全部集成二进制并打包。原生完整宿主测试仍需适当内核环境，不能用构建通过代替真实节点验收。
-- 上游 `.github/workflows/build.yml`、`tests.yml`、`release.yml` 各 job 增加带注释的官方仓库条件；保留上游定义，由 fork 专用流程承担集成测试与服务端发布，避免等待仅上游有的自托管 runner 或误发布客户端包。
+- 按 owner 2026-10-27 要求，集成 CI 仅保留 LTS tag/提交校验、固定 Xray、四目标原生构建/打包、包信息/内容与 SHA256 检查、产物上传及原发布接线。移除竞态/单元/daemon/CLI/TUI 测试、go vet、ZFS 虚拟机测试、安装器 fixtures、脚本检查及干净系统安装验收；不新增替代自动测试工作流，测试源码保留供单独运行。Debian 目标的构建依赖仅在 Debian 构建容器中安装，Ubuntu 目标保留本机构建依赖，去掉仅用于已移除测试的工具及失去用途的 matrix.image。CI 成功仅证明构建与产物检查通过，不代表测试、安装或真实节点验收通过。
+- 上游 `.github/workflows/build.yml`、`tests.yml`、`release.yml` 各 job 增加带注释的官方仓库条件；保留上游定义，由 fork 专用流程承担构建与服务端发布，避免等待仅上游有的自托管 runner 或误发布客户端包。
 - `scripts/payincus/package.sh` 生成 Ubuntu 24.04 的 amd64/arm64 deb、rootfs 归档、带源提交/LTS 基线/API 能力的清单和 SHA256SUMS。deb 依赖通过 dpkg-shlibdeps 计算；包含三个独立服务、官方 Guest Agent、恢复工具及许可声明。可选的 socket 激活不纳入此包，VM 的 QEMU/UEFI 为额外安装项。
-- 原生包与官方 incus/incus-base/incus-client 声明冲突及替代，安装前必须安排迁移维护窗口；postinst 只创建权限组并重载 systemd，不自动启用、启动或重启服务。不会通过旧 Agent OTA 替换 incusd。
-- `payincus-v7.0.2-rc.N` tag 在两个架构测试/构建成功后发布 GitHub prerelease，包含两架构产物与校验；普通分支仅上传 Actions artifacts。测试标签不改变记录的上游 LTS 版本。
+- 原生包与官方 incus/incus-base/incus-client 声明冲突及替代，安装前必须安排迁移维护窗口；postinst 创建权限组、准备 root ID 映射并重载 systemd，不自动启用、启动或重启服务。不会通过旧 Agent OTA 替换 incusd。
+- `payincus-v7.0.2-rc.N` tag 在四目标构建与产物检查成功后发布 GitHub prerelease，包含两系统/两架构产物与校验；普通分支的集成 job 上传 Actions artifacts，canary 另由发布工作流消费。测试标签不改变记录的上游 LTS 版本。
 - 远程 fork 原 main 含未发版上游历史；集成分支保留该历史，合并时保持已验证的 v7.0.2 LTS 源码树及定制实现，禁止将远程 main 的未发版文件带入交付。
 - CI 与发布结果以对应 GitHub Actions run 和 Release 的实际状态为准；在结果确认前不记为通过。
+- CI 加速改动本地验证：两份 fork 工作流的 actionlint、安装器五项 fixtures（含发布条件回归）、控制仓库 `make check` 及 `git diff --check` 通过。仅调整 fork 集成调度与构建依赖，无上游 daemon/API 或发布条件变更；未执行远程 Actions，不声称已验证耗时或远程产物。
 
 本地新增发布检查：Actionlint 验证 fork 集成工作流通过；ShellCheck、Bash 语法和完整 amd64 二进制/原生 deb/归档打包通过，SHA256SUMS 逐项校验通过。本地打包环境为 Debian 13，仅用于验证脚本，正式 Ubuntu 24.04 双架构产物以 Actions 构建为准，不上传本地临时产物。
 
-CI 接线修正：fork 初始没有官方 release tag，校验步骤从官方仓库显式获取 v7.0.2 tag 并核对固定 SHA，不以 fork 自有 tag 代替上游发布依据。新增干净 Ubuntu 24.04 容器安装 deb、解析原生依赖、检查 CLI/daemon/连接器入口及权限组的验收步骤，安装成功后才上传产物。
+CI 接线修正：fork 初始没有官方 release tag，校验步骤从官方仓库显式获取 v7.0.2 tag 并核对固定 SHA，不以 fork 自有 tag 代替上游发布依据。先前增加的干净系统安装验收已按上述 CI 加速要求移除；当前在构建、打包及产物检查通过后上传产物。
 
 发布归档将 rootfs 的 UID/GID 固定为 0，避免把构建 runner 的文件所有者带到节点；deb 使用 dpkg-deb 的 root-owner-group。
+
+### 非特权容器 root ID 映射准备（2026-10-27）
+
+- 根因：原包依赖 `uidmap`，但 postinst 仅创建权限组，未落实正式 LTS `doc/installing.md` 的 root subuid/subgid 分配。`shared/idmap/set_load.go/NewSetFromSystem("root")` 在两文件和映射工具存在、但无 root 条目时返回 `ErrNoUserMap`；`internal/server/sys/os.go/getIdmapset` 因此缓存 nil，LXC `findIdmap` 返回 `System doesn't have a functional idmap setup`。只读检查 debian-test 证实两文件均为 0 字节，启动日志为 `Unable to parse system idmap: No map found for user`，未修改节点。
+- 修复集中于独立 `scripts/payincus/prepare-idmap.py`，包内路径 `/usr/libexec/incus/prepare-idmap`；`package.sh` 声明 `uidmap`/`passwd`/`python3` 运行依赖并在 postinst 准备映射，`deploy/payincus/incus.service` 的 ExecStartPre 仅执行 `--check` 只读验证，不在启动时补配置、创建锁或备份。干净安装使用官方默认 `root:1000000:1000000000`；已有至少 65536 个 ID 的 root/数字 UID 0 分配按上游用户名优先规则原样保留，一侧缺失时沿用另一侧有效范围。保留小范围 raw.idmap 委托，不缩减或替换旧范围，不修改容器权限模式、磁盘 UID/GID 或实例配置；不主动重启服务。
+- 自动补充前验证两文件格式、范围、现有委托与宿主用户/组 ID 冲突；冲突、缺失工具、非普通文件或写入失败均带路径/原始错误退出，不改用特权容器或绕过 namespace 隔离。新增条目前独占备份原文件（0600），缺失文件仅独占创建空文件；映射条目通过一次 `usermod --add-subuids/--add-subgids` 操作写入，复用 shadow 的系统账户数据库锁，不自行实现文件替换。随后回读确认新分配存在且旧分配未减少。自身准备调用另用文件锁协调；不实现跨文件失败回滚，usermod 部分失败保留原始输出和备份。标准系统 subid 文件为目标，特殊 NSS/subid 插件和并发外部账户管理需管理员协调，未实现迁移或在线重载。
+- 升级已运行但缓存 nil 的 daemon 时，仅补文件不足以恢复；沿用已有 TUI 更新的维护窗口重启流程读取新映射，安装器和 postinst 不单独重启业务。已有自定义范围容量不足、内核禁止 user namespace、额外 raw.idmap 要求及容器来宾问题仍可能单独失败，不将文件准备当作容器成功启动的证据。
+- 无上游源码/API/数据库变更；上游同步时核对正式 LTS NewSetFromSystem 的用户名/数字 UID 优先级、FilterPOSIX 最小范围及 daemon 加载时机。`scripts/payincus/test-prepare-idmap.py` 覆盖干净/空文件、幂等、已有自定义/数字 root、部分配置补齐、备份/权限、委托/宿主账户冲突、格式错误、symlink、工具缺失、usermod 请求/原始错误、启动检查无写入及包/service 接线；测试不接回集成 CI。
+- 本次验证：上述 10 项 Python 测试、package.sh Bash 语法、控制仓库 `make check`、diff 空白检查通过。在一次性 Debian 13 / Ubuntu 24.04 arm64 容器中安装真实 uidmap/passwd/python3，使用基于当前正式 LTS 源码构建的 `idmap.NewSetFromSystem("root")` 探针，复现空文件 `No map found for user`；真实 usermod 补齐后解析得到两条 `u/g 0 1000000 1000000000` 映射，只读检查通过，重复准备无重复条目。未在该容器启动 daemon 或创建 LXC，未部署/重启 debian-test，尚未发布新包。
 
 ## 一键安装与 incus-tui（2026-10-23）
 
@@ -205,7 +215,7 @@ CI 接线修正：fork 初始没有官方 release tag，校验步骤从官方仓
 - 全新 Debian 13 容器通过 apt 安装本地新 deb，验证 TUI、CLI、daemon、连接 Agent 入口、权限组、操作说明和依赖许可文件。
 - 真实 PTY 验证菜单导航、初始化确认与取消、密钥掩码、退出恢复终端；journal 子进程以 fixture 测试 Ctrl+C 后返回面板，未连接真实宿主 journal 或生产节点。
 
-以上本地产物来自开发工作树，manifest 标记 dirty，不上传为正式 release。推送后的四目标 CI 负责验证 Ubuntu 24.04 / Debian 13 的 amd64 / arm64 原生包安装，通过后发布对应提交的 canary 集成包；结果以该提交 Actions run 与 release 为准。实际宿主初始化/容器创建与 Panel 联通仍待节点验收。之前已记录的上游全仓静态/内核测试限制继续适用，本轮未重复运行无关的完整上游测试。
+以上本地产物来自开发工作树，manifest 标记 dirty，不上传为正式 release。推送后的四目标 CI 负责 Ubuntu 24.04 / Debian 13 的 amd64 / arm64 原生包构建与产物检查，通过后发布对应提交的 canary 集成包；按上述加速调整不再执行安装验收。结果以该提交 Actions run 与 release 为准。实际宿主初始化/容器创建与 Panel 联通仍待节点验收。之前已记录的上游全仓静态/内核测试限制继续适用，本轮未重复运行无关的完整上游测试。
 
 ## 节点 CLI 诱捕、持续通信与控制端恢复（2026-10-26）
 

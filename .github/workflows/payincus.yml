@@ -26,19 +26,15 @@ jobs:
           - arch: amd64
             runner: ubuntu-24.04
             target: ubuntu-24.04
-            image: ubuntu:24.04
           - arch: arm64
             runner: ubuntu-24.04-arm
             target: ubuntu-24.04
-            image: ubuntu:24.04
           - arch: amd64
             runner: ubuntu-24.04
             target: debian-13
-            image: debian:13
           - arch: arm64
             runner: ubuntu-24.04-arm
             target: debian-13
-            image: debian:13
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -48,12 +44,12 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Native build dependencies
+        if: matrix.target == 'ubuntu-24.04'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             python3 build-essential pkg-config libcowsql-dev liblxc-dev libsqlite3-dev \
-            libcap-dev libudev-dev libacl1-dev libseccomp-dev libselinux1-dev \
-            iproute2 rsync attr squashfs-tools xz-utils dpkg-dev shellcheck
+            libcap-dev libudev-dev libacl1-dev libseccomp-dev libselinux1-dev dpkg-dev
       - name: Verify released LTS baseline
         run: |
           git fetch --no-tags https://github.com/lxc/incus.git refs/tags/v7.0.2:refs/tags/v7.0.2
@@ -62,38 +58,6 @@ jobs:
           git merge-base --is-ancestor v7.0.2 HEAD
       - name: Prepare pinned Xray
         run: python3 scripts/payincus/prepare-xray.py "${{ matrix.arch }}"
-      - name: Extension and connector contracts (race detector)
-        run: go test -race ./internal/server/payincus/... ./cmd/payincus-agent ./cmd/payincus-network-worker
-      - name: Real daemon API integration and upstream daemon unit tests
-        run: |
-          # Compile as the runner; only executing daemon tests requires root.
-          go test -c -tags libsqlite3 -o "$RUNNER_TEMP/payincus-incusd.test" ./cmd/incusd
-          sudo "$RUNNER_TEMP/payincus-incusd.test" -test.v -test.count=1
-      - name: Upstream client and shared unit tests
-        run: CGO_ENABLED=0 go test ./cmd/incus/... ./shared/...
-      - name: Terminal UI contracts
-        working-directory: tools/incus-tui
-        run: |
-          go test -race ./...
-          go vet ./...
-      - name: Native ZFS lifecycle in an isolated VM
-        if: matrix.arch == 'amd64' && matrix.target == 'debian-13'
-        timeout-minutes: 25
-        run: |
-          CGO_ENABLED=0 go test -c -o "$RUNNER_TEMP/security.test" ./internal/server/payincus/security
-          docker run --rm -v "$PWD:/source:ro" -v "$RUNNER_TEMP/security.test:/tests/security.test:ro" debian:13 sh -ec '
-            sed -i "s/Components: main/Components: main contrib/g" /etc/apt/sources.list.d/debian.sources
-            apt-get update -qq
-            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
-              qemu-system-x86 linux-image-amd64 linux-headers-amd64 zfs-dkms zfsutils-linux busybox-static cpio kmod
-            bash /source/scripts/payincus/test-zfs-vm.sh /tests/security.test
-          '
-      - name: Installer contracts
-        run: python3 scripts/payincus/test-install.py
-      - name: Packaging script checks
-        run: |
-          bash -n scripts/payincus/{build,build-debian,package,install,test-zfs-vm}.sh
-          shellcheck scripts/payincus/{build,build-debian,package,install,test-zfs-vm}.sh
       - name: Build integrated binaries
         if: matrix.target == 'ubuntu-24.04'
         run: bash scripts/payincus/build.sh
@@ -119,21 +83,6 @@ jobs:
           sha256sum --check SHA256SUMS
           dpkg-deb --info ./*.deb
           dpkg-deb --contents ./*.deb
-      - name: Install package in a clean target system
-        run: |
-          docker run --rm -v "$PWD/scripts/payincus/dist/release:/packages:ro" ${{ matrix.image }} sh -ec '
-            apt-get update -qq
-            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq /packages/*.deb
-            incus-tui --version
-            test -x /usr/libexec/incus/node-install.sh
-            /usr/libexec/incus/node-install.sh --help
-            incus --version
-            /usr/libexec/incus/incusd --version
-            /usr/libexec/incus/payincus-agent -h
-            getent group incus-admin
-            getent group incus
-            test -x /usr/libexec/incus/payincus-network-worker
-          '
       - uses: actions/upload-artifact@v4
         with:
           name: payincus-linux-${{ matrix.target }}-${{ matrix.arch }}
