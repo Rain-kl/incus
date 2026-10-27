@@ -20,7 +20,7 @@ func TestUIRequiresConfirmationAndMasksSecrets(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	m := model{backend: b, cursor: 1}
+	m := model{backend: b, menuGroup: "advanced", cursor: 0}
 	updated, cmd := m.selectMenu()
 	m = asModel(t, updated)
 	if cmd != nil || strings.Contains(m.View(), c.Secret) {

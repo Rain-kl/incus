@@ -38,8 +38,10 @@ sudo bash /tmp/incus-install.sh canary
 ## 首次设置
 
 1. 执行 `sudo incus-tui`，选择“一键初始化”。确认后启用并启动 Incus，等待本地 API 就绪；为全新非集群节点创建 `default`（dir 驱动）和 `incusbr0`（自动 IPv4 + NAT、IPv6 禁用），给 default profile 添加根磁盘和 eth0。已有存储池、任意项目实例、托管网络、同名网桥或 default profile 配置时拒绝覆盖。
+
+TUI 的搭建、配置命令与本地 API 响应会完整实时输出到终端，并保存到界面显示的 `/var/log/incus-tui/session-*.log`。HTTP/异步 operation 失败保留原始错误；敏感凭据遮蔽，其他输出不截断。Panel 地址可使用 HTTP 或 HTTPS，由管理员自行选择；一次性凭据请求不跟随重定向。
 2. 在 Panel 创建或选择宿主机，启用 Agent，取得 `agt_` ID 和 `ias_` 密钥，或生成一次性 `ait_` token。TUI 可直接粘贴 token，不需要运行旧安装命令。此 token 通常 30 分钟有效且只能消费一次；不要粘贴整条 shell 安装命令。
-3. 选择配置 Panel 连接。根地址必须 HTTPS（本机调试允许 HTTP）；密钥/token 输入掩码显示。确认后原子写入 `/etc/incudal-agent/config.yaml`（0600），启用并重启 `incudal-agent.service`。连接服务配置必须匹配软件包提供的 unit，不匹配时拒绝操作且不消费 token；不执行旧服务迁移。
+3. 选择配置 Panel 连接。根地址允许 HTTP 或 HTTPS，由管理员自行选择；密钥/token 输入掩码显示。确认后原子写入 `/etc/incudal-agent/config.yaml`（0600），启用并重启 `incudal-agent.service`。连接服务配置必须匹配软件包提供的 unit，不匹配时拒绝操作且不消费 token；不执行旧服务迁移。
 4. 如果使用反向隧道，在 Panel 启用隧道，目标为 `127.0.0.1:8443`；TUI 选择“设置反向隧道本地监听”。该操作不会覆盖已有其他 HTTPS 监听地址。
 5. 把 Panel 客户端的 PEM **公钥证书**放到节点，选择“导入 Panel 客户端证书”，核对 SHA256 指纹后确认。此证书将授予 Panel 节点管理权限；不导入私钥，不删除已有信任。证书和 Agent token 是不同用途，Agent 心跳在线不等于 mTLS 实例管理连接已验证。
 6. 在 Panel 验证宿主机连接。

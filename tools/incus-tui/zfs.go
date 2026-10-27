@@ -60,7 +60,7 @@ func (b *backend) prepareZFS(ctx context.Context) error {
 				backup := path + ".before-incus-tui"
 				file, err := os.OpenFile(backup, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 				if err != nil {
-					return errors.New("APT 配置备份已存在或不可写，请先检查源配置")
+					return fmt.Errorf("APT 配置备份失败 %s：%w", backup, err)
 				}
 				_, err = file.Write(source)
 				closeErr := file.Close()
@@ -75,6 +75,8 @@ func (b *backend) prepareZFS(ctx context.Context) error {
 					return err
 				}
 			}
+		} else if !errors.Is(readErr, os.ErrNotExist) {
+			return fmt.Errorf("读取 APT 配置 %s：%w", path, readErr)
 		}
 	}
 	_, err = b.run(ctx, "apt-get", "update")
@@ -105,7 +107,7 @@ func (b *backend) prepareZFS(ctx context.Context) error {
 		}
 	}
 	if err != nil {
-		return errors.New("ZFS 内核模块无法加载，请检查内核兼容性或 Secure Boot 签名；未创建存储")
+		return fmt.Errorf("ZFS 内核模块加载失败；未创建存储：%w", err)
 	}
 	_, err = b.run(ctx, "zfs", "version")
 	return err
@@ -136,7 +138,7 @@ func (b *backend) createPool(ctx context.Context, name, device, size string) err
 		target = filepath.Join(dir, name+".img")
 		file, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if err != nil {
-			return errors.New("文件已存在或无法创建，不覆盖已有文件")
+			return fmt.Errorf("创建池文件 %s 失败，不覆盖已有文件：%w", target, err)
 		}
 		err = file.Close()
 		if err != nil {
@@ -144,25 +146,31 @@ func (b *backend) createPool(ctx context.Context, name, device, size string) err
 		}
 		_, err = b.run(ctx, "fallocate", "-l", strconv.FormatInt(gib<<30, 10), target)
 		if err != nil {
-			return errors.New("文件预分配失败，未创建池；请检查磁盘剩余空间")
+			return fmt.Errorf("文件预分配失败，未创建池：%w", err)
 		}
 	} else {
 		if !strings.HasPrefix(device, "/dev/") || strings.Contains(device, "..") {
 			return errors.New("请输入 /dev 下的专用磁盘或分区")
 		}
 		info, err := os.Stat(device)
-		if err != nil || info.Mode()&os.ModeDevice == 0 || info.Mode()&os.ModeCharDevice != 0 {
+		if err != nil {
+			return fmt.Errorf("读取块设备 %s：%w", device, err)
+		}
+		if info.Mode()&os.ModeDevice == 0 || info.Mode()&os.ModeCharDevice != 0 {
 			return errors.New("不是可用的块设备")
 		}
 		output, err := b.run(ctx, "lsblk", "-n", "-o", "MOUNTPOINTS,FSTYPE", device)
-		if err != nil || strings.TrimSpace(string(output)) != "" {
+		if err != nil {
+			return fmt.Errorf("检查块设备 %s：%w", device, err)
+		}
+		if strings.TrimSpace(string(output)) != "" {
 			return errors.New("设备含文件系统或挂载，拒绝覆盖；请管理员自行准备空设备")
 		}
 		target = device
 	}
 	_, err := b.run(ctx, "zpool", "create", "-o", "ashift=12", "-O", "mountpoint=none", "-O", "canmount=off", name, target)
 	if err != nil {
-		return errors.New("池创建失败；未使用强制覆盖，请检查设备状态；文件池的预分配文件会保留供检查")
+		return fmt.Errorf("池创建失败；未使用强制覆盖，预分配文件保留供检查：%w", err)
 	}
 	return nil
 }
@@ -174,17 +182,17 @@ func keyFingerprint(key string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func (m model) zfsMenu() (tea.Model, tea.Cmd) {
+func (m model) zfsMenu(action string) (tea.Model, tea.Cmd) {
 	m.focus = 0
-	switch m.cursor {
-	case 10:
+	switch action {
+	case "zfs-prepare":
 		m.page = "confirm"
 		m.message = "安装 ZFS 工具；Debian 将在标准 deb822 源中添加 contrib 并备份原文件，安装匹配内核 headers/DKMS。不会选择或格式化磁盘。"
 		m.confirm = m.backend.prepareZFS
-	case 11:
+	case "zpool":
 		m.page = "zpool"
 		m.fields = []field{{label: "新池名称"}, {label: "专用磁盘/分区 /dev/...（创建文件池时留空）"}, {label: "测试文件池容量 GiB（使用磁盘时留空）"}}
-	case 12:
+	case "zfs-create":
 		var key [32]byte
 		_, err := rand.Read(key[:])
 		if err != nil {
@@ -196,20 +204,21 @@ func (m model) zfsMenu() (tea.Model, tea.Cmd) {
 		m.page = "zfs-create"
 		m.fields = []field{{label: "新加密数据集（例如 tank/incus）"}, {label: "新密钥：复制到控制台保存（不写入文件）", value: value, readonly: true}, {label: "从控制端保存结果复制 SHA256 指纹确认"}}
 		m.message = "请先在控制端保存密钥。程序不保存，但终端录屏和剪贴板历史可能保留副本。"
-	case 13:
+	case "zfs-unlock":
 		m.page = "zfs-unlock"
 		m.fields = []field{{label: "已注册加密数据集"}, {label: "从控制端领取的 ZFS hex 密钥", secret: true}}
-	case 14:
+	case "zfs-bind":
 		m.page = "zfs-bind"
 		m.fields = []field{{label: "新的 Incus 存储池名称"}, {label: "已创建且已解锁的 ZFS 数据集"}}
-	case 16:
+	case "zfs-register":
 		m.page = "zfs-register"
 		m.fields = []field{{label: "已有加密根数据集"}, {label: "已有 ZFS hex 密钥（先保存控制端）", secret: true}, {label: "从控制端保存结果复制 SHA256 指纹确认"}}
-	case 15:
+	case "zfs-list":
 		m.busy = true
 		return m, func() tea.Msg {
 			ctx, cancel := context.WithTimeout(context.Background(), 15e9)
 			defer cancel()
+			ctx = context.WithValue(ctx, operationLogKey{}, m.backend.logs)
 			output, err := m.backend.run(ctx, "zpool", "list", "-H", "-o", "name,health,size,alloc,free")
 			return resultMsg{text: string(output), err: err}
 		}
@@ -264,8 +273,9 @@ func (m model) submitZFS(values []string) (tea.Model, tea.Cmd) {
 					Dataset string `json:"dataset"`
 				} `json:"targets"`
 			}
-			if json.Unmarshal(data, &registration) != nil {
-				return errors.New("本机服务响应不兼容")
+			err = json.Unmarshal(data, &registration)
+			if err != nil {
+				return fmt.Errorf("解析本机加密数据集注册信息：%w", err)
 			}
 			found := false
 			for _, target := range registration.Targets {

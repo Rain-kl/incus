@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -31,6 +32,7 @@ type (
 		backend               *backend
 		cursor, focus         int
 		page, message, status string
+		menuGroup             string
 		fields                []field
 		busy                  bool
 		confirm               func(context.Context) error
@@ -40,25 +42,68 @@ type (
 	}
 )
 
-var menu = []string{
-	"一键初始化 Incus（dir 存储 + NAT 网桥）",
-	"配置 Panel 连接（Agent ID / 密钥）",
-	"使用 Panel 一次性安装 token 配置连接",
-	"导入 Panel 客户端证书（mTLS）",
-	"设置反向隧道本地监听 127.0.0.1:8443",
-	"Incus 服务管理",
-	"连接 Agent 服务管理",
-	"查看 Incus 实时日志",
-	"查看连接 Agent 实时日志",
-	"刷新状态",
-	"安装并检查 ZFS 依赖",
-	"创建 ZFS 池（磁盘或测试文件）",
-	"创建加密数据集并显示密钥",
-	"输入密钥解锁 ZFS",
-	"将 ZFS 数据集绑定到 Incus",
-	"查看 ZFS 池状态",
-	"注册已有加密数据集",
-	"退出",
+type menuItem struct {
+	label  string
+	action string
+}
+
+var menu = []menuItem{
+	{"一键初始化 Incus（dir 存储 + NAT 网桥）", "initialize"},
+	{"使用一次性 token 接入面板", "token"},
+	{"ZFS 管理", "zfs"},
+	{"高级维护", "advanced"},
+	{"刷新状态", "refresh"},
+	{"退出", "quit"},
+}
+
+var advancedMenu = []menuItem{
+	{"手动配置 Panel 连接（Agent ID / 密钥）", "credentials"},
+	{"手动导入 Panel 客户端证书（mTLS）", "certificate"},
+	{"检查 / 修复反向隧道监听 127.0.0.1:8443", "listener"},
+	{"Incus 服务管理", "incus"},
+	{"连接器服务管理", "incudal-agent"},
+	{"查看 Incus 实时日志", "incus-journal"},
+	{"查看连接器实时日志", "connector-journal"},
+	{"返回主菜单", "back"},
+}
+
+var zfsManagementMenu = []menuItem{
+	{"安装并检查 ZFS 依赖", "zfs-prepare"},
+	{"创建 ZFS 池（磁盘或测试文件）", "zpool"},
+	{"创建加密数据集并显示密钥", "zfs-create"},
+	{"输入密钥解锁 ZFS", "zfs-unlock"},
+	{"将 ZFS 数据集绑定到 Incus", "zfs-bind"},
+	{"查看 ZFS 池状态", "zfs-list"},
+	{"注册已有加密数据集", "zfs-register"},
+	{"返回主菜单", "back"},
+}
+
+func (m model) currentMenu() []menuItem {
+	switch m.menuGroup {
+	case "advanced":
+		return advancedMenu
+	case "zfs":
+		return zfsManagementMenu
+	default:
+		return menu
+	}
+}
+
+func (m *model) backToMenu() {
+	if m.page == "" {
+		previousGroup := m.menuGroup
+		m.menuGroup = ""
+		for i, item := range menu {
+			if item.action == previousGroup {
+				m.cursor = i
+				break
+			}
+		}
+	}
+	m.page = ""
+	m.message = ""
+	m.fields = nil
+	m.confirm = nil
 }
 
 func (m model) Init() tea.Cmd { return m.refresh() }
@@ -66,6 +111,7 @@ func (m model) refresh() tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 		defer cancel()
+		ctx = context.WithValue(ctx, operationLogKey{}, m.backend.logs)
 		return statusMsg(m.backend.status(ctx))
 	}
 }
@@ -73,7 +119,13 @@ func (m model) refresh() tea.Cmd {
 func operation(ctx context.Context, cancel context.CancelFunc, fn func(context.Context) error) tea.Cmd {
 	return func() tea.Msg {
 		defer cancel()
+		logOperation(ctx, "操作开始")
 		err := fn(ctx)
+		if err != nil {
+			logOperation(ctx, "操作失败：%v", err)
+		} else {
+			logOperation(ctx, "操作完成")
+		}
 		return resultMsg{text: "操作完成", err: err}
 	}
 }
@@ -96,13 +148,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.page = ""
 		m.message = msg.text
 		if msg.err != nil {
-			m.message = "操作失败：" + msg.err.Error()
+			m.message = "操作失败：" + m.backend.logs.redact(msg.err.Error())
 		}
 		return m, m.refresh()
 	case tea.KeyMsg:
 		if msg.String() == "ctrl+c" {
 			if m.cancel != nil {
 				m.cancel()
+				m.message = "正在取消操作并保存日志…"
+				return m, nil
 			}
 			return m, tea.Quit
 		}
@@ -114,16 +168,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if msg.String() == "esc" {
-			m.page = ""
-			m.message = ""
-			m.fields = nil
-			m.confirm = nil
+			m.backToMenu()
 			return m, nil
 		}
 		if m.page == "confirm" {
 			if msg.String() == "y" || msg.String() == "Y" {
 				m.busy = true
 				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+				ctx = context.WithValue(ctx, operationLogKey{}, m.backend.logs)
 				m.cancel = cancel
 				return m, operation(ctx, cancel, m.confirm)
 			}
@@ -178,11 +230,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		switch msg.String() {
 		case "q":
+			if m.menuGroup != "" {
+				m.backToMenu()
+				return m, nil
+			}
 			return m, tea.Quit
 		case "up", "k":
-			m.cursor = (m.cursor + len(menu) - 1) % len(menu)
+			m.cursor = (m.cursor + len(m.currentMenu()) - 1) % len(m.currentMenu())
 		case "down", "j":
-			m.cursor = (m.cursor + 1) % len(menu)
+			m.cursor = (m.cursor + 1) % len(m.currentMenu())
 		case "enter":
 			return m.selectMenu()
 		}
@@ -193,35 +249,45 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m model) selectMenu() (tea.Model, tea.Cmd) {
 	m.message = ""
 	m.focus = 0
-	if m.cursor >= 10 && m.cursor <= 16 {
-		return m.zfsMenu()
+	items := m.currentMenu()
+	if m.cursor < 0 || m.cursor >= len(items) {
+		return m, nil
 	}
-	switch m.cursor {
-	case 0:
+	action := items[m.cursor].action
+	if strings.HasPrefix(action, "zfs-") || action == "zpool" {
+		return m.zfsMenu(action)
+	}
+	switch action {
+	case "zfs", "advanced":
+		m.menuGroup = action
+		m.cursor = 0
+	case "back":
+		m.backToMenu()
+	case "initialize":
 		m.page = "confirm"
 		m.message = "为全新节点启用 Incus，创建 default(dir)、incusbr0(IPv4 NAT，禁用 IPv6)，配置 default profile。已有资源将拒绝自动初始化。"
 		m.confirm = m.backend.initialize
-	case 1:
+	case "credentials":
 		c := m.backend.loadConnection()
 		m.page = "credentials"
 		m.fields = []field{{label: "Panel 根地址", value: c.Panel}, {label: "Agent ID", value: c.ID}, {label: "Agent 密钥（保留原值可直接确认）", value: c.Secret, secret: true}}
-	case 2:
+	case "token":
 		m.page = "token"
 		m.fields = []field{{label: "Panel 根地址", value: m.backend.loadConnection().Panel}, {label: "一次性安装 token（ait_，只使用一次）", secret: true}}
-	case 3:
+	case "certificate":
 		m.page = "certificate"
 		m.fields = []field{{label: "Panel 客户端 PEM 公钥证书的本地绝对路径"}}
-	case 4:
+	case "listener":
 		m.page = "confirm"
 		m.message = "启用本地 HTTPS 监听 127.0.0.1:8443，供反向隧道连接。已有其他监听地址时拒绝覆盖。仍需导入 Panel 证书，并在控制端启用隧道。"
 		m.confirm = m.backend.listener
-	case 5:
+	case "incus":
 		m.page = "incus"
-	case 6:
+	case "incudal-agent":
 		m.page = "incudal-agent"
-	case 7, 8:
+	case "incus-journal", "connector-journal":
 		unit := "incus"
-		if m.cursor == 8 {
+		if action == "connector-journal" {
 			unit = "incudal-agent"
 		}
 		cmd, err := journalCommand(unit)
@@ -230,9 +296,9 @@ func (m model) selectMenu() (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, tea.ExecProcess(cmd, func(err error) tea.Msg { return resultMsg{text: "日志查看已结束", err: err} })
-	case 9:
+	case "refresh":
 		return m, m.refresh()
-	case 17:
+	case "quit":
 		return m, tea.Quit
 	}
 	return m, nil
@@ -275,26 +341,8 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 			m.message = "无效的 ait_ 安装 token"
 			return m, nil
 		}
-		m.confirm = func(ctx context.Context) error {
-			err := m.backend.connectorReady(ctx)
-			if err != nil {
-				return err
-			}
-			c, err := m.backend.exchange(ctx, values[0], values[1])
-			if err != nil {
-				return err
-			}
-			err = m.backend.saveConnection(c)
-			if err != nil {
-				return errorsAfterToken(err)
-			}
-			err = m.backend.service(ctx, "incudal-agent", "enable")
-			if err != nil {
-				return err
-			}
-			return m.backend.service(ctx, "incudal-agent", "restart")
-		}
-		m.message = "兑换一次性 token，保存新凭据并重启连接 Agent。token 将被消费，不执行控制端的旧安装脚本。"
+		m.confirm = func(ctx context.Context) error { return m.backend.enroll(ctx, values[0], values[1]) }
+		m.message = "使用一次性 token 接入所填面板：兑换凭据、导入面板公钥证书、配置本地监听 127.0.0.1:8443，保存配置并启动连接器。token 将被消费，已有其他监听地址将拒绝覆盖。"
 	case "certificate":
 		if !strings.HasPrefix(values[0], "/") {
 			m.message = "请输入绝对路径"
@@ -311,10 +359,6 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 	m.fields = nil
 	m.page = "confirm"
 	return m, nil
-}
-
-func errorsAfterToken(err error) error {
-	return fmt.Errorf("token 已消费，但配置保存失败；请在控制端重新生成 token：%w", err)
 }
 
 func cleanText(value string) string {
@@ -337,6 +381,9 @@ func (m model) View() string {
 func (m model) render() string {
 	var out strings.Builder
 	out.WriteString("Incus 节点管理 · " + version + "\n\n")
+	if m.backend != nil && m.backend.logs != nil && m.backend.logs.path != "" {
+		out.WriteString("完整操作日志：" + m.backend.logs.path + "\n\n")
+	}
 	out.WriteString(cleanText(m.status) + "\n\n")
 	if m.message != "" {
 		out.WriteString(cleanText(m.message) + "\n\n")
@@ -372,16 +419,26 @@ func (m model) render() string {
 		if m.cursor >= visible {
 			first = m.cursor - visible + 1
 		}
-		last := min(first+visible, len(menu))
+		items := m.currentMenu()
+		if m.menuGroup == "advanced" {
+			out.WriteString("高级维护\n\n")
+		} else if m.menuGroup == "zfs" {
+			out.WriteString("ZFS 管理\n\n")
+		}
+		last := min(first+visible, len(items))
 		for i := first; i < last; i++ {
-			label := menu[i]
+			label := items[i].label
 			prefix := "  "
 			if i == m.cursor {
 				prefix = "> "
 			}
 			out.WriteString(prefix + label + "\n")
 		}
-		out.WriteString("\n↑/↓ 选择 · Enter 确认 · q 退出（菜单可滚动）\n")
+		if m.menuGroup == "" {
+			out.WriteString("\n↑/↓ 选择 · Enter 确认 · q 退出\n")
+		} else {
+			out.WriteString("\n↑/↓ 选择 · Enter 确认 · Esc / q 返回主菜单（菜单可滚动）\n")
+		}
 	}
 	return out.String()
 }
@@ -393,7 +450,7 @@ func initialModel(b *backend) model {
 	if panel != "" && token != "" {
 		_ = os.Unsetenv("INCUDAL_PANEL_URL")
 		m.page = "token"
-		m.message = "请确认连接信息。初始化存储与导入 Panel 公钥证书可在主菜单完成。"
+		m.message = "请确认面板地址和一次性 token。确认后自动配置凭据、证书信任、本地监听并启动连接器；节点存储初始化可在主菜单完成。"
 		m.fields = []field{{label: "Panel 根地址", value: panel}, {label: "一次性安装 token（ait_，只使用一次）", value: token, secret: true}}
 	}
 	return m
@@ -410,8 +467,28 @@ func main() {
 		fmt.Fprintln(os.Stderr, "请使用 sudo incus-tui")
 		os.Exit(1)
 	}
-	m := initialModel(newBackend())
-	_, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
+	logDir := "/var/log/incus-tui"
+	err := os.MkdirAll(logDir, 0o700)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "无法创建日志目录：", err)
+		os.Exit(1)
+	}
+	logFile, err := os.CreateTemp(logDir, "session-"+time.Now().Format("20060102-150405")+"-*.log")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "无法创建日志文件：", err)
+		os.Exit(1)
+	}
+	defer func() {
+		err := logFile.Close()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "关闭日志文件失败：", err)
+		}
+	}()
+	b := newBackend()
+	b.logs = &operationLog{writer: logFile, path: filepath.Clean(logFile.Name())}
+	program := tea.NewProgram(initialModel(b))
+	b.logs.emit = func(line string) { program.Println(line) }
+	_, err = program.Run()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "无法启动终端界面：", err)
 		os.Exit(1)

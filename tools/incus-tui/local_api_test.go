@@ -130,11 +130,11 @@ func TestLocalAdapterConfigAndTrust(t *testing.T) {
 }
 
 func TestLocalAdapterFailureAndCancellation(t *testing.T) {
-	for _, body := range []string{`{"type":"error","error":"private-secret"}`, `not json`, `{"type":"async","operation":"https://other.invalid/"}`, `{"type":"async","operation":"/1.0/operations/o?other=x"}`} {
+	for _, body := range []string{`{"type":"error","error":"bridge creation denied"}`, `not json`, `{"type":"async","operation":"https://other.invalid/"}`, `{"type":"async","operation":"/1.0/operations/o?other=x"}`} {
 		c := apiFixture(t, func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(body)) })
 		_, err := c.call(context.Background(), "GET", "/1.0", nil)
-		if err == nil || strings.Contains(err.Error(), "private-secret") {
-			t.Fatal("invalid response accepted or leaked")
+		if err == nil {
+			t.Fatal("invalid response accepted")
 		}
 	}
 	c := apiFixture(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(403) })
@@ -154,9 +154,43 @@ func TestLocalAdapterFailureAndCancellation(t *testing.T) {
 	}
 }
 
+func TestLocalAPIPreservesErrorsAndFullLogs(t *testing.T) {
+	for _, asynchronous := range []bool{false, true} {
+		var logs strings.Builder
+		ctx := context.WithValue(context.Background(), operationLogKey{}, &operationLog{writer: &logs})
+		c := apiFixture(t, func(w http.ResponseWriter, r *http.Request) {
+			if asynchronous && r.Method == http.MethodPost {
+				_ = json.NewEncoder(w).Encode(map[string]any{"type": "async", "operation": "/1.0/operations/op"})
+				return
+			}
+			if asynchronous {
+				syncJSON(w, map[string]any{"status_code": 400, "err": "dnsmasq: permission denied creating incusbr0"})
+				return
+			}
+
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]any{"type": "error", "error": "dnsmasq: permission denied creating incusbr0", "error_code": 500})
+		})
+		_, err := c.call(ctx, http.MethodPost, "/1.0/networks", map[string]any{"name": "incusbr0"})
+		if err == nil || !strings.Contains(err.Error(), "dnsmasq: permission denied creating incusbr0") || !strings.Contains(err.Error(), "POST /1.0/networks") {
+			t.Fatalf("original API diagnostics were lost: %v", err)
+		}
+		if !strings.Contains(logs.String(), "permission denied creating incusbr0") || !strings.Contains(logs.String(), `"name":"incusbr0"`) {
+			t.Fatal("request or error response missing from operation log")
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	c := apiFixture(t, func(w http.ResponseWriter, r *http.Request) {})
+	_, err := c.call(ctx, http.MethodGet, "/1.0", nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation cause lost: %v", err)
+	}
+}
+
 func TestZFSConfirmationFingerprintAndReadOnlyKey(t *testing.T) {
-	m := model{backend: &backend{runner: &fakeRunner{}}, cursor: 12}
-	updated, cmd := m.zfsMenu()
+	m := model{backend: &backend{runner: &fakeRunner{}}, menuGroup: "zfs", cursor: 2}
+	updated, cmd := m.zfsMenu("zfs-create")
 	m = asModel(t, updated)
 	if cmd != nil || m.page != "zfs-create" || len(m.fields) != 3 || !m.fields[1].readonly {
 		t.Fatal("missing enrollment step")

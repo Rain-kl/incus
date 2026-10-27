@@ -32,17 +32,26 @@ type Runner interface {
 type commandRunner struct{}
 
 func (commandRunner) Run(ctx context.Context, name string, args []string, input string) ([]byte, error) {
+	logOperation(ctx, "$ %s %s", name, strings.Join(args, " "))
 	if name == "/usr/bin/incus" {
 		return runIncusAdapter(ctx, args, input)
 	}
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.WaitDelay = 3 * time.Second
 	cmd.Stdin = strings.NewReader(input)
-	output, err := cmd.CombinedOutput()
+	var output bytes.Buffer
+	stream := &commandLogWriter{ctx: ctx}
+	writer := io.MultiWriter(&output, stream)
+	cmd.Stdout = writer
+	cmd.Stderr = writer
+	err := cmd.Run()
+	stream.flush()
 	if err != nil {
-		return output, fmt.Errorf("%s: %w: %s", filepath.Base(name), err, strings.TrimSpace(string(output)))
+		logOperation(ctx, "%s: %v", name, err)
+		return output.Bytes(), fmt.Errorf("%s: %w: %s", filepath.Base(name), err, strings.TrimSpace(output.String()))
 	}
-	return output, nil
+	logOperation(ctx, "%s: completed (exit 0)", name)
+	return output.Bytes(), nil
 }
 
 type backend struct {
@@ -51,6 +60,7 @@ type backend struct {
 	client      *http.Client
 	releasePath string
 	sourcePath  string
+	logs        *operationLog
 }
 
 func newBackend() *backend {
@@ -96,10 +106,12 @@ func (b *backend) connectorReady(ctx context.Context) error {
 }
 
 func (b *backend) connect(ctx context.Context, c connection) error {
+	contextLog(ctx).secret(c.Secret)
 	err := b.connectorReady(ctx)
 	if err != nil {
 		return err
 	}
+	logOperation(ctx, "保存 Panel 连接配置：%s (0600)", b.path)
 	err = b.saveConnection(c)
 	if err != nil {
 		return err
@@ -116,7 +128,7 @@ func (b *backend) status(ctx context.Context) string {
 	for _, unit := range []string{"incus", "incudal-agent"} {
 		data, err := b.run(ctx, "systemctl", "show", unit, "--property=ActiveState,SubState,UnitFileState", "--no-pager")
 		if err != nil {
-			lines = append(lines, unit+": 状态读取失败")
+			lines = append(lines, unit+": 状态读取失败: "+err.Error())
 			continue
 		}
 		lines = append(lines, unit+": "+strings.ReplaceAll(strings.TrimSpace(string(data)), "\n", "  "))
@@ -136,6 +148,9 @@ func (b *backend) status(ctx context.Context) string {
 	}
 	if err != nil || !supported {
 		lines = append(lines, "节点 API: 不可用，请启动 Incus 或查看日志")
+		if err != nil {
+			lines = append(lines, err.Error())
+		}
 	} else {
 		lines = append(lines, "节点 API: 可连接")
 	}
@@ -167,9 +182,8 @@ func panelURL(value string) (string, error) {
 	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") {
 		return "", errors.New("请输入 Panel 根地址，例如 https://panel.example.com")
 	}
-	localHTTP := parsed.Scheme == "http" && (parsed.Hostname() == "localhost" || parsed.Hostname() == "127.0.0.1" || parsed.Hostname() == "::1")
-	if parsed.Scheme != "https" && !localHTTP {
-		return "", errors.New("Panel 必须使用 HTTPS；仅本机调试允许 HTTP")
+	if parsed.Scheme != "https" && parsed.Scheme != "http" {
+		return "", errors.New("Panel 地址必须使用 HTTP 或 HTTPS")
 	}
 	return strings.TrimRight(parsed.String(), "/"), nil
 }
@@ -185,50 +199,75 @@ func (c connection) validate() error {
 	return nil
 }
 
-func (b *backend) exchange(ctx context.Context, panel, token string) (connection, error) {
+type enrollment struct {
+	connection
+	Certificate []byte
+	Fingerprint string
+}
+
+func (b *backend) exchange(ctx context.Context, panel, token string) (enrollment, error) {
+	contextLog(ctx).secret(token)
 	base, err := panelURL(panel)
 	if err != nil {
-		return connection{}, err
+		return enrollment{}, err
 	}
 	if !tokenPattern.MatchString(token) {
-		return connection{}, errors.New("安装 token 格式不正确，应以 ait_ 开头")
+		return enrollment{}, errors.New("安装 token 格式不正确，应以 ait_ 开头")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/api/agent/install-config/"+token, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/api/agent/install-config/"+token+"?format=json", nil)
 	if err != nil {
-		return connection{}, errors.New("无法构造凭据请求")
+		return enrollment{}, redactedDiagnostic(ctx, fmt.Errorf("构造 Panel 凭据请求：%w", err))
 	}
+	req.Header.Set("Accept", "application/json")
 	response, err := b.client.Do(req)
 	if err != nil {
-		return connection{}, errors.New("无法连接 Panel，或请求被取消；请检查地址、TLS 和网络")
+		return enrollment{}, redactedDiagnostic(ctx, fmt.Errorf("Panel 凭据请求失败：%w", err))
 	}
 	defer response.Body.Close()
+	logOperation(ctx, "Panel GET %s/api/agent/install-config/[REDACTED]: HTTP %d", base, response.StatusCode)
 	if response.StatusCode != http.StatusOK {
-		return connection{}, fmt.Errorf("Panel 凭据兑换失败：HTTP %d（token 只能使用一次）", response.StatusCode)
-	}
-	data, err := io.ReadAll(io.LimitReader(response.Body, 8193))
-	if err != nil || len(data) > 8192 {
-		return connection{}, errors.New("Panel 凭据响应读取失败或过大")
-	}
-	// Parse the current Panel's two shell assignments as data; never source or execute them.
-	c := connection{Panel: base}
-	seen := map[string]bool{}
-	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
-		key, value, ok := strings.Cut(strings.TrimSpace(line), "=")
-		if !ok || seen[key] || (key != "INCUDAL_AGENT_ID" && key != "INCUDAL_AGENT_SECRET") {
-			return connection{}, errors.New("Panel 凭据响应格式不兼容")
+		data, readErr := io.ReadAll(io.LimitReader(response.Body, 8193))
+		if readErr != nil {
+			return enrollment{}, fmt.Errorf("Panel HTTP %d: reading error response: %w", response.StatusCode, readErr)
 		}
-		seen[key] = true
-		if len(value) < 2 || value[0] != '\'' || value[len(value)-1] != '\'' {
-			return connection{}, errors.New("Panel 凭据响应格式不兼容")
-		}
-		value = value[1 : len(value)-1]
-		if key == "INCUDAL_AGENT_ID" {
-			c.ID = value
-		} else {
-			c.Secret = value
-		}
+		return enrollment{}, fmt.Errorf("Panel 凭据兑换失败：HTTP %d（token 只能使用一次）: %s", response.StatusCode, safePayload(ctx, data))
 	}
-	return c, c.validate()
+	data, err := io.ReadAll(io.LimitReader(response.Body, 131073))
+	if err != nil {
+		return enrollment{}, fmt.Errorf("Panel 凭据响应读取失败：%w", err)
+	}
+	if len(data) > 131072 {
+		return enrollment{}, errors.New("Panel 接入响应超过128 KiB，拒绝解析")
+	}
+	var config struct {
+		SchemaVersion                     int    `json:"schemaVersion"`
+		AgentID                           string `json:"agentId"`
+		AgentSecret                       string `json:"agentSecret"`
+		PanelClientCertificate            string `json:"panelClientCertificate"`
+		PanelClientCertificateFingerprint string `json:"panelClientCertificateFingerprint"`
+	}
+	err = json.Unmarshal(data, &config)
+	if err != nil {
+		return enrollment{}, fmt.Errorf("解析 Panel JSON 接入响应（需要新版控制端）：%w", err)
+	}
+	c := connection{Panel: base, ID: config.AgentID, Secret: config.AgentSecret}
+	contextLog(ctx).secret(c.Secret)
+	if config.SchemaVersion != 1 {
+		return enrollment{}, fmt.Errorf("不支持的 Panel 接入协议版本 %d，需要版本1", config.SchemaVersion)
+	}
+	err = c.validate()
+	if err != nil {
+		return enrollment{}, err
+	}
+	cert, fingerprint, err := parseCertificate([]byte(config.PanelClientCertificate))
+	if err != nil {
+		return enrollment{}, fmt.Errorf("Panel 客户端公钥证书：%w", err)
+	}
+	if config.PanelClientCertificateFingerprint != fingerprint {
+		return enrollment{}, errors.New("Panel 客户端证书 SHA256 指纹不匹配")
+	}
+	logOperation(ctx, "Panel 凭据兑换完成；客户端公钥证书 SHA256：%s", fingerprint)
+	return enrollment{connection: c, Certificate: cert, Fingerprint: fingerprint}, nil
 }
 
 func (b *backend) loadConnection() connection {
@@ -327,7 +366,10 @@ func (b *backend) initialize(ctx context.Context) error {
 				} `json:"environment"`
 			}
 			err = json.Unmarshal(data, &server)
-			if err != nil || server.Environment.Clustered == nil {
+			if err != nil {
+				return fmt.Errorf("解析 Incus server 响应：%w", err)
+			}
+			if server.Environment.Clustered == nil {
 				return errors.New("Incus server 响应格式不兼容")
 			}
 			if *server.Environment.Clustered {
@@ -335,9 +377,10 @@ func (b *backend) initialize(ctx context.Context) error {
 			}
 			break
 		}
+		logOperation(ctx, "等待 Incus API 就绪：%v", readyErr)
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("等待 Incus API 就绪超时：%w", ctx.Err())
+			return fmt.Errorf("等待 Incus API 就绪：%w；最后错误：%v", ctx.Err(), readyErr)
 		case <-time.After(time.Second):
 		}
 	}
@@ -348,7 +391,10 @@ func (b *backend) initialize(ctx context.Context) error {
 		}
 		var entries []string
 		queryErr = json.Unmarshal(data, &entries)
-		if queryErr != nil || entries == nil {
+		if queryErr != nil {
+			return fmt.Errorf("解析 Incus %s 响应：%w", path, queryErr)
+		}
+		if entries == nil {
 			return fmt.Errorf("Incus %s 响应格式不兼容", path)
 		}
 		if len(entries) != 0 {
@@ -364,7 +410,10 @@ func (b *backend) initialize(ctx context.Context) error {
 		Managed *bool  `json:"managed"`
 	}
 	err = json.Unmarshal(data, &networks)
-	if err != nil || networks == nil {
+	if err != nil {
+		return fmt.Errorf("解析 Incus 网络响应：%w", err)
+	}
+	if networks == nil {
 		return errors.New("Incus 网络响应格式不兼容")
 	}
 	for _, network := range networks {
@@ -384,12 +433,16 @@ func (b *backend) initialize(ctx context.Context) error {
 		Devices map[string]map[string]string `json:"devices"`
 	}
 	err = json.Unmarshal(data, &profile)
-	if err != nil || profile.Config == nil || profile.Devices == nil {
+	if err != nil {
+		return fmt.Errorf("解析 Incus profile 响应：%w", err)
+	}
+	if profile.Config == nil || profile.Devices == nil {
 		return errors.New("Incus profile 响应格式不兼容")
 	}
 	if len(profile.Config) != 0 || len(profile.Devices) != 0 {
 		return errors.New("default profile 已有配置，拒绝覆盖")
 	}
+	logOperation(ctx, "初始化配置：\n%s", preseed)
 	_, err = b.runner.Run(ctx, "/usr/bin/incus", []string{"--force-local", "admin", "init", "--preseed"}, preseed)
 	if err != nil {
 		return fmt.Errorf("初始化失败，可能已有部分资源，请手动检查后再操作：%w", err)
@@ -404,8 +457,15 @@ func readCertificate(path string) ([]byte, string, error) {
 	}
 	defer file.Close()
 	data, err := io.ReadAll(io.LimitReader(file, 65537))
-	if err != nil || len(data) > 65536 {
-		return nil, "", errors.New("证书读取失败或文件过大")
+	if err != nil {
+		return nil, "", fmt.Errorf("读取证书 %s：%w", path, err)
+	}
+	return parseCertificate(data)
+}
+
+func parseCertificate(data []byte) ([]byte, string, error) {
+	if len(data) > 65536 {
+		return nil, "", errors.New("证书文件超过65536字节")
 	}
 	block, rest := pem.Decode(data)
 	if block == nil || block.Type != "CERTIFICATE" || len(bytes.TrimSpace(rest)) != 0 {
@@ -413,7 +473,7 @@ func readCertificate(path string) ([]byte, string, error) {
 	}
 	cert, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
-		return nil, "", errors.New("无效的 X.509 证书")
+		return nil, "", fmt.Errorf("解析 X.509 证书：%w", err)
 	}
 	now := time.Now()
 	if now.Before(cert.NotBefore) || now.After(cert.NotAfter) {
@@ -449,7 +509,7 @@ func (b *backend) trust(ctx context.Context, cert []byte, fingerprint string) er
 	return err
 }
 
-func (b *backend) listener(ctx context.Context) error {
+func (b *backend) checkListener(ctx context.Context) error {
 	data, err := b.run(ctx, "/usr/bin/incus", "config", "get", "core.https_address")
 	if err != nil {
 		return err
@@ -457,6 +517,14 @@ func (b *backend) listener(ctx context.Context) error {
 	current := strings.TrimSpace(string(data))
 	if current != "" && current != "127.0.0.1:8443" {
 		return errors.New("已有 HTTPS 监听配置，拒绝覆盖：" + current)
+	}
+	return nil
+}
+
+func (b *backend) listener(ctx context.Context) error {
+	err := b.checkListener(ctx)
+	if err != nil {
+		return err
 	}
 	_, err = b.run(ctx, "/usr/bin/incus", "config", "set", "core.https_address", "127.0.0.1:8443")
 	return err

@@ -42,6 +42,10 @@ func (c *localClient) call(ctx context.Context, method, path string, input any) 
 			return nil, err
 		}
 	}
+	logOperation(ctx, "Incus API -> %s %s", method, path)
+	if len(payload) > 0 {
+		logOperation(ctx, "request: %s", safePayload(ctx, payload))
+	}
 	request, err := http.NewRequestWithContext(ctx, method, "http://incus"+path, bytes.NewReader(payload))
 	if err != nil {
 		return nil, err
@@ -52,7 +56,7 @@ func (c *localClient) call(ctx context.Context, method, path string, input any) 
 	}
 	response, err := c.http.Do(request)
 	if err != nil {
-		return nil, errors.New("本机服务暂不可用")
+		return nil, fmt.Errorf("Incus API %s %s: %w", method, path, err)
 	}
 	defer response.Body.Close()
 	if method == "GET" && response.Header.Get("ETag") != "" {
@@ -67,9 +71,18 @@ func (c *localClient) call(ctx context.Context, method, path string, input any) 
 		Operation string          `json:"operation"`
 		Error     string          `json:"error"`
 	}
-	err = json.NewDecoder(io.LimitReader(response.Body, 4<<20)).Decode(&envelope)
-	if err != nil || response.StatusCode >= 400 {
-		return nil, errors.New("本机服务内部错误")
+	data, err := io.ReadAll(response.Body)
+	logOperation(ctx, "Incus API <- %s %s HTTP %d\n%s", method, path, response.StatusCode, safePayload(ctx, data))
+	if err != nil {
+		return nil, fmt.Errorf("Incus API %s %s HTTP %d: reading response: %w", method, path, response.StatusCode, err)
+	}
+
+	err = json.Unmarshal(data, &envelope)
+	if err != nil {
+		return nil, fmt.Errorf("Incus API %s %s HTTP %d: decoding response: %w\n%s", method, path, response.StatusCode, err, safePayload(ctx, data))
+	}
+	if response.StatusCode >= 400 || envelope.Type == "error" {
+		return nil, fmt.Errorf("Incus API %s %s HTTP %d: %s", method, path, response.StatusCode, safePayload(ctx, data))
 	}
 	if envelope.Type == "async" {
 		if !strings.HasPrefix(envelope.Operation, "/1.0/operations/") || strings.ContainsAny(envelope.Operation, "?#") {
@@ -93,14 +106,14 @@ func (c *localClient) call(ctx context.Context, method, path string, input any) 
 				return data, nil
 			case 100, 103, 104, 105:
 			case 400, 401:
-				return nil, errors.New("本机操作失败")
+				return nil, fmt.Errorf("Incus API %s %s operation %s status %d: %s", method, path, envelope.Operation, operation.StatusCode, contextLog(ctx).redact(operation.Err))
 			default:
-				return nil, errors.New("操作响应不兼容")
+				return nil, fmt.Errorf("Incus API %s %s operation %s: unexpected status %d\n%s", method, path, envelope.Operation, operation.StatusCode, safePayload(ctx, data))
 			}
 		}
 	}
 	if envelope.Type != "sync" {
-		return nil, errors.New("响应格式不兼容")
+		return nil, fmt.Errorf("Incus API %s %s HTTP %d: unexpected response type %q\n%s", method, path, response.StatusCode, envelope.Type, safePayload(ctx, data))
 	}
 	return envelope.Metadata, nil
 }
@@ -114,7 +127,10 @@ func (c *localClient) config(ctx context.Context) (map[string]string, error) {
 		Config map[string]string `json:"config"`
 	}
 	err = json.Unmarshal(data, &result)
-	if err != nil || result.Config == nil {
+	if err != nil {
+		return nil, fmt.Errorf("解析本机配置：%w", err)
+	}
+	if result.Config == nil {
 		return nil, errors.New("本机配置格式不兼容")
 	}
 	return result.Config, nil
@@ -155,7 +171,10 @@ func (c *localClient) runAdapter(ctx context.Context, args []string, input strin
 			Devices map[string]any    `json:"devices"`
 		}
 		err = json.Unmarshal(profile, &current)
-		if err != nil || current.Config == nil || current.Devices == nil || len(current.Config) > 0 || len(current.Devices) > 0 {
+		if err != nil {
+			return nil, fmt.Errorf("解析默认 profile：%w", err)
+		}
+		if current.Config == nil || current.Devices == nil || len(current.Config) > 0 || len(current.Devices) > 0 {
 			return nil, errors.New("默认 profile 已变化，拒绝覆盖")
 		}
 		return c.call(ctx, "PUT", "/1.0/profiles/default", map[string]any{"config": map[string]string{}, "devices": map[string]any{"root": map[string]string{"type": "disk", "path": "/", "pool": "default"}, "eth0": map[string]string{"type": "nic", "name": "eth0", "network": "incusbr0"}}})

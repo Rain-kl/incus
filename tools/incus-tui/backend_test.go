@@ -219,7 +219,7 @@ func TestAtomicPrivateConfiguration(t *testing.T) {
 	if string(before) != string(after) {
 		t.Fatal("damaged existing configuration")
 	}
-	for _, address := range []string{"http://panel.example.com", "https://example.com/path", "https://u:p@example.com", "https://example.com?secret=x", "https://example.com#x"} {
+	for _, address := range []string{"ftp://panel.example.com", "https://example.com/path", "https://u:p@example.com", "https://example.com?secret=x", "https://example.com#x"} {
 		{
 			_, err := panelURL(address)
 			if err == nil {
@@ -231,25 +231,26 @@ func TestAtomicPrivateConfiguration(t *testing.T) {
 
 func TestPanelTokenProtocol(t *testing.T) {
 	c := goodConnection()
+	payload, _, _ := enrollmentFixture(t, c)
 	token := "ait_" + strings.Repeat("x", 43)
 	for _, tt := range []struct {
 		name, body string
 		status     int
 		want       bool
 	}{
-		{"success", fmt.Sprintf("INCUDAL_AGENT_ID='%s'\nINCUDAL_AGENT_SECRET='%s'\n", c.ID, c.Secret), 200, true},
+		{"success", payload, 200, true},
 		{"expired", "# expired", 403, false},
 		{"unauthorized", "", 401, false},
 		{"server error", "", 500, false},
 		{"JSON instead of assignments", `{"credentials":{}}`, 200, false},
 		{"shell injection", "INCUDAL_AGENT_ID='$(touch /tmp/unsafe)'\nINCUDAL_AGENT_SECRET='bad'", 200, false},
 		{"extra assignment", fmt.Sprintf("INCUDAL_AGENT_ID='%s'\nINCUDAL_AGENT_SECRET='%s'\nEXEC='evil'", c.ID, c.Secret), 200, false},
-		{"oversized", strings.Repeat("x", 8193), 200, false},
+		{"oversized", strings.Repeat("x", 131073), 200, false},
 		{"duplicate", fmt.Sprintf("INCUDAL_AGENT_ID='%s'\nINCUDAL_AGENT_ID='%s'", c.ID, c.ID), 200, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != "GET" || r.URL.Path != "/api/agent/install-config/"+token {
+				if r.Method != "GET" || r.URL.Path != "/api/agent/install-config/"+token || r.URL.RawQuery != "format=json" {
 					t.Error("request contract changed")
 				}
 				w.WriteHeader(tt.status)

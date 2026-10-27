@@ -9,7 +9,7 @@
 | 正式发布 tag | `v7.0.2` |
 | 上游提交 | `01f81e5e607bbb5818410318e4b3496ad1820824` |
 | 官方发布时间 | 2026-10-16 |
-| 核对日期 | 2026-10-26 |
+| 核对日期 | 2026-10-27 |
 
 上游始终以正式 LTS 版本为准，仅同步 LTS 维护版本及经过兼容性验证的新 LTS 系列。普通功能版、开发分支及未发版提交均不纳入基线或同步目标。定制提交建立在记录的 LTS 基线上。
 
@@ -143,6 +143,15 @@ CI 权限隔离：daemon 测试先由普通 runner 编译测试程序，再以 r
 - TUI 提供 Panel 凭据配置及一次性 token 兑换、原子 0600 配置保存、连接服务启动、服务生命周期、实时 journal、固定基础初始化、mTLS 公钥证书指纹确认及本地隧道监听。仅写入确认过的配置，不运行旧 Agent 安装器，不在终端或错误信息显示 token/密钥；已有旧连接服务覆盖时在兑换前停止并给出诊断。
 - 一键初始化只面向全新非集群节点：dir 存储、IPv4 NAT 网桥、default profile；拒绝覆盖已有资源，失败不自动删除资源，部分写入需人工检查。内核、KVM、AppArmor、外层嵌套权限及 UID/GID 映射不由安装器/TUI 自动修改。Agent 在线与实例管理的 mTLS 验证分开。
 - 仅调整本 fork 自有 `deploy/payincus/incus.service`，改为 `network.target`，避免 DNS wait-online 阻塞本地 daemon；连接器的网络等待保持原有行为。包安装仍不自动启动/重启服务，避免升级时直接影响运行中的节点。
+
+### 操作诊断与自选 HTTP 连接（2026-10-27）
+
+- 目的：解决一键初始化将原始 Incus 错误替换为“本机服务内部错误”、成功命令输出不可见和退出后日志消失的问题。`tools/incus-tui/{operation_log,backend,local_api,main,zfs}.go` 在普通终端屏幕持续打印全部 stdout/stderr、API 方法/路径/状态及完整响应，同时写入 `/var/log/incus-tui/session-*.log`（目录 0700、文件 0600）。不截断长行；日志不能写入时在终端明确报错。凭据字段、一次性 token、Agent 密钥及本次提交的 ZFS 密钥遮蔽，其他故障诊断保留。
+- HTTP 错误保留 Incus error envelope；异步 operation 保留原始 `err` 与状态码；传输、取消、ZFS 命令及文件操作错误保留原始原因。仍拒绝覆盖已有资源，初始化部分失败后不自动删除存储池或网桥。Ctrl+C 在操作中取消并等待日志收尾，空闲时退出。
+- Panel 根地址允许用户自行选择 HTTP 或 HTTPS，包括非回环地址；不额外要求 TLS。保留 URL 结构校验、一次性 token 语义和禁止凭据兑换重定向。连接器的 HTTP/HTTPS 契约不变，无新增配置键或数据库格式。
+- 上游接口仍为已记录的 7.0.2 LTS 原生 API 与 `payincus_node_v1`，没有上游源码接入点变更。后续同步核对 error envelope、operation `status_code/err` 和 Bubble Tea 普通屏幕输出行为。
+- 验证：`go test -race ./...`（独立 TUI module）通过；`local_api_test.go/TestLocalAPIPreservesErrorsAndFullLogs` 覆盖 HTTP/异步失败与取消原因；`operation_log_test.go` 覆盖实时 stdout/stderr、退出码、128 KB 长行、密钥遮蔽和非回环 HTTP。OrbStack 真机与二进制替换结果另行记录，不以单元测试代替真实初始化成功。
+- 本地 OrbStack Debian 13 arm64 真机已验证：新 TUI 正常启动、完整命令/API 日志持续输出并保存，`http://100.75.147.95:3000` 可进入凭据兑换确认页（取消确认，未消费实际 token）。`go vet ./...` 与 Linux arm64 编译通过，安装版本为 `02fc62644b01+local-diagnostics`，旧 TUI 备份在 `/var/backups/incus-tui/incus-tui-02fc62644b01`。未重启 Incus/连接器，未宣称已完成节点初始化；虚拟机现有 default 存储池和空 profile 保留。
 
 ### 上游/API 接入与测试
 
