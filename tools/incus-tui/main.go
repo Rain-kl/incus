@@ -477,9 +477,36 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func finalCarriageReturnSegment(line string) string {
+	if !strings.ContainsRune(line, '\r') {
+		return line
+	}
+
+	parts := strings.Split(line, "\r")
+	for i := len(parts) - 1; i >= 0; i-- {
+		segment := parts[i]
+		trimmed := strings.TrimSpace(ansi.Strip(segment))
+		if trimmed != "" {
+			return segment
+		}
+	}
+
+	return ""
+}
+
 func cleanText(value string) string {
 	// PayIncus: strip the whole terminal sequence before removing individual control characters.
 	value = ansi.Strip(value)
+	value = strings.ReplaceAll(value, "\r\n", "\n")
+	if strings.ContainsRune(value, '\r') {
+		lines := strings.Split(value, "\n")
+		for i, line := range lines {
+			if strings.ContainsRune(line, '\r') {
+				lines[i] = finalCarriageReturnSegment(line)
+			}
+		}
+		value = strings.Join(lines, "\n")
+	}
 	return strings.Map(func(r rune) rune {
 		if r == '\n' || (r >= 32 && r != 127 && (r < 0x80 || r > 0x9f)) {
 			return r

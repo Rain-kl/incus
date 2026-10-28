@@ -63,11 +63,15 @@ for asset in selected:
         sys.exit('Invalid release asset metadata.')
 (folder / 'assets.txt').write_text('\n'.join(a['browser_download_url'] for a in selected) + '\n')
 (folder / 'package.txt').write_text(packages[0]['name'])
+size = packages[0].get('size')
+size_label = f" ({size / 1048576:.1f} MiB)" if isinstance(size, int) and size > 0 else ""
 print(f"Installing {release['tag_name']} for {target}/{arch}")
+print(f"Downloading {packages[0]['name']}{size_label}")
 PY
 mapfile -t urls < "$stage/assets.txt"
 package="$(cat "$stage/package.txt")"
-curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+# PayIncus: keep the progress bar within an 80-column TUI log row after the RFC3339 prefix.
+COLUMNS=48 curl --fail --progress-bar --show-error --location --proto '=https' --proto-redir '=https' \
   --connect-timeout 15 --max-time 900 "${urls[0]}" -o "$stage/$package"
 curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
   --connect-timeout 15 --max-time 120 "${urls[1]}" -o "$stage/SHA256SUMS"
@@ -82,6 +86,7 @@ for line in (folder / 'SHA256SUMS').read_text().splitlines():
         matches.append(match[1])
 if len(matches) != 1 or hashlib.file_digest((folder / name).open('rb'), 'sha256').hexdigest() != matches[0]:
     sys.exit('Package checksum verification failed; installation aborted.')
+print(f"Verified SHA256 checksum for {name}")
 PY
 apt-get update
 if [[ "${2:-}" == --update ]]; then

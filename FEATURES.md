@@ -13,6 +13,14 @@
 
 上游始终以正式 LTS 版本为准，仅同步 LTS 维护版本及经过兼容性验证的新 LTS 系列。普通功能版、开发分支及未发版提交均不纳入基线或同步目标。定制提交建立在记录的 LTS 基线上。
 
+## TUI 节点更新下载进度条与回车覆盖行渲染（2026-10-28）
+
+- 目的：修复 `incus-tui` 更新节点软件包时 `node-install.sh` 使用 `curl --silent` 静默下载 `.deb`，导致终端长时间停在 `Installing ...` 无任何进度反馈的问题。
+- 行为与限制：`scripts/payincus/install.sh` 在下载软件包前输出包名与体积（MiB），将 `.deb` 下载参数由 `--silent` 改为 `COLUMNS=48 curl --fail --progress-bar --show-error`，并在 SHA256 校验通过后输出确认行；元数据与 `SHA256SUMS` 小文件保持静默下载。`tools/incus-tui/{operation_log.go,main.go}` 支持处理回车符 `\r` 进度刷新：未完结的 `\r` 进度帧在 UI 日志尾部（`operationLog.recent`）原地刷新同一行，待 `\n` 或命令收尾时再将最终帧写入磁盘会话日志，避免刷屏或污染落盘日志；`cleanText` 对含 `\r` 的单行保留最后一个非空片段。
+- 配置与兼容性：无需新增配置；`COLUMNS=48` 加上 RFC3339 时间戳前缀控制在 80 列终端单行内。不影响原有 `--update` 非交互 APT、SHA256 校验及服务重启契约。
+- 代码接入点与上游 API：`scripts/payincus/{install.sh,test-install.py}`、`tools/incus-tui/{operation_log.go,operation_log_test.go,main.go}`；全部位于独立安装脚本与 TUI 模块，不涉及上游源码、Incus API 或扩展变更。
+- 测试与验证：`test-install.py` 验证 `--progress-bar`、`COLUMNS=48`、下载提示与 SHA256 校验输出；`operation_log_test.go` 新增 `TestCarriageReturnProgressUpdatesLiveTailWithoutFloodingDisk` 验证分片 `\r` 进度帧原地更新 UI 尾部且不刷写磁盘日志。`python3 scripts/payincus/test-install.py`、`bash -n scripts/payincus/install.sh` 及 `tools/incus-tui` 的 `go test -race ./...`、`go vet ./...` 均通过。
+
 ## TUI 系统命令路径与日志页面（2026-10-28）
 
 - 目的：修复非登录 root 环境缺少 `/usr/sbin:/sbin` 时，一键 ZFS 依赖安装已成功却找不到 `modprobe`；隔离菜单、节点状态与命令输出，避免日志冲散界面。

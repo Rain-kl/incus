@@ -172,3 +172,47 @@ func TestPanelAcceptsHTTPOnUserChosenHosts(t *testing.T) {
 		}
 	}
 }
+
+func TestCarriageReturnProgressUpdatesLiveTailWithoutFloodingDisk(t *testing.T) {
+	var disk strings.Builder
+	l := &operationLog{writer: &disk}
+	ctx := context.WithValue(context.Background(), operationLogKey{}, l)
+	w := commandLogWriter{ctx: ctx}
+	_, err := w.Write([]byte("Installing integration-7.0.2-d61a07997f98 for ubuntu-24.04/amd64\nDownloading payincus-incus.deb (82.4 MiB)\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, chunk := range []string{
+		"\r###=-                                           ",
+		"\r################                          ",
+		" 40.0%",
+		"\r########################                   60.0%",
+	} {
+		_, err = w.Write([]byte(chunk))
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	entries, _ := l.tail()
+	if len(entries) != 3 || !strings.HasSuffix(entries[2], "########################                   60.0%") {
+		t.Fatalf("expected live progress bar in third UI line, got: %#v", entries)
+	}
+	if strings.Contains(disk.String(), "40.0%") || strings.Contains(disk.String(), "60.0%") {
+		t.Fatalf("intermediate carriage-return frames flooded disk log: %s", disk.String())
+	}
+	_, err = w.Write([]byte("\r######################################### 100.0%\nVerified SHA256 checksum for payincus-incus.deb\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.flush()
+	entries, _ = l.tail()
+	if len(entries) != 4 || !strings.HasSuffix(entries[2], "######################################### 100.0%") || !strings.HasSuffix(entries[3], "Verified SHA256 checksum for payincus-incus.deb") {
+		t.Fatalf("completed progress bar was not finalized in place: %#v", entries)
+	}
+	if !strings.Contains(disk.String(), "######################################### 100.0%") || strings.Contains(disk.String(), "60.0%") {
+		t.Fatalf("final progress bar missing or intermediate frame leaked on disk: %s", disk.String())
+	}
+	if cleanText("frame-1\rframe-2\rframe-3\nnext\r\n") != "frame-3\nnext\n" {
+		t.Fatalf("cleanText did not collapse carriage-return frames: %q", cleanText("frame-1\rframe-2\rframe-3\nnext\r\n"))
+	}
+}

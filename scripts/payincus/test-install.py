@@ -53,7 +53,7 @@ class InstallerTests(unittest.TestCase):
             release = {'tag_name': 'integration-7.0.2-abcdef012345' if channel == 'canary' else 'payincus-v7.0.2',
                        'prerelease': channel == 'canary', 'draft': draft, 'published_at': '2026-10-23T00:00:00Z',
                        'assets': [] if missing else [
-                           {'name': name, 'browser_download_url': ('https://evil.invalid/' if bad_url else prefix) + name},
+                           {'name': name, 'size': 86402662, 'browser_download_url': ('https://evil.invalid/' if bad_url else prefix) + name},
                            {'name': f'SHA256SUMS-{target}-{arch}', 'browser_download_url': prefix + 'SHA256SUMS'}]}
             if wrong_channel:
                 release['prerelease'] = not release['prerelease']
@@ -68,6 +68,9 @@ class InstallerTests(unittest.TestCase):
 from pathlib import Path
 args=sys.argv[1:]; url=next(a for a in args if a.startswith('https://'))
 name='releases.json' if 'api.github.com/' in url else ('checksum' if 'SHA256SUMS' in url else 'package')
+if name == 'package':
+    assert '--progress-bar' in args and '--silent' not in args and os.environ.get('COLUMNS') == '48', args
+    sys.stderr.write('\\r####################                       50.0%\\r######################################### 100.0%\\n')
 shutil.copyfile(Path(os.environ['FIXTURE'])/name,args[args.index('-o')+1])
 ''',
                 'apt-get': '''import os,sys
@@ -122,6 +125,10 @@ if '--allow-downgrades' in sys.argv and os.environ.get('NEEDRESTART_MODE') != 'l
                 result, log = self.run_installer(channel, target, arch, mode='--update')
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn('--reinstall --allow-downgrades', log)
+                self.assertIn('Downloading payincus-incus-', result.stdout)
+                self.assertIn('(82.4 MiB)', result.stdout)
+                self.assertIn('Verified SHA256 checksum for payincus-incus-', result.stdout)
+                self.assertIn('100.0%', result.stderr)
                 self.assertIn('Node package installed:', result.stdout)
                 self.assertNotIn('interactive terminal', result.stdout)
         result, _ = self.run_installer(mode='--update', apt_failure=True)

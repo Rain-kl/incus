@@ -14,13 +14,14 @@ import (
 
 // PayIncus: keep complete diagnostics on disk and a bounded, redacted tail for the UI.
 type operationLog struct {
-	mu      sync.Mutex
-	writer  io.Writer
-	emit    func(string)
-	path    string
-	secrets []string
-	err     error
-	recent  []string
+	mu          sync.Mutex
+	writer      io.Writer
+	emit        func(string)
+	path        string
+	secrets     []string
+	err         error
+	recent      []string
+	hasLiveTail bool
 }
 
 type operationLogKey struct{}
@@ -121,6 +122,31 @@ func safePayload(ctx context.Context, data []byte) string {
 	return l.redact(string(encoded))
 }
 
+func logProgress(ctx context.Context, line string) {
+	l := contextLog(ctx)
+	if l == nil {
+		return
+	}
+
+	text := strings.TrimRight(l.redact(line), " \t")
+	if strings.TrimSpace(text) == "" {
+		return
+	}
+
+	entry := time.Now().Format(time.RFC3339) + " " + text
+	l.mu.Lock()
+	if l.hasLiveTail && len(l.recent) > 0 {
+		l.recent[len(l.recent)-1] = entry
+	} else {
+		l.recent = append(l.recent, entry)
+		if len(l.recent) > 200 {
+			l.recent = append([]string(nil), l.recent[len(l.recent)-200:]...)
+		}
+		l.hasLiveTail = true
+	}
+	l.mu.Unlock()
+}
+
 func logOperation(ctx context.Context, format string, args ...any) {
 	l := contextLog(ctx)
 	if l == nil {
@@ -137,9 +163,14 @@ func logOperation(ctx context.Context, format string, args ...any) {
 				l.err = err
 			}
 		}
-		l.recent = append(l.recent, entry)
-		if len(l.recent) > 200 {
-			l.recent = append([]string(nil), l.recent[len(l.recent)-200:]...)
+		if l.hasLiveTail && len(l.recent) > 0 {
+			l.recent[len(l.recent)-1] = entry
+			l.hasLiveTail = false
+		} else {
+			l.recent = append(l.recent, entry)
+			if len(l.recent) > 200 {
+				l.recent = append([]string(nil), l.recent[len(l.recent)-200:]...)
+			}
 		}
 		writeErr := l.err
 		l.mu.Unlock()
@@ -153,8 +184,9 @@ func logOperation(ctx context.Context, format string, args ...any) {
 }
 
 type commandLogWriter struct {
-	ctx     context.Context
-	pending bytes.Buffer
+	ctx          context.Context
+	pending      bytes.Buffer
+	lastProgress string
 }
 
 func (w *commandLogWriter) Write(data []byte) (int, error) {
@@ -166,7 +198,25 @@ func (w *commandLogWriter) Write(data []byte) (int, error) {
 			break
 		}
 
-		logOperation(w.ctx, "%s", strings.TrimSuffix(line, "\n"))
+		raw := strings.TrimSuffix(line, "\n")
+		final := finalCarriageReturnSegment(raw)
+		if final == "" && w.lastProgress != "" && strings.ContainsRune(raw, '\r') {
+			final = w.lastProgress
+		}
+		w.lastProgress = ""
+		logOperation(w.ctx, "%s", final)
+	}
+
+	remaining := w.pending.String()
+	if strings.ContainsRune(remaining, '\r') {
+		parts := strings.Split(remaining, "\r")
+		latest := finalCarriageReturnSegment(remaining)
+		if latest != "" && !strings.ContainsRune(latest, '\x1b') {
+			w.lastProgress = latest
+			logProgress(w.ctx, latest)
+		}
+		w.pending.Reset()
+		_, _ = w.pending.WriteString("\r" + parts[len(parts)-1])
 	}
 
 	return count, nil
@@ -174,7 +224,22 @@ func (w *commandLogWriter) Write(data []byte) (int, error) {
 
 func (w *commandLogWriter) flush() {
 	if w.pending.Len() > 0 {
-		logOperation(w.ctx, "%s", w.pending.String())
+		raw := w.pending.String()
+		final := finalCarriageReturnSegment(raw)
+		if final == "" && w.lastProgress != "" && strings.ContainsRune(raw, '\r') {
+			final = w.lastProgress
+		}
 		w.pending.Reset()
+		w.lastProgress = ""
+		if final != "" || !strings.ContainsRune(raw, '\r') {
+			logOperation(w.ctx, "%s", final)
+		}
+		return
+	}
+
+	if w.lastProgress != "" {
+		final := w.lastProgress
+		w.lastProgress = ""
+		logOperation(w.ctx, "%s", final)
 	}
 }
