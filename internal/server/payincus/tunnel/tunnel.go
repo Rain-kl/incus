@@ -21,13 +21,14 @@ import (
 
 // WorkerConfig contains panel authentication and reverse-connection settings.
 type WorkerConfig struct {
-	PanelURL    string
-	AgentID     string
-	AgentSecret string
-	TargetHost  string
-	TargetPort  int
-	InsecureTLS bool
-	NodeClient  *nodeclient.Client
+	PanelURL         string
+	AgentID          string
+	AgentSecret      string
+	TargetHost       string
+	TargetPort       int
+	InsecureTLS      bool
+	NodeClient       *nodeclient.Client
+	RequestHeartbeat func()
 }
 
 // Worker maintains the authenticated reverse connection.
@@ -307,10 +308,14 @@ func (w *Worker) connectAndServe(ctx context.Context) error {
 		}
 
 		switch frameType {
+		case FrameTypeHeartbeat:
+			if streamID == 0 && len(payload) == 0 && w.cfg.RequestHeartbeat != nil {
+				w.cfg.RequestHeartbeat()
+			}
 		case FrameTypeControlHello:
 			if streamID == 0 && len(payload) <= 4096 {
 				select {
-				case writeChan <- EncodeFrame(FrameTypeControlHello, 0, []byte(`{"capabilities":["payincus_node_v1"]}`)):
+				case writeChan <- EncodeFrame(FrameTypeControlHello, 0, []byte(`{"capabilities":["payincus_node_v1","heartbeat-trigger-v1"]}`)):
 				case <-connCtx.Done():
 					return connCtx.Err()
 				}

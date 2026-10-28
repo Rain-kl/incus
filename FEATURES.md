@@ -13,6 +13,17 @@
 
 上游始终以正式 LTS 版本为准，仅同步 LTS 维护版本及经过兼容性验证的新 LTS 系列。普通功能版、开发分支及未发版提交均不纳入基线或同步目标。定制提交建立在记录的 LTS 基线上。
 
+## 存储心跳、数据库容量与加密稀疏 Loop 扩容（2026-10-28）
+
+- 目的：移除控制端容量查询对节点网络延迟的依赖，修复删除后重建池时的容量归零与无法创建实例；为绑定外部加密数据集的托管 ZFS Loop 提供准确扩容路径。
+- 节点行为：`report/storage.go` 使用本地 Unix socket 的 `GET /1.0/storage-pools?recursion=1`、池 `/resources` 及现有 `/1.0/payincus/storage`，采集池容量、状态、加密/手动锁和底层文件系统信息，放入正常签名心跳。总采集预算 8 秒、资源请求并发 4、池最多 256；加密清单有独立 2 秒预算，包含尚未绑定 Incus 的外部数据集。完整/截断/失败明确区分，不把失败当作空清单。`report.go` 将原生 `/1.0/resources` 的硬盘和网卡信息随心跳上报，新增 `storage-inventory-v1` 能力；实例清单携带根盘池名；原生硬盘采集失败以 `storageAvailable=false` 标记，控制端保留上次硬盘信息。
+- 立即上报：连接器 `cmd/payincus-agent/main.go` 在原周期计时器之外消费容量为 1 的刷新通知通道；`tunnel` 增加 `HEARTBEAT=0x0b` 并握手通告 `heartbeat-trigger-v1`，只接受流 0、空载荷，复用现有已认证连接。管理端通知只触发正常上报，不另开拉取通道，不改默认 10 秒周期。incusd 停机/采集失败时连接器继续上报不可用状态，本地调用最多占用 45 秒，为心跳传输保留请求预算；不会执行故障期间的 Caddy 指令。旧节点缺少能力时管理端明确拒绝通知，没有主动抓取兼容分支。
+- 扩容：新增 `payincus_storage_pool_resize_v1` 与 `POST /1.0/payincus/storage/resize`（`dataset,sizeGiB`）。必须为远程 mTLS 控制端、未锁节点、已登记 GUID/父池指纹、在线的单个普通文件 vdev；存储写互斥。`security/storage_resize.go` 从原生 ZFS 拓扑定位自定义路径，通过截断增长保持新增区间稀疏，再运行 `zpool online -e`。只允许增长或同目标重试，拒绝缩容/非法大小/非托管池/块设备/多 vdev/符号链接；文件增长成功但 ZFS 扩展失败不回缩，支持同大小重试。创建时预分配的池新增区间也按稀疏方式增长。
+- 控制端配套：Rain-kl/payincus 新增数据库存储快照；GET 和容量分配只读库，显式套餐绑定不借其它池；无心跳/锁盘/离线不可分配，已有容量保留。详情见该仓库 `docs/STORAGE_HEARTBEAT.md`。新控制端需要应用 schema 并配套更新节点，首个有效心跳前不分配；本条不表示已经发布或部署。
+- 上游源码接入点：仅 `internal/server/storage/drivers/driver_zfs.go` 的 `Update` 增加已标记 `PayIncus:` 的大小校验，在原生 Loop 文件截断前拒绝非法值及缩容；原因是保护原有 vdev 数据，重试等值增长保留。其余实现均在定制模块。后续 LTS 同步核对原生 `size` 更新与卷资源 API、池状态 `Created`、实例 `expanded_devices`、异步/错误封装及 mTLS 授权，不改变原生 API 结构。
+- 接口测试：`report/storage_test.go` 覆盖原生递归清单/资源 API、ZFS 密钥状态、失败及取消；`tunnel/control_test.go` 验证握手、心跳通知与原生字节流；`security/storage_resize_test.go` 覆盖远程授权、GUID/登记、失败后同大小重试、稀疏性/旧数据、缩容、多 vdev 和取消；`storage_resize_live_test.go` 在显式标记的隔离 QEMU 内运行真实加密 ZFS；`cmd/payincus-agent/main_test.go` 覆盖 daemon 故障时仍发送心跳，`internal/server/storage/drivers/driver_zfs_payincus_test.go` 验证原生池 PATCH 拒绝缩容/非法大小且保留文件内容。`scripts/payincus/test-zfs-vm.sh` 纳入该用例，集成 CI 增加节点/存储及原生驱动 race 合约，不增加下载内核和编译 ZFS 的 CI 任务。
+- 已验证：定制模块及连接器 Go 单元/race 测试、go vet、原生存储驱动单元回归；隔离 VM 中原有 ZFS 生命周期与新建 1 GiB 加密稀疏池 → 2 GiB 扩容、ZFS 实际容量增加、原文件可读、重复目标和拒绝缩容均通过。控制端数据库/API/并发分配回归、类型检查及双端构建通过；没有对用户生产节点执行操作。
+
 ## TUI 节点更新下载进度条与回车覆盖行渲染（2026-10-28）
 
 - 目的：修复 `incus-tui` 更新节点软件包时 `node-install.sh` 使用 `curl --silent` 静默下载 `.deb`，导致终端长时间停在 `Installing ...` 无任何进度反馈的问题。

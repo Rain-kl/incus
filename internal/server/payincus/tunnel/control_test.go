@@ -54,7 +54,8 @@ func TestNativeIncusStreamAndRejectedRPC(t *testing.T) {
 		t.Fatal("expected TCP listener")
 	}
 
-	worker := NewWorker(WorkerConfig{PanelURL: server.URL, AgentID: "local-agent", AgentSecret: secret, TargetHost: "127.0.0.1", TargetPort: addr.Port})
+	triggered := make(chan struct{}, 1)
+	worker := NewWorker(WorkerConfig{PanelURL: server.URL, AgentID: "local-agent", AgentSecret: secret, TargetHost: "127.0.0.1", TargetPort: addr.Port, RequestHeartbeat: func() { triggered <- struct{}{} }})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
@@ -102,8 +103,14 @@ func TestNativeIncusStreamAndRejectedRPC(t *testing.T) {
 		Capabilities []string `json:"capabilities"`
 	}
 	err = json.Unmarshal(receive(FrameTypeControlHello, 0), &hello)
-	if err != nil || len(hello.Capabilities) != 1 || hello.Capabilities[0] != "payincus_node_v1" {
+	if err != nil || len(hello.Capabilities) != 2 || hello.Capabilities[0] != "payincus_node_v1" || hello.Capabilities[1] != "heartbeat-trigger-v1" {
 		t.Fatal("unexpected node capabilities", hello, err)
+	}
+	send(FrameTypeHeartbeat, 0, nil)
+	select {
+	case <-triggered:
+	case <-time.After(time.Second):
+		t.Fatal("heartbeat notification was not delivered")
 	}
 	// Obsolete business RPC frames cannot execute operations or interfere with the byte relay.
 	send(0x08, 7, map[string]any{"method": "network.apply", "params": map[string]any{"revision": 1}})

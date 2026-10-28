@@ -16,6 +16,7 @@ const (
 	FrameTypeLogCtl       byte = 0x06 // 日志流控制（Server -> Agent），StreamID = 0，Payload 为 JSON { action: 'start' | 'stop', lines?: number }
 	FrameTypeLogData      byte = 0x07 // 日志流数据（Agent -> Server），StreamID = 0，Payload 为一行 UTF-8 文本；空 Payload 表示流结束
 	FrameTypeControlHello byte = 0x0a
+	FrameTypeHeartbeat    byte = 0x0b
 	FrameTypeTaskLogCtl   byte = 0x0c
 	FrameTypeTaskLogData  byte = 0x0d
 )

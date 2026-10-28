@@ -38,7 +38,7 @@ mount -t devtmpfs devtmpfs /dev
 mount -t tmpfs -o size=1g tmpfs /tmp
 if /sbin/modprobe zfs; then
   export RUN_NODE_SECURITY_ZFS_TEST=1 GOMAXPROCS=2
-  /security.test -test.v -test.run '^TestZFSNativeLifecycle$'
+  /security.test -test.v -test.run '^TestZFS(NativeLifecycle|SparsePoolResizeLive)$'
   echo ZFS_TEST_EXIT=$?
 else
   echo ZFS_MODULE_FAILED

@@ -20,7 +20,7 @@ var incusSocketCandidates = localapi.SocketCandidates()
 func HeartbeatPayload(version string, heartbeatIntervalSeconds int) map[string]any {
 	return map[string]any{
 		"version":      version,
-		"capabilities": []any{"heartbeat", "report", "host-metrics", "instance-status", "traffic-counters", "nvidia-gpu", "xray-egress", "network-control"},
+		"capabilities": []any{"heartbeat", "report", "host-metrics", "instance-status", "traffic-counters", "nvidia-gpu", "xray-egress", "network-control", "storage-inventory-v1"},
 		"runtime": map[string]any{
 			"goos":   runtime.GOOS,
 			"goarch": runtime.GOARCH,
@@ -30,6 +30,7 @@ func HeartbeatPayload(version string, heartbeatIntervalSeconds int) map[string]a
 		"instances": collectIncusInstanceReport(),
 		"resources": collectResources(),
 		"metrics":   collectMetrics(heartbeatIntervalSeconds),
+		"storage":   collectStorageReport(),
 	}
 }
 
@@ -79,8 +80,20 @@ func serviceActive(unit string) bool {
 
 func collectResources() map[string]any {
 	resources := map[string]any{
-		"cpuTotal":  runtime.NumCPU(),
-		"nvidiaGpu": collectNvidiaGPUs(),
+		"cpuTotal":         runtime.NumCPU(),
+		"nvidiaGpu":        collectNvidiaGPUs(),
+		"storageAvailable": false,
+	}
+	socket, ok := detectIncusSocket()
+	if ok {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		inventory, err := incusRequestContext[map[string]any](ctx, newIncusUnixHTTPClient(socket), "/1.0/resources")
+		if err == nil {
+			resources["storage"] = inventory["storage"]
+			resources["network"] = inventory["network"]
+			resources["storageAvailable"] = inventory["storage"] != nil
+		}
 	}
 	if model := readCPUModel(); model != "" {
 		resources["cpuModel"] = model

@@ -62,6 +62,9 @@ jobs:
         # 纯 Go 逻辑与发行版无关，仅在 Ubuntu 目标上运行，避免 Debian 任务重复执行。
         if: matrix.target == 'ubuntu-24.04'
         run: go test -race ./internal/server/payincus/egress ./cmd/payincus-network-worker
+      - name: Storage telemetry and native node contracts
+        if: matrix.target == 'ubuntu-24.04'
+        run: go test -race -tags libsqlite3 ./internal/server/payincus/report ./internal/server/payincus/security ./internal/server/payincus/tunnel ./cmd/payincus-agent ./internal/server/storage/drivers
       - name: Real systemd and native proxy API recovery
         if: matrix.arch == 'amd64' && matrix.target == 'debian-13'
         timeout-minutes: 10
@@ -78,7 +81,7 @@ jobs:
             bash /source/scripts/payincus/test-egress-vm.sh /tests/egress.test
           '
       - name: Proxy test script syntax
-        run: bash -n scripts/payincus/{test-egress-systemd,test-egress-vm}.sh
+        run: bash -n scripts/payincus/{test-egress-systemd,test-egress-vm,test-zfs-vm}.sh
       - name: Build integrated binaries
         if: matrix.target == 'ubuntu-24.04'
         run: bash scripts/payincus/build.sh

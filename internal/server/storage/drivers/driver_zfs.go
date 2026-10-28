@@ -617,7 +617,18 @@ func (d *zfs) Update(changedConfig map[string]string) error {
 
 		defer logger.WarnOnError(f.Close, "Failed to close file")
 
-		sizeBytes, _ := units.ParseByteSizeString(size)
+		// PayIncus: reject shrinking or invalid sizes before touching an existing ZFS file vdev.
+		sizeBytes, err := units.ParseByteSizeString(size)
+		if err != nil {
+			return err
+		}
+		info, err := f.Stat()
+		if err != nil {
+			return err
+		}
+		if sizeBytes < info.Size() {
+			return errors.New("ZFS pool shrinking is not supported")
+		}
 
 		err = f.Truncate(sizeBytes)
 		if err != nil {

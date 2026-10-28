@@ -70,3 +70,34 @@ func TestNativeHeartbeatContractIncludesLockedNodes(t *testing.T) {
 		}
 	}
 }
+
+func TestHeartbeatReportsDaemonFailureWithoutDroppingConnection(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), "incus.socket")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	localServer := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "unavailable", 503) })}
+	go func() { _ = localServer.Serve(listener) }()
+	defer localServer.Close()
+	received := false
+	control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Incus   map[string]any `json:"incus"`
+			Storage map[string]any `json:"storage"`
+			NodeAPI string         `json:"nodeApi"`
+		}
+		if json.NewDecoder(r.Body).Decode(&body) != nil || body.Incus["available"] != false || body.Storage["available"] != false || body.NodeAPI != "payincus_node_v1" {
+			t.Error("missing failure heartbeat")
+		}
+		received = true
+		_, _ = w.Write([]byte(`{"ok":true,"tunnel":{"enabled":false}}`))
+	}))
+	defer control.Close()
+	cfg := config.Config{PanelURL: control.URL, AgentID: "fixture-agent", AgentSecret: "fixture-secret", HeartbeatIntervalSeconds: 10}
+	worker := tunnel.NewWorker(tunnel.WorkerConfig{PanelURL: control.URL})
+	var pending atomic.Bool
+	if heartbeat(context.Background(), nodeclient.New(socket), panel.New(cfg), cfg, worker, &pending) == nil || !received {
+		t.Fatal("daemon failure suppressed the node heartbeat")
+	}
+}

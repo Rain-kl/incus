@@ -33,10 +33,11 @@ type incusAPIResponse struct {
 }
 
 type incusInstanceSummary struct {
-	Name       string `json:"name"`
-	Status     string `json:"status"`
-	StatusCode int    `json:"status_code"`
-	Type       string `json:"type"`
+	Name            string                       `json:"name"`
+	Status          string                       `json:"status"`
+	StatusCode      int                          `json:"status_code"`
+	Type            string                       `json:"type"`
+	ExpandedDevices map[string]map[string]string `json:"expanded_devices"`
 }
 
 type incusInstanceState struct {
@@ -154,8 +155,12 @@ func getIncusInstanceState(client *http.Client, name string) (incusInstanceState
 }
 
 func incusRequest[T any](client *http.Client, path string) (T, error) {
+	return incusRequestContext[T](context.Background(), client, path)
+}
+
+func incusRequestContext[T any](ctx context.Context, client *http.Client, path string) (T, error) {
 	var zero T
-	request, err := http.NewRequest(http.MethodGet, "http://incus"+path, nil)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://incus"+path, nil)
 	if err != nil {
 		return zero, err
 	}
@@ -207,6 +212,11 @@ func buildIncusInstanceReportItem(client *http.Client, instance incusInstanceSum
 		"status":     instance.Status,
 		"statusCode": instance.StatusCode,
 		"type":       instance.Type,
+	}
+	for _, device := range instance.ExpandedDevices {
+		if device["type"] == "disk" && device["path"] == "/" && device["pool"] != "" {
+			item["storagePoolName"] = device["pool"]
+		}
 	}
 
 	if instance.Name == "" || !isRunningIncusStatus(instance.Status, instance.StatusCode) {

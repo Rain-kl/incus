@@ -37,6 +37,9 @@ const StoragePoolDirExtension = "payincus_storage_pool_dir_v1"
 // StoragePoolAllocExtension signals sparse-by-default file pools with an optional preallocate flag.
 const StoragePoolAllocExtension = "payincus_storage_pool_alloc_v1"
 
+// StoragePoolResizeExtension signals support for growing managed encrypted file pools.
+const StoragePoolResizeExtension = "payincus_storage_pool_resize_v1"
+
 // HandleStorage supports local creation without a control-panel key custody prerequisite.
 func (m *Manager) HandleStorage(r *http.Request) (int, any) {
 	return m.handle(r, true)
@@ -48,7 +51,7 @@ func (m *Manager) handle(r *http.Request, storage bool) (int, any) {
 		prefix = "/1.0/payincus/storage"
 	}
 	action := strings.TrimPrefix(r.URL.Path, prefix)
-	if storage && action != "" && action != "/create" && action != "/register" && action != "/unlock" && action != "/pool" && action != "/forget" && action != "/lock-pool" && action != "/unlock-pool" && action != "/resume" && action != "/auto-unlock" {
+	if storage && action != "" && action != "/create" && action != "/register" && action != "/unlock" && action != "/pool" && action != "/forget" && action != "/lock-pool" && action != "/unlock-pool" && action != "/resume" && action != "/auto-unlock" && action != "/resize" {
 		return 404, "unknown storage endpoint"
 	}
 	if action == "/report" && r.Method == http.MethodGet && r.TLS == nil {
@@ -78,6 +81,21 @@ func (m *Manager) handle(r *http.Request, storage bool) (int, any) {
 	// Recovery/policy authority uses the existing remote mTLS control-plane identity, never a spoofable header.
 	remote := r.TLS != nil && len(r.TLS.PeerCertificates) > 0
 	switch action {
+	case "/resize":
+		if !storage || !remote {
+			return 403, "storage resize requires an authenticated remote control connection"
+		}
+		var input struct {
+			Dataset string `json:"dataset"`
+			SizeGiB uint64 `json:"sizeGiB"`
+		}
+		if decode(r, &input) != nil {
+			return 400, "invalid storage resize request"
+		}
+		if err := m.ResizePool(r.Context(), input.Dataset, input.SizeGiB); err != nil {
+			return 409, err.Error()
+		}
+		return 200, map[string]any{"dataset": input.Dataset, "sizeGiB": input.SizeGiB}
 	case "/lock-pool", "/unlock-pool":
 		if !storage {
 			return 404, "unknown security endpoint"

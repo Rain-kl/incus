@@ -42,7 +42,13 @@ func main() {
 	defer stop()
 	local := nodeclient.New(*socket)
 	remote := panel.New(cfg)
-	worker := tunnel.NewWorker(tunnel.WorkerConfig{PanelURL: cfg.PanelURL, AgentID: cfg.AgentID, AgentSecret: cfg.AgentSecret, NodeClient: local})
+	refresh := make(chan struct{}, 1)
+	worker := tunnel.NewWorker(tunnel.WorkerConfig{PanelURL: cfg.PanelURL, AgentID: cfg.AgentID, AgentSecret: cfg.AgentSecret, NodeClient: local, RequestHeartbeat: func() {
+		select {
+		case refresh <- struct{}{}:
+		default:
+		}
+	}})
 	defer worker.SyncConfig(false, "", 0)
 	go securityReports(ctx, local, remote)
 	var caddyPending atomic.Bool
@@ -66,6 +72,7 @@ func main() {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
+		case <-refresh:
 		}
 	}
 }
@@ -73,15 +80,24 @@ func main() {
 func heartbeat(ctx context.Context, local *nodeclient.Client, remote *panel.Client, cfg config.Config, worker *tunnel.Worker, caddyPending *atomic.Bool) error {
 	requestCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
-	err := local.Check(requestCtx)
-	if err != nil {
-		return err
-	}
-
 	var payload map[string]any
-	err = local.Call(requestCtx, "GET", fmt.Sprintf("/report?interval=%d", cfg.HeartbeatIntervalSeconds), nil, &payload)
-	if err != nil {
-		return err
+	localCtx, localCancel := context.WithTimeout(requestCtx, 45*time.Second)
+	localErr := local.Check(localCtx)
+	if localErr == nil {
+		localErr = local.Call(localCtx, "GET", fmt.Sprintf("/report?interval=%d", cfg.HeartbeatIntervalSeconds), nil, &payload)
+	}
+	localCancel()
+	if payload == nil && localErr == nil {
+		localErr = fmt.Errorf("node report unavailable")
+	}
+	if localErr != nil || payload == nil {
+		// Keep transport reporting alive when incusd cannot collect telemetry.
+		payload = map[string]any{
+			"incus": map[string]any{"available": false}, "instances": map[string]any{"available": false},
+			"storage":   map[string]any{"available": false, "reportedAt": time.Now().UTC().Format(time.RFC3339Nano)},
+			"resources": map[string]any{"storageAvailable": false},
+			"metrics":   map[string]any{"heartbeatIntervalSeconds": cfg.HeartbeatIntervalSeconds},
+		}
 	}
 
 	payload["version"] = version
@@ -100,7 +116,7 @@ func heartbeat(ctx context.Context, local *nodeclient.Client, remote *panel.Clie
 		worker.SyncConfig(result.Tunnel.Enabled, result.Tunnel.TargetHost, result.Tunnel.TargetPort)
 	}
 
-	if result.Caddy != nil && (result.Caddy.Command == "install" || result.Caddy.Command == "uninstall") && caddyPending.CompareAndSwap(false, true) {
+	if localErr == nil && result.Caddy != nil && (result.Caddy.Command == "install" || result.Caddy.Command == "uninstall") && caddyPending.CompareAndSwap(false, true) {
 		action := result.Caddy.Command
 		go func() {
 			defer caddyPending.Store(false)
@@ -113,7 +129,7 @@ func heartbeat(ctx context.Context, local *nodeclient.Client, remote *panel.Clie
 		}()
 	}
 
-	return nil
+	return localErr
 }
 
 // securityReports uses a separate bounded cadence so alarms are not delayed by resource collection.
