@@ -72,7 +72,7 @@ jobs:
           docker run --rm -v "$PWD:/source:ro" -v "$RUNNER_TEMP/egress.test:/tests/egress.test:ro" debian:13 sh -ec '
             apt-get update -qq
             DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
-              qemu-system-x86 linux-image-amd64 busybox-static cpio kmod iproute2 nftables util-linux python3
+              qemu-system-x86 linux-image-amd64 busybox-static cpio kmod iproute2 nftables util-linux procps python3
             bash /source/scripts/payincus/test-egress-vm.sh /tests/egress.test
           '
       - name: Proxy test script syntax
