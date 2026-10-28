@@ -1,6 +1,13 @@
 <!-- PayIncus customization: repository rules; keep the upstream instructions below intact. -->
 # PayIncus 定制规则
 
+## 默认开发分支与开工同步
+
+- 默认在 `canary` 分支开发；用户没有明确指定时，不得以 `main` 或旧的本地分支作为开发起点。
+- 开始修改前先检查工作区和分支，执行 `git fetch origin`，切换到 `canary` 并使用 `git merge --ff-only origin/canary` 同步最新代码，再进行开发。已有未提交改动必须保留；存在分叉时先核对提交，不得强制重置、覆盖或盲目合并。
+- `main` 的同步和发布遵循用户明确指令；要求推送两条分支时，先核对差异并保留各分支已有改动，禁止强推或推送到 `work`。
+- 本条约定的是 fork 的默认开发分支；官方上游基线仍仅允许下述已正式发布的 LTS tag。
+
 ## 最高工程原则：最小化上游代码改动
 
 - 在满足需求、正确性和兼容性的前提下，最少化修改上游代码；优先复用官方 API、扩展机制和已有生命周期入口。
