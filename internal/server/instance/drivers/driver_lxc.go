@@ -3046,7 +3046,7 @@ func (d *lxc) Start(stateful bool) error {
 	// PayIncus: include boot, retry, migration and restore paths that do not enter through HTTP.
 	releaseStart, guardErr := nodesecurity.BeginStart()
 	if guardErr != nil {
-		return errors.New("Internal server error")
+		return nodesecurity.PublicError()
 	}
 	defer releaseStart()
 
@@ -3211,7 +3211,7 @@ func (d *lxc) Start(stateful bool) error {
 
 	// PayIncus: recheck after preparation to close the long startup window before fork.
 	if nodesecurity.Check() != nil {
-		err = errors.New("Internal server error")
+		err = nodesecurity.PublicError()
 		op.Done(err)
 		return err
 	}

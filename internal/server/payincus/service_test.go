@@ -187,7 +187,7 @@ func TestPublicNodeErrorsRemainGeneric(t *testing.T) {
 		service.ServeHTTP(w, httptest.NewRequest("POST", Prefix+"/security"+tc.path, strings.NewReader(tc.body)))
 		var result envelope
 		err := json.Unmarshal(w.Body.Bytes(), &result)
-		if err != nil || w.Code != 500 || result.Error != "Internal server error" || result.ErrorCode != 500 {
+		if err != nil || w.Code != 500 || result.Error != nodesecurity.PublicError().Error() || result.ErrorCode != 500 {
 			t.Fatalf("unexpected public response: %d %s", w.Code, w.Body.String())
 		}
 	}

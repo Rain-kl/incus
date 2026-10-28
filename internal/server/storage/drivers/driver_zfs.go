@@ -694,7 +694,7 @@ func (d *zfs) importPool() (bool, error) {
 func (d *zfs) Mount() (bool, error) {
 	// PayIncus: background pool retries must not reload keys after a security mode lock.
 	if nodesecurity.Check() != nil {
-		return false, errors.New("Internal server error")
+		return false, nodesecurity.PublicError()
 	}
 
 	// Import the pool if not already imported.

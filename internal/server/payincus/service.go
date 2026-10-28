@@ -128,7 +128,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(r.URL.Path, Prefix+"/security") {
 		code, value := s.guard.Handle(r)
 		if code != 200 {
-			respond(w, 500, "Internal server error")
+			respond(w, 500, nodesecurity.PublicError().Error())
 			return
 		}
 		respond(w, code, value)

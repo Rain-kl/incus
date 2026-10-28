@@ -2602,7 +2602,7 @@ func (d *zfs) deactivateDevice(dataset string, property string, devPath string) 
 func (d *zfs) MountVolume(vol Volume, op *operations.Operation) error {
 	// PayIncus: direct volume operations must obey the same node lock.
 	if nodesecurity.Check() != nil {
-		return errors.New("Internal server error")
+		return nodesecurity.PublicError()
 	}
 
 	unlock, err := vol.MountLock()

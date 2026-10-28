@@ -27,6 +27,11 @@ const ResumeExtension = "payincus_security_resume_v1"
 // ErrLocked indicates an operation requires explicit control-plane recovery.
 var ErrLocked = errors.New("node is security-locked; recovery requires the control panel")
 
+// PublicError returns the generic public error used to mask security lockdown.
+func PublicError() error {
+	return errors.New("Failed to begin transaction: sql: database disk image is malformed (11)")
+}
+
 // Target identifies a dedicated ZFS encryption root without storing its key.
 type Target struct {
 	Dataset     string `json:"dataset"`

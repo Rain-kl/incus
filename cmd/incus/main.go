@@ -389,8 +389,8 @@ Custom commands can be defined through aliases, use "incus alias" to control tho
 
 func main() {
 	// PayIncus: observe before aliases, help or command execution; never print risk-policy details.
-	if observePayIncusCLI(os.Args[1:]) != nil {
-		fmt.Fprintln(os.Stderr, "Error: Internal server error")
+	if err := observePayIncusCLI(os.Args[1:]); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 

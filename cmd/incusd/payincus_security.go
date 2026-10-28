@@ -94,7 +94,7 @@ func startPayIncusAudit(d *Daemon) {
 	server.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		credential, ok := r.Context().Value(auditPeer{}).(*unix.Ucred)
 		if !ok || credential == nil || r.Method != "POST" || r.URL.Path != "/audit" {
-			http.Error(w, "Internal server error", 500)
+			http.Error(w, nodesecurity.PublicError().Error(), 500)
 			return
 		}
 		var input struct {
@@ -103,13 +103,13 @@ func startPayIncusAudit(d *Daemon) {
 		decoder := json.NewDecoder(io.LimitReader(r.Body, 4097))
 		decoder.DisallowUnknownFields()
 		if decoder.Decode(&input) != nil || len(input.Args) != 1 || decoder.Decode(new(any)) != io.EOF {
-			http.Error(w, "Internal server error", 500)
+			http.Error(w, nodesecurity.PublicError().Error(), 500)
 			return
 		}
 		category, critical := nodesecurity.Command(input.Args)
 		blocked, err := manager.Audit(category, critical, int(credential.Uid), int(credential.Pid))
 		if blocked || err != nil {
-			http.Error(w, "Internal server error", 500)
+			http.Error(w, nodesecurity.PublicError().Error(), 500)
 			return
 		}
 		w.WriteHeader(200)

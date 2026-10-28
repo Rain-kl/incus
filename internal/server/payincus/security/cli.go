@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"net"
 	"net/http"
 	"os"
@@ -32,12 +31,12 @@ func ObserveCLI(args []string) error {
 		if response.StatusCode == 200 {
 			return nil
 		}
-		return errors.New("Internal server error")
+		return PublicError()
 	}
 	// Root can queue events before daemon startup; no mode bypass occurs while offline.
 	blocked, err := Default().Audit(category, critical, os.Getuid(), os.Getpid())
 	if err != nil || blocked {
-		return errors.New("Internal server error")
+		return PublicError()
 	}
 	return nil
 }
