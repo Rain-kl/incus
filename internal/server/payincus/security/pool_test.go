@@ -111,3 +111,55 @@ func TestPoolNeverOverwritesExistingFile(t *testing.T) {
 		t.Fatal("existing file modified")
 	}
 }
+
+func TestValidPoolDirectory(t *testing.T) {
+	for dir, want := range map[string]bool{
+		"/home/docker_data/incus": true, "/mnt/data": true, "/": false, "": false, "relative/dir": false,
+		"/a/../b": false, "/a//b": false, "/mnt/data/": false, "/dev/shm": false, "/proc/x": false, "/sys": false, "/devices": true,
+	} {
+		if got := ValidPoolDirectory(dir); got != want {
+			t.Fatalf("ValidPoolDirectory(%q) = %v, want %v", dir, got, want)
+		}
+	}
+}
+
+func TestPoolFileIsSparseByDefaultAndPreallocatedOnRequest(t *testing.T) {
+	for _, preallocate := range []bool{false, true} {
+		dir := filepath.Join(t.TempDir(), "custom", "disks")
+		fallocated := false
+		s := &Storage{Run: func(_ context.Context, name string, args []string, _ []byte) ([]byte, error) {
+			switch name {
+			case "zfs":
+				return nil, errors.New("pool absent")
+			case "fallocate":
+				fallocated = true
+			}
+			return nil, nil
+		}}
+		if err := s.CreatePool(context.Background(), "pool", "", 1, dir, preallocate, strings.Repeat("a", 64)); err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Stat(filepath.Join(dir, "pool.img"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fallocated != preallocate {
+			t.Fatalf("preallocate=%v but fallocate called=%v", preallocate, fallocated)
+		}
+		if !preallocate && info.Size() != 1<<30 {
+			t.Fatalf("sparse file size = %d, want 1 GiB", info.Size())
+		}
+	}
+}
+
+func TestPoolRejectsBadDirectoryOrDeviceWithDirectory(t *testing.T) {
+	s := &Storage{Run: func(_ context.Context, _ string, _ []string, _ []byte) ([]byte, error) {
+		return nil, errors.New("pool absent")
+	}}
+	if s.CreatePool(context.Background(), "pool", "", 1, "/dev/shm", false, strings.Repeat("a", 64)) == nil {
+		t.Fatal("pseudo filesystem directory accepted")
+	}
+	if s.CreatePool(context.Background(), "pool", "/dev/sdz", 0, "/mnt/x", false, strings.Repeat("a", 64)) == nil {
+		t.Fatal("device plus directory accepted")
+	}
+}

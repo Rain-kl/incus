@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -175,6 +176,12 @@ func (s *Storage) unlock(ctx context.Context, target Target, key []byte, adopt b
 		if err != nil && s.ImportDir != "" {
 			// File-backed pools created by the TUI are outside ZFS's default device search path.
 			_, err = s.Run(ctx, "zpool", []string{"import", "-N", "-d", filepath.Clean(s.ImportDir), pool}, nil)
+		}
+		if err != nil {
+			// File-backed pools created in a custom directory are recorded in the ZFS cache file.
+			if _, statErr := os.Stat("/etc/zfs/zpool.cache"); statErr == nil {
+				_, err = s.Run(ctx, "zpool", []string{"import", "-N", "-c", "/etc/zfs/zpool.cache", pool}, nil)
+			}
 		}
 		if err != nil {
 			return errors.New("pool import failed")

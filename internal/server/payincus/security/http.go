@@ -32,10 +32,10 @@ func (m *Manager) Handle(r *http.Request) (int, any) {
 const StorageExtension = "payincus_storage_encryption_v1"
 
 // StoragePoolDirExtension signals support for a custom file-pool directory on pool creation.
+const StoragePoolDirExtension = "payincus_storage_pool_dir_v1"
+
 // StoragePoolAllocExtension signals sparse-by-default file pools with an optional preallocate flag.
 const StoragePoolAllocExtension = "payincus_storage_pool_alloc_v1"
-
-const StoragePoolDirExtension = "payincus_storage_pool_dir_v1"
 
 // HandleStorage supports local creation without a control-panel key custody prerequisite.
 func (m *Manager) HandleStorage(r *http.Request) (int, any) {
