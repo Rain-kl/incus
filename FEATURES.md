@@ -224,17 +224,17 @@ CI 接线修正：fork 初始没有官方 release tag，校验步骤从官方仓
 
 以上本地产物来自开发工作树，manifest 标记 dirty，不上传为正式 release。推送后的四目标 CI 负责 Ubuntu 24.04 / Debian 13 的 amd64 / arm64 原生包构建与产物检查，通过后发布对应提交的 canary 集成包；按上述加速调整不再执行安装验收。结果以该提交 Actions run 与 release 为准。实际宿主初始化/容器创建与 Panel 联通仍待节点验收。之前已记录的上游全仓静态/内核测试限制继续适用，本轮未重复运行无关的完整上游测试。
 
-## 节点 CLI 诱捕、持续通信与控制端恢复（2026-10-26）
+## 节点 CLI 安全模式、持续通信与控制端恢复（2026-10-26）
 
 ### 行为与边界
 
-- 可选扩展 `payincus_security_v1`，由定制包 `INCUS_PAYINCUS=1` 启用。关键命令诱捕默认关闭，不要求安装 ZFS，DIR 节点同样可启用。所有受管本机 Linux CLI 调用均提交脱敏分类、UID/PID、时间与诱捕判定；不保存参数值、stdin、密码或密钥。非 Linux CLI 保留原行为。
+- 可选扩展 `payincus_security_v1`，由定制包 `INCUS_PAYINCUS=1` 启用。关键命令安全模式默认关闭，不要求安装 ZFS，DIR 节点同样可启用。所有受管本机 Linux CLI 调用均提交脱敏分类、UID/PID、时间与安全模式判定；不保存参数值、stdin、密码或密钥。非 Linux CLI 保留原行为。
 - exec/shell/console、file、导出/发布/复制/移动、配置写入及启动/恢复等关键命令在执行前触发；普通 list/info/help/version 和明确的只读元数据子命令只审计。`info --show-log` 也属于敏感访问。未知命令、别名及外部别名按敏感调用处理，别名展开前再次检查；审计不覆盖被替换的二进制或绕开 CLI 的宿主操作。
 - 触发先原子持久化统一 `locked` 状态，再异步停止本节点全部 LXC 容器。已有认证授权之后的 API 检查覆盖 Unix、TLS 与反向隧道；启动驱动、启动任务与 ZFS 挂载入口另行检查，启动读锁确保正在启动的容器不会晚于停止核验完成才启动。
 - 普通 CLI、受限接口及新扩展的失败统一返回 HTTP 500 / `Internal server error`，不包含审计或锁定原因，不伪造成功。专用管理状态/上报接口保留真实状态供控制端诊断；这不是对宿主 root 隐藏程序、状态文件或源码的保证。
-- incusd、连接 Agent、状态/告警/恢复接口及 LXC 必需的 onstop/onstopns 回调继续运行；onstart 不放行。状态不是各接口独立副本；关闭诱捕、断网、重连和重启均不解除已存在的锁定。开启诱捕或存在注册加密存储的节点重启时，在存储导入与自动启动前进入锁定。
+- incusd、连接 Agent、状态/告警/恢复接口及 LXC 必需的 onstop/onstopns 回调继续运行；onstart 不放行。状态不是各接口独立副本；关闭安全模式、断网、重连和重启均不解除已存在的锁定。开启安全模式或存在注册加密存储的节点重启时，在存储导入与自动启动前进入锁定。
 - 未配置 ZFS 时报告 `storage/not_configured`，只宣称 API 锁定与容器停止；不宣称明文 DIR 获得加密保护。存储占用、停止失败、卸载失败均独立上报，API 锁定继续保持。失败后控制端可再次发起锁定以重试。
-- 恢复需要已有 Incus 管理权限的远程 mTLS 身份、当前 revision、已完成的容器停止核验及所有注册存储密钥可用。Unix socket 不允许修改策略或批准恢复。这里复用的是 Incus 信任管理身份，并不是独立的硬件控制端身份；持有其它受信任管理员私钥的人也有相同权限。恢复不自动拉起容器，管理员应在控制端确认存储就绪后再启动。
+- 恢复需要已有 Incus 管理权限的远程 mTLS 身份、当前 revision、已完成的容器停止核验及所有注册存储密钥可用。Unix socket 不允许修改策略或批准恢复。这里复用的是 Incus 信任管理身份，并不是独立的硬件控制端身份；持有其它受信任管理员私钥的人也有相同权限。恢复经控制端原生 API 自动恢复锁定前运行的容器，具体见后续安全模式恢复条目。
 - 主机完整 root 仍可读取运行中明文/密钥、篡改程序、状态或信任数据库、直接挂载/访问容器与绕过此机制。本功能用于告警、限制常规操作与增加取数成本，不提供抵御恶意宿主的隔离保证；既有数据流和执行中的文件传输也不保证被瞬间撤回。
 
 ### 状态、告警与密钥链路
@@ -256,13 +256,13 @@ CI 接线修正：fork 初始没有官方 release tag，校验步骤从官方仓
 - 2026-10-27 验证：独立 TUI module 的 `go test -race ./...`、`go vet ./...`、Linux arm64 构建及控制仓库 `make check` 通过。已替换 `debian-test` 的 `/usr/bin/incus-tui` 为 `2a8c290cdc00+local-zfs-preflight`，前一版本备份到 `/var/backups/incus-tui/incus-tui-before-zfs-preflight-20261027`。真实 PTY 从 ZFS 菜单执行依赖检查，准确报告 OrbStack 内核缺少模块和匹配 headers，保留 APT 原始错误，未执行软件包安装；完整日志 `/var/log/incus-tui/session-20261027-124821-3370806038.log` 权限 0600。未创建池、加载自定义模块或更换内核；没有将环境限制当作 ZFS 成功验收。
 - 显式确认后创建专用磁盘/分区池，或预分配测试文件池；拒绝已有文件系统/挂载，不使用 zpool `-f`，不自动挑盘。文件池不是生产推荐，失败时保留预分配文件供检查。池、加密根、Incus 绑定分步执行；默认一键初始化仍是 DIR，不自动迁移或修改已有实例配置。
 - 创建加密根时在专用 TUI 页展示随机密钥，后续确认页不重复展示；解除存储时隐藏输入。TUI 状态提供本地 API 返回的服务端证书 SHA256，管理员通过可信终端核对后保存控制端。终端/剪贴板由管理员管理。
-- TUI 的生产实现已改为 Unix socket API 适配，避免管理动作误触 CLI 诱捕。保留原 Runner fixture 接口；集中处理 ETag、原生请求、异步 Pending/Running/Success/Failure、格式错误与取消，不盲目重试写操作。此前安装器/TUI 记录中的 CLI 接线由此适配层替代。
+- TUI 的生产实现已改为 Unix socket API 适配，避免管理动作误触 CLI 安全模式。保留原 Runner fixture 接口；集中处理 ETag、原生请求、异步 Pending/Running/Success/Failure、格式错误与取消，不盲目重试写操作。此前安装器/TUI 记录中的 CLI 接线由此适配层替代。
 
 ### 接口、测试与上游同步核对
 
 | 接口/接入点 | 测试与核对内容 |
 | --- | --- |
-| CLI 分类、持久状态、revision、队列/ACK、无 ZFS、启动与停止并发 | `internal/server/payincus/security/security_test.go`：`TestPersistentTripwireWithoutZFS`、`TestRestartCorruptionAndFailedStop`、`TestConcurrentEventsDoNotLoseLock`、`TestCommandPolicyAndNoArgumentLeaks`、`TestContainmentWaitsForInFlightStart` |
+| CLI 分类、持久状态、revision、队列/ACK、无 ZFS、启动与停止并发 | `internal/server/payincus/security/security_test.go`：`TestPersistentSecurityModeWithoutZFS`、`TestRestartCorruptionAndFailedStop`、`TestConcurrentEventsDoNotLoseLock`、`TestCommandPolicyAndNoArgumentLeaks`、`TestContainmentWaitsForInFlightStart` |
 | GET `/1.0/payincus/security`、`/report`，POST `/policy`、`/lock`、`/recover`、`/ack` | 同文件 `TestHTTPAuthorityReplayAndFormats`：Unix 与远程授权、参数/格式、过期 revision、节点上报保活；`service_test.go/TestPublicNodeErrorsRemainGeneric` 验证实际扩展响应不泄露失败原因 |
 | POST `/create`、`/register`、`/unlock`；ZFS create/load-key/unmount/unload-key/get | `TestStorageKeyLifecycleAndBusyFailure`、`TestStorageHTTPEnrollmentUnlockAndRecovery`、`storage_live_test.go/TestZFSNativeLifecycle`；stdin 交钥、指纹/GUID、已加载密钥验证、busy/错误/取消、互斥、恢复不自动清锁 |
 | `/1.0/payincus` 子路径原生路由 | `cmd/incusd/payincus_test.go/TestPayIncusAuthenticatedRoute`：实际 daemon 子路由、扩展能力和未认证拒绝；修复此前 ServeMux 缺少末尾斜线子树导致子路由 404 的问题 |
@@ -275,7 +275,7 @@ CI 接线修正：fork 初始没有官方 release tag，校验步骤从官方仓
 ### 本地验证记录
 
 - 扩展模块/连接 Agent race 测试、TUI race 与 lint、前后端类型检查及双端构建已完成；详细结果以本次最终测试记录为准。全量上游静态检查既有许可和内核限制仍按前文记录，不将其算作通过。
-- 在隔离 Debian 13 中编译真实 daemon/CLI，运行 daemon 测试；实际启动 LXC fixture，验证关键 CLI 返回通用错误、容器停止、锁定期间文件 API 拒绝、报告保活、控制端 mTLS 恢复、关闭诱捕不清锁、重启保持锁定且不延迟自动启动。
+- 在隔离 Debian 13 中编译真实 daemon/CLI，运行 daemon 测试；实际启动 LXC fixture，验证关键 CLI 返回通用错误、容器停止、锁定期间文件 API 拒绝、报告保活、控制端 mTLS 恢复、关闭安全模式不清锁、重启保持锁定且不延迟自动启动。
 - 配套控制端使用独立 PostgreSQL 测试库与真实 incusd 联通，验证指纹、策略、手动锁定、停止核验、恢复授权、密钥加密入库/领取；测试中没有连接生产。
 - 在独立 QEMU TCG 虚拟机中运行 Debian 13 6.12.113 内核与 OpenZFS 2.3.9，使用预分配匿名文件 vdev，真实验证 AES 创建、已加载密钥验证、错误密钥、busy 卸载拒绝、数据卸载不可见、密钥加载与 API 恢复分离、恢复后内容完整，以及文件池 export/import-N/加载的回归。`scripts/payincus/test-zfs-vm.sh` 将该测试接入 Debian amd64 CI；仅 guest 内加载模块，不接触宿主磁盘。磁盘池、Ubuntu 内核/Secure Boot、真实服务升级仍需相应目标验收，不将本地文件 vdev 当作这些场景的证据。
 - 真实 PTY 验证新增 ZFS 密钥创建页、已有加密根注册、取消与终端恢复；捕获的测试密钥仅在内存中校验，不保存终端录屏。真实 daemon debug 模式下确认拒绝的密钥请求仍返回通用错误，日志不包含提交的密钥。
@@ -352,3 +352,14 @@ CI 接线修正：fork 初始没有官方 release tag，校验步骤从官方仓
 - GitHub Actions 的 Debian amd64 代理 VM 步骤缺少提供 `sysctl` 的 `procps`，准备 initramfs 时 `command -v sysctl` 在 `set -e` 下直接退出。此前本地镜像预装了该包，未覆盖干净依赖清单；其余三个构建矩阵通过不能替代此项验收。
 - `.github/workflows/payincus.yml` 显式安装 `procps`。`scripts/payincus/test-egress-vm.sh` 在缺少待复制工具时输出依赖名称；QEMU 失败/超时时先打印 guest 日志，再保留原退出码，防止再次静默失败。不跳过真实数据路径测试，不修改生产代码或上游 API。
 - 本地验证已通过：按 CI 原始 Debian 13 依赖清单建立全新镜像，复现 `Missing VM build dependency: sysctl`；仅补齐 `procps` 后完整 QEMU 数据路径返回 `PACKAGE_VM_TEST_EXIT=0`。模拟 QEMU 返回 42 时打印日志且保留退出码；ShellCheck、workflow actionlint、bash 语法及差异空白检查通过。远程集成与发布以对应提交的 Actions 为准。
+
+## 安全模式运行状态清单与控制端自动恢复（2026-10-28）
+
+- 统一文案、注释和测试命名为安全模式，替换此前旧称。默认仍关闭；关键 CLI 分类、通用错误响应、独立锁定和存储清钥规则保持。变更前再次核对正式 LTS 为 v7.0.2，未同步普通功能版或开发提交。
+- `security.State` 增加 `resumeCaptured`、`resumeInstances`，记录项目、名称、volatile.uuid 和冻结状态，不含密钥。`cmd/incusd/payincus_security.go` 的独立定制适配器只读清点运行中的本机 LXC；启动围栏排空后，持久化恢复清单，再停止与清钥。重复锁定与 daemon 重启保留原清单及失败恢复项。
+- 清单读取/落盘失败仍执行容器停止与存储处置，独立报告 `recovery_plan` 失败并保持锁定，不误报恢复完成。无法追溯此前未记录的状态，也不能自动重建已销毁实例。新功能不加入数据迁移、旧 Agent 或历史协议兼容层。
+- 节点授权恢复仍先验证当前 revision、停止确认及加密存储；保留清单供控制端通过 LTS 原生实例 API 自动恢复原运行/冻结状态。原停止实例不会列入清单。新增能力 `payincus_security_resume_v1` 及 POST `/1.0/payincus/security/resume`，仅远程受信任 mTLS 管理身份可按 revision/完整实例身份逐项确认；Unix 请求、锁定期间确认、过期 revision、未知实例均拒绝，成功后增加 revision。API 保持通用内部错误，不改变上游认证和启动挂钩。
+- 配套控制端在安全模式恢复流程等待原生异步启动/冻结成功并核验状态，逐项 ACK；部分失败允许重试，防止重复启动已成功实例，拒绝 UUID 改变的同名实例并遵守后续业务封停/删除/到期。面板对离线/锁定等节点投影实例错误状态，节点列表显示已锁定；CLI 审计白名单不包含心跳或状态请求。详见 Rain-kl/payincus `docs/NODE_SECURITY.md`。
+- 新增 `security/resume_test.go`：停机前持久化、重复锁定/重启、失败处置、权限/格式/过期确认、完整身份、遥测不生成 CLI 事件；扩展 `service_test.go` 通用错误及真实 daemon 能力声明断言。定制模块及连接器 race、定向 lint、真实 daemon 路由测试通过；隔离 Debian daemon + mTLS + 实际 LXC + 控制端原生客户端验证运行恢复、冻结恢复、原停止保持、ACK 清空及轮询不入 CLI 审计。
+- 新增逻辑集中在定制目录，无上游数据库或存储格式修改、无依赖升级。上游原代码仅替换既有 PayIncus 注释中的旧称；LTS 同步核对 LoadNodeAll、Project/LocalConfig/IsRunning/IsFrozen 只读契约及原生 state/operation 语义。未发布或部署本次功能。
+- 最终全量回归暴露本地 Xray gRPC 超时状态先于 context 定时器触发的竞态：`egress/core_api.go` 显式将 gRPC DeadlineExceeded/Canceled 映射到标准 context 错误，仍不传播远端文本。`TestCoreAPIContracts` 重复竞态检查覆盖该错误类型契约，避免 CI 偶发误报控制接口错误。

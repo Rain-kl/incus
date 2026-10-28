@@ -692,7 +692,7 @@ func (d *zfs) importPool() (bool, error) {
 
 // Mount mounts the storage pool.
 func (d *zfs) Mount() (bool, error) {
-	// PayIncus: background pool retries must not reload keys after a tripwire.
+	// PayIncus: background pool retries must not reload keys after a security mode lock.
 	if nodesecurity.Check() != nil {
 		return false, errors.New("Internal server error")
 	}

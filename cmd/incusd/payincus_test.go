@@ -30,7 +30,7 @@ func TestPayIncusAuthenticatedRoute(t *testing.T) {
 	}
 
 	err = json.Unmarshal(result.Metadata, &metadata)
-	if err != nil || !slices.Contains(metadata.Extensions, "payincus_node_v1") || !slices.Contains(metadata.Extensions, "payincus_security_v1") {
+	if err != nil || !slices.Contains(metadata.Extensions, "payincus_node_v1") || !slices.Contains(metadata.Extensions, "payincus_security_v1") || !slices.Contains(metadata.Extensions, "payincus_security_resume_v1") {
 		t.Fatalf("unexpected capabilities %s: %v", result.Metadata, err)
 	}
 	// Exercise a child route through the actual router, not just the standalone service.

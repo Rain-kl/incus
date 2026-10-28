@@ -57,6 +57,17 @@ func (m *Manager) Handle(r *http.Request) (int, any) {
 		if err != nil {
 			return 409, err.Error()
 		}
+	case "/resume":
+		if !remote {
+			return 403, "recovery requires an authenticated remote control connection"
+		}
+		var input struct {
+			Revision *uint64        `json:"revision"`
+			Instance ResumeInstance `json:"instance"`
+		}
+		if decode(r, &input) != nil || input.Revision == nil || m.AcknowledgeResume(*input.Revision, input.Instance) != nil {
+			return 409, "refresh recovery state"
+		}
 	case "/recover":
 		if !remote {
 			return 403, "recovery requires an authenticated remote control connection"

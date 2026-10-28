@@ -90,7 +90,7 @@ func AllowedWhileLocked(method, path string) bool {
 	}
 	if method == http.MethodPost {
 		switch path {
-		case "/1.0/payincus/security/ack", "/1.0/payincus/security/policy", "/1.0/payincus/security/recover", "/1.0/payincus/security/lock", "/1.0/payincus/security/unlock":
+		case "/1.0/payincus/security/ack", "/1.0/payincus/security/policy", "/1.0/payincus/security/recover", "/1.0/payincus/security/lock", "/1.0/payincus/security/unlock", "/1.0/payincus/security/resume":
 			return true
 		}
 	}

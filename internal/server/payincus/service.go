@@ -140,7 +140,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 
-		respond(w, 200, map[string]any{"api_extensions": []string{Extension, nodesecurity.Extension}, "api_version": "1.0", "transport_only_agent": true})
+		respond(w, 200, map[string]any{"api_extensions": []string{Extension, nodesecurity.Extension, nodesecurity.ResumeExtension}, "api_version": "1.0", "transport_only_agent": true})
 		return
 	case Prefix + "/report":
 		if r.Method != http.MethodGet {

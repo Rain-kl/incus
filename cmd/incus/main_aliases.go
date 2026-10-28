@@ -233,7 +233,7 @@ func execIfAliases(app *cobra.Command) error {
 		return nil
 	}
 
-	// PayIncus: expanded and external aliases require the same pre-execution tripwire.
+	// PayIncus: expanded and external aliases require the same pre-execution security mode.
 	if observePayIncusCLI([]string{"alias"}) != nil {
 		return fmt.Errorf("Internal server error")
 	}

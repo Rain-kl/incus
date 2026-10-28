@@ -23,6 +23,22 @@ import (
 // PayIncus: the audit socket exposes only event submission and authenticates local UID/PID via the kernel.
 func startPayIncusAudit(d *Daemon) {
 	manager := nodesecurity.Default()
+	manager.SetSnapshot(func(ctx context.Context) ([]nodesecurity.ResumeInstance, error) {
+		instances, err := instance.LoadNodeAll(d.State(), instancetype.Container)
+		if err != nil {
+			return nil, err
+		}
+		pending := []nodesecurity.ResumeInstance{}
+		for _, inst := range instances {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			if inst.IsRunning() {
+				pending = append(pending, nodesecurity.ResumeInstance{Project: inst.Project().Name, Name: inst.Name(), UUID: inst.LocalConfig()["volatile.uuid"], Frozen: inst.IsFrozen()})
+			}
+		}
+		return pending, nil
+	})
 	manager.SetStop(func(ctx context.Context) error {
 		instances, err := instance.LoadNodeAll(d.State(), instancetype.Container)
 		if err != nil {

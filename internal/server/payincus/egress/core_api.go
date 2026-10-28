@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
@@ -111,6 +113,13 @@ func coreCall(ctx context.Context, path, method string, request coreWire) (coreW
 	if err != nil {
 		if callCtx.Err() != nil {
 			return nil, callCtx.Err()
+		}
+		// gRPC can deliver its deadline status just before the local context timer fires.
+		switch status.Code(err) {
+		case codes.DeadlineExceeded:
+			return nil, context.DeadlineExceeded
+		case codes.Canceled:
+			return nil, context.Canceled
 		}
 		// Remote errors may contain configuration secrets; never propagate their text.
 		return nil, errCoreAPI

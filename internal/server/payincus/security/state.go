@@ -1,6 +1,6 @@
 //go:build linux
 
-// Package security implements the optional node tripwire independently of storage encryption.
+// Package security implements the optional node security mode independently of storage encryption.
 package security
 
 import (
@@ -21,6 +21,9 @@ import (
 // Extension identifies the optional node guard contract.
 const Extension = "payincus_security_v1"
 
+// ResumeExtension advertises durable workload recovery through native instance APIs.
+const ResumeExtension = "payincus_security_resume_v1"
+
 // ErrLocked indicates an operation requires explicit control-plane recovery.
 var ErrLocked = errors.New("node is security-locked; recovery requires the control panel")
 
@@ -38,15 +41,25 @@ type Result struct {
 	Detail  string `json:"detail"`
 }
 
+// ResumeInstance identifies a pre-lock workload without retaining credentials.
+type ResumeInstance struct {
+	Project string `json:"project"`
+	Name    string `json:"name"`
+	UUID    string `json:"uuid"`
+	Frozen  bool   `json:"frozen"`
+}
+
 // State persists policy and lock state separately from storage outcomes.
 type State struct {
-	Enabled   bool      `json:"enabled"`
-	Locked    bool      `json:"locked"`
-	Revision  uint64    `json:"revision"`
-	Reason    string    `json:"reason"`
-	UpdatedAt time.Time `json:"updatedAt"`
-	Targets   []Target  `json:"targets"`
-	Results   []Result  `json:"results"`
+	ResumeCaptured  bool             `json:"resumeCaptured"`
+	ResumeInstances []ResumeInstance `json:"resumeInstances"`
+	Enabled         bool             `json:"enabled"`
+	Locked          bool             `json:"locked"`
+	Revision        uint64           `json:"revision"`
+	Reason          string           `json:"reason"`
+	UpdatedAt       time.Time        `json:"updatedAt"`
+	Targets         []Target         `json:"targets"`
+	Results         []Result         `json:"results"`
 }
 
 // Event contains sanitized CLI metadata without arguments or secrets.
@@ -62,12 +75,13 @@ type Event struct {
 
 // Manager coordinates cross-process state, delivery queues and containment.
 type Manager struct {
-	dir     string
-	mu      sync.Mutex
-	actions sync.Mutex
-	starts  sync.RWMutex
-	storage *Storage
-	stop    func(context.Context) error
+	dir      string
+	mu       sync.Mutex
+	actions  sync.Mutex
+	starts   sync.RWMutex
+	storage  *Storage
+	stop     func(context.Context) error
+	snapshot func(context.Context) ([]ResumeInstance, error)
 }
 
 // Directory returns the non-secret node state location.
@@ -81,7 +95,7 @@ func Directory() string {
 
 // New constructs a manager with injectable containment adapters.
 func New(dir string) *Manager {
-	return &Manager{dir: dir, storage: &Storage{Run: Run, ImportDir: filepath.Join(filepath.Dir(dir), "disks")}, stop: func(context.Context) error { return errors.New("container stop adapter unavailable") }}
+	return &Manager{dir: dir, storage: &Storage{Run: Run, ImportDir: filepath.Join(filepath.Dir(dir), "disks")}, snapshot: func(context.Context) ([]ResumeInstance, error) { return nil, nil }, stop: func(context.Context) error { return errors.New("container stop adapter unavailable") }}
 }
 
 var singleton = New(Directory())
@@ -94,6 +108,29 @@ func (m *Manager) SetStop(stop func(context.Context) error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.stop = stop
+}
+
+// SetSnapshot installs the read-only workload identity adapter.
+func (m *Manager) SetSnapshot(snapshot func(context.Context) ([]ResumeInstance, error)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.snapshot = snapshot
+}
+
+// AcknowledgeResume removes only the completed workload from the current recovery plan.
+func (m *Manager) AcknowledgeResume(revision uint64, item ResumeInstance) error {
+	return m.transact(true, func(s *State) error {
+		if s.Locked || s.Revision != revision {
+			return errors.New("refresh recovery state")
+		}
+		for i, pending := range s.ResumeInstances {
+			if pending == item {
+				s.ResumeInstances = append(s.ResumeInstances[:i], s.ResumeInstances[i+1:]...)
+				return nil
+			}
+		}
+		return errors.New("workload is not pending recovery")
+	})
 }
 
 func (m *Manager) transact(write bool, fn func(*State) error) error {
@@ -221,6 +258,9 @@ func (m *Manager) beginStart() (func(), error) {
 func (m *Manager) Boot() error {
 	return m.transact(true, func(s *State) error {
 		if s.Enabled || s.Locked || len(s.Targets) > 0 {
+			if !s.Locked {
+				s.ResumeCaptured = false
+			}
 			s.Locked = true
 			s.Reason = "daemon_restart"
 			s.Results = nil
@@ -254,6 +294,9 @@ func (m *Manager) Recover(revision uint64) error {
 	}
 	if state.Revision != revision {
 		return errors.New("security revision changed; refresh status")
+	}
+	if state.Locked && !state.ResumeCaptured {
+		return errors.New("recovery checkpoint unavailable")
 	}
 	if state.Locked && (len(state.Results) == 0 || state.Results[0].Target != "containers" || !state.Results[0].Success) {
 		return errors.New("container containment has not completed")
@@ -302,6 +345,9 @@ func (m *Manager) Register(ctx context.Context, target Target) error {
 // Trigger persists lockdown before containment begins.
 func (m *Manager) Trigger(reason string) error {
 	return m.transact(true, func(s *State) error {
+		if !s.Locked {
+			s.ResumeCaptured = false
+		}
 		s.Locked = true
 		s.Reason = reason
 		s.Results = nil
@@ -315,6 +361,7 @@ func (m *Manager) Audit(command string, critical bool, uid, pid int) (bool, erro
 	err := m.transact(true, func(s *State) error {
 		blocked = critical && (s.Enabled || s.Locked)
 		if critical && s.Enabled && !s.Locked {
+			s.ResumeCaptured = false
 			s.Locked = true
 			s.Reason = "cli:" + command
 			s.Results = nil
@@ -423,12 +470,55 @@ func (m *Manager) Lockdown(ctx context.Context) {
 	if err != nil || !state.Locked || len(state.Results) > 0 {
 		return
 	}
+	var checkpointErr error
+	if !state.ResumeCaptured {
+		m.mu.Lock()
+		snapshot := m.snapshot
+		m.mu.Unlock()
+		items, snapshotErr := snapshot(ctx)
+		checkpointErr = snapshotErr
+		if checkpointErr == nil {
+			err = m.transact(true, func(s *State) error {
+				if !s.Locked || s.Revision != state.Revision {
+					return errors.New("state changed")
+				}
+				if s.ResumeInstances == nil {
+					s.ResumeInstances = []ResumeInstance{}
+				}
+				// Preserve failed recovery entries across a subsequent lock; never recapture after stopping.
+				for _, item := range items {
+					found := false
+					for _, previous := range s.ResumeInstances {
+						if previous.Project == item.Project && previous.Name == item.Name && previous.UUID == item.UUID {
+							found = true
+						}
+					}
+					if !found {
+						s.ResumeInstances = append(s.ResumeInstances, item)
+					}
+				}
+				s.ResumeCaptured = true
+				return nil
+			})
+			checkpointErr = err
+			if checkpointErr == nil {
+				updated, statusErr := m.Status()
+				checkpointErr = statusErr
+				if statusErr == nil {
+					state = updated
+				}
+			}
+		}
+	}
 	results := []Result{}
 	m.mu.Lock()
 	stop := m.stop
 	m.mu.Unlock()
 	err = stop(ctx)
 	results = append(results, Result{Target: "containers", Success: err == nil, Detail: safeResult(err)})
+	if checkpointErr != nil {
+		results = append(results, Result{Target: "recovery_plan", Success: false, Detail: safeResult(checkpointErr)})
+	}
 	if err == nil {
 		for _, target := range state.Targets {
 			err = m.storage.Lock(ctx, target)

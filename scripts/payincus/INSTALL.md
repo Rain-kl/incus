@@ -86,6 +86,6 @@ TUI 内 APT 使用 `DEBIAN_FRONTEND=noninteractive` 采用软件包默认配置�
 
 创建根之前，将 TUI 显示的随机 hex 密钥保存到配套控制端，复制 SHA256 指纹回 TUI 核对。节点不主动保存明文密钥文件；终端录屏、剪贴板、swap/core dump 仍由管理员管理。可信终端中的 TUI 状态区同时提供节点服务端证书 SHA256，控制端需先人工核对保存，才允许新的管理/发钥链路连接。
 
-关键 CLI 诱捕默认关闭，DIR 节点也可在控制端开启。触发后全部 LXC 停止、API 持续锁定，ZFS 按注册情况卸载/清钥；Agent 与 incusd 保持通信。TUI 加载密钥不会批准节点恢复，须控制端授权后按需启动容器。重启、重连、关闭诱捕均不清除已有锁定。详情与限制见根目录 FEATURES.md 及配套 PayIncus 仓库 `docs/NODE_SECURITY.md`。
+安全模式默认关闭，DIR 节点也可在控制端开启。触发后全部 LXC 停止、API 持续锁定，ZFS 按注册情况卸载/清钥；Agent 与 incusd 保持通信。TUI 加载密钥不会批准节点恢复，须控制端授权后自动恢复锁定前运行的容器。重启、重连、关闭安全模式均不清除已有锁定。详情与限制见根目录 FEATURES.md 及配套 PayIncus 仓库 `docs/NODE_SECURITY.md`。
 
 控制端不再分发独立 Agent。由控制端安装命令传入的 Panel 地址和一次性 token 会在 TUI 中预填并隐藏 token，确认后才兑换；无终端时稍后手工配置。此接入流程不提供独立旧 Agent 的升级迁移，已使用本集成包的节点更新见上文。

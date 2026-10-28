@@ -178,6 +178,7 @@ func TestPublicNodeErrorsRemainGeneric(t *testing.T) {
 	for _, tc := range []struct{ path, body string }{
 		{"/policy", `{"enabled":true,"revision":0}`},
 		{"/recover", `{"revision":0}`},
+		{"/resume", `{"revision":0,"instance":{}}`},
 		{"/unlock", `{"dataset":"tank/private","key":"invalid"}`},
 		{"/ack", `{"ids":["../state"]}`},
 		{"/missing", `{}`},

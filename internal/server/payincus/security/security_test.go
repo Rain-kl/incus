@@ -18,7 +18,7 @@ import (
 	"time"
 )
 
-func TestPersistentTripwireWithoutZFS(t *testing.T) {
+func TestPersistentSecurityModeWithoutZFS(t *testing.T) {
 	m := New(filepath.Join(t.TempDir(), "guard"))
 	state, err := m.Status()
 	if err != nil || state.Locked || state.Enabled {
