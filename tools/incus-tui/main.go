@@ -27,6 +27,7 @@ type resultMsg struct {
 	text       string
 	err        error
 	restartTUI bool
+	pool       *encryptedPoolReceipt
 }
 type (
 	statusMsg string
@@ -47,6 +48,8 @@ type (
 		relaunch              bool
 		showLogs              bool
 		logOffset             int
+		poolRequest           *encryptedPoolRequest
+		poolReceipt           *encryptedPoolReceipt
 	}
 )
 
@@ -91,8 +94,7 @@ var updateMenu = []menuItem{
 
 var zfsManagementMenu = []menuItem{
 	{"安装并检查 ZFS 依赖", "zfs-prepare"},
-	{"创建 ZFS 池（磁盘或测试文件）", "zpool"},
-	{"创建加密数据集并显示密钥", "zfs-create"},
+	{"创建加密 ZFS 存储池", "zpool"},
 	{"输入密钥解锁 ZFS", "zfs-unlock"},
 	{"将 ZFS 数据集绑定到 Incus", "zfs-bind"},
 	{"查看 ZFS 池状态", "zfs-list"},
@@ -127,6 +129,8 @@ func (m *model) backToMenu() {
 		}
 	}
 	m.page = ""
+	m.poolRequest = nil
+	m.poolReceipt = nil
 	m.message = ""
 	m.fields = nil
 	m.confirm = nil
@@ -190,6 +194,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.message = "操作失败：" + m.backend.logs.redact(msg.err.Error())
 		}
+		if msg.pool != nil {
+			m.poolReceipt = msg.pool
+			m.page = "pool-receipt"
+			m.showLogs = false
+		}
 		return m, m.refresh(false)
 	case tea.KeyMsg:
 		// PayIncus: delayed terminal color reports are protocol replies, never form input.
@@ -214,6 +223,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			return m, tea.Quit
+		}
+		if m.page == "pool-receipt" {
+			if msg.String() == "enter" || msg.String() == "esc" {
+				m.backToMenu()
+			}
+			return m, nil
 		}
 		if m.busy || m.showLogs {
 			switch msg.String() {
@@ -259,12 +274,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 				ctx = context.WithValue(ctx, operationLogKey{}, m.backend.logs)
 				m.cancel = cancel
+				if m.poolRequest != nil {
+					request := *m.poolRequest
+					m.poolRequest = nil
+					return m, encryptedPoolOperation(ctx, cancel, m.backend, request)
+				}
 				return m, operation(ctx, cancel, m.confirm)
 			}
 			if msg.String() == "n" {
 				m.page = ""
 				m.message = ""
 				m.confirm = nil
+				m.poolRequest = nil
 			}
 			return m, nil
 		}
@@ -471,6 +492,9 @@ func (m model) View() string {
 	width := m.width
 	if width <= 0 {
 		width = 80
+	}
+	if m.page == "pool-receipt" && m.poolReceipt != nil {
+		return ansi.Hardwrap(m.poolReceipt.view(), width, false)
 	}
 	if m.busy || m.showLogs {
 		return m.operationView(width)

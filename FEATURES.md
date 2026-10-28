@@ -240,7 +240,7 @@ CI 接线修正：fork 初始没有官方 release tag，校验步骤从官方仓
 - 可选扩展 `payincus_security_v1`，由定制包 `INCUS_PAYINCUS=1` 启用。关键命令安全模式默认关闭，不要求安装 ZFS，DIR 节点同样可启用。所有受管本机 Linux CLI 调用均提交脱敏分类、UID/PID、时间与安全模式判定；不保存参数值、stdin、密码或密钥。非 Linux CLI 保留原行为。
 - exec/shell/console、file、导出/发布/复制/移动、配置写入及启动/恢复等关键命令在执行前触发；普通 list/info/help/version 和明确的只读元数据子命令只审计。`info --show-log` 也属于敏感访问。未知命令、别名及外部别名按敏感调用处理，别名展开前再次检查；审计不覆盖被替换的二进制或绕开 CLI 的宿主操作。
 - 触发先原子持久化统一 `locked` 状态，再异步停止本节点全部 LXC 容器。已有认证授权之后的 API 检查覆盖 Unix、TLS 与反向隧道；启动驱动、启动任务与 ZFS 挂载入口另行检查，启动读锁确保正在启动的容器不会晚于停止核验完成才启动。
-- 普通 CLI、受限接口及新扩展的失败统一返回 HTTP 500 / `Failed to begin transaction: sql: database disk image is malformed (11)`，不包含审计或锁定原因，不伪造成功。专用管理状态/上报接口保留真实状态供控制端诊断；这不是对宿主 root 隐藏程序、状态文件或源码的保证。
+- CLI 审计拒绝以及 daemon 安全锁定检查拒绝的非白名单 API 仍返回 HTTP 500 / `Failed to begin transaction: sql: database disk image is malformed (11)`，不包含审计或锁定原因，不伪造成功。已通过锁定检查的安全管理接口保留经过脱敏的原始错误状态码与固定错误文案；锁定期间白名单内的恢复、策略和解锁接口同样保留可诊断错误。普通管理失败不再伪装数据库损坏。此机制不保证向宿主 root 隐藏程序、状态文件或源码。
 - incusd、连接 Agent、状态/告警/恢复接口及 LXC 必需的 onstop/onstopns 回调继续运行；onstart 不放行。状态不是各接口独立副本；关闭安全模式、断网、重连和重启均不解除已存在的锁定。开启安全模式或存在注册加密存储的节点重启时，在存储导入与自动启动前进入锁定。
 - 未配置 ZFS 时报告 `storage/not_configured`，只宣称 API 锁定与容器停止；不宣称明文 DIR 获得加密保护。存储占用、停止失败、卸载失败均独立上报，API 锁定继续保持。失败后控制端可再次发起锁定以重试。
 - 恢复需要已有 Incus 管理权限的远程 mTLS 身份、当前 revision、已完成的容器停止核验及所有注册存储密钥可用。Unix socket 不允许修改策略或批准恢复。这里复用的是 Incus 信任管理身份，并不是独立的硬件控制端身份；持有其它受信任管理员私钥的人也有相同权限。恢复经控制端原生 API 自动恢复锁定前运行的容器，具体见后续安全模式恢复条目。
@@ -372,3 +372,58 @@ CI 接线修正：fork 初始没有官方 release tag，校验步骤从官方仓
 - 新增 `security/resume_test.go`：停机前持久化、重复锁定/重启、失败处置、权限/格式/过期确认、完整身份、遥测不生成 CLI 事件；扩展 `service_test.go` 通用错误及真实 daemon 能力声明断言。定制模块及连接器 race、定向 lint、真实 daemon 路由测试通过；隔离 Debian daemon + mTLS + 实际 LXC + 控制端原生客户端验证运行恢复、冻结恢复、原停止保持、ACK 清空及轮询不入 CLI 审计。
 - 新增逻辑集中在定制目录，无上游数据库或存储格式修改、无依赖升级。上游原代码仅替换既有 PayIncus 注释中的旧称；LTS 同步核对 LoadNodeAll、Project/LocalConfig/IsRunning/IsFrozen 只读契约及原生 state/operation 语义。未发布或部署本次功能。
 - 最终全量回归暴露本地 Xray gRPC 超时状态先于 context 定时器触发的竞态：`egress/core_api.go` 显式将 gRPC DeadlineExceeded/Canceled 映射到标准 context 错误，仍不传播远端文本。`TestCoreAPIContracts` 重复竞态检查覆盖该错误类型契约，避免 CI 偶发误报控制接口错误。
+
+## 安全管理接口保留正常失败原因（2026-10-28）
+
+- 目的：修复安全模式未锁定时，创建加密数据集、密钥校验或管理权限等失败仍统一伪装为数据库损坏的问题。`internal/server/payincus/service.go` 删除二次错误包装，直接转发 `security.Manager.Handle` 既有状态码和固定安全文案；不输出密钥、请求体、底层 stderr 或任意异常文本。
+- 边界：不修改 `cmd/incusd/daemon.go` 的认证/授权和持久锁检查，不修改 `security.PublicError`、CLI 审计、锁定白名单和存储行为。被锁定检查拒绝的请求保持现有 HTTP 500 掩盖约定；允许进入管理处理器的请求保留 400/403/404/409/423/503 等真实语义。安全模式开启但未锁定同样不掩盖普通管理错误。无新增配置、API 或扩展，无数据迁移、依赖升级或上游文件改动；仍基于当日核对的正式 v7.0.2 LTS。
+- 测试位置：`internal/server/payincus/service_test.go` 将原先要求所有错误都掩盖的断言替换为明确接口契约，覆盖关闭/开启但未锁定、参数/指纹/创建/未注册密钥/权限/路径错误和敏感值不回显；真实 HTTP server 验证锁定期间恢复与解锁失败保留状态及文案且不清锁。原 `security` 包锁定持久化、白名单、创建/注册/解锁和恢复测试继续执行。
+- 验证：隔离 Linux 容器中 `go test -race ./internal/server/payincus ./internal/server/payincus/security` 已通过；同范围 Linux `go vet`、增量 `golangci-lint`（0 问题）、差异空白检查和控制仓库 `make check` 均通过。Incus 全仓 `make check INCUS_OFFLINE=1` 因本地缺少 cowsql 在构建前失败，未计为通过。未部署到运行节点；现有节点须更新 daemon 后才会改变错误响应，单独替换 TUI 不会生效。上游同步核对服务 envelope 与 daemon 锁定检查顺序。
+
+## 存储池加密流程重做（进行中，2026-10-28）
+
+- 目标：控制端和 TUI 均默认创建加密 ZFS；控制端自动生成/托管密钥，TUI 独立创建并在成功后展示密钥；加密卷状态、密钥录入、锁盘/解锁、相关实例恢复及密钥删除跟随存储池生命周期。ZFS UI 从节点安全模式迁入存储池。完整流程与 computer-use E2E 尚未完成，不能按接口测试通过宣称交付。
+- 已实现基础接口：`payincus_storage_encryption_v1` 能力；`GET /1.0/payincus/storage` 发现所有 ZFS 加密文件系统/卷（含未注册外部卷）及 encryption root、算法、key status、key format；`POST /storage/create|register|unlock` 使用现有 ZFS 原生适配和身份校验，不再要求控制端托管声明。独立创建仍需调用方提供随机密钥；自动池创建、TUI 成功页及控制端交换/托管尚待接入，不宣称已实现。旧安全接口暂保留，待调用方迁移后清理。
+- 权限/日志边界：继续由真实 daemon 的 can_edit 授权接入。新 storage 子树不暴露 policy/recover；锁定时只放行加密状态读取和已注册密钥加载，不放行 create/register。存储解锁不清除节点安全锁。整个新子树进入 SensitivePath，密钥请求不进入 debug body 捕获；响应只有固定错误与非秘密存储身份。无新增密钥磁盘文件，无密码学格式或现有注册数据迁移。
+- 接入点：`internal/server/payincus/service.go` 路由和能力声明；`security/http.go` 复用管理操作并移除新入口的托管前提；`security/storage.go` 的 ZFS inventory 适配；`security/policy.go` 的精确只读/解锁白名单和敏感路径。仅独立定制目录，未修改上游源码/数据库或依赖；LTS 同步复核原生 zfs list 列定义、daemon 授权/锁检查顺序和 debug 排除机制。
+- 契约测试：`security/storage_http_test.go` 覆盖无控制端声明创建、stdin 密钥传输、注册身份、锁定期间创建拒绝/解锁不清锁、命名空间隔离及 debug 路径排除；inventory 覆盖外部锁定加密根与继承卷、空列表和畸形输出。`service_test.go` 通过实际 HTTP server 验证 namespace 路由/错误 envelope/能力声明。隔离 Linux race 测试、同范围 go vet、增量 golangci-lint（0 问题）及控制仓库 make check 均通过。Incus 全仓 make check 仍受本机缺少 cowsql 阻塞，不计为通过。
+- 未部署，未修改测试机现有池/实例/密钥。后续仍须完成控制端存储池数据模型/API、所有 UI 入口迁移、TUI 创建与成功密钥页、删除时密钥同步清理、锁盘与实例精确恢复、导入后持久解锁，以及 computer-use 全流程验证。
+
+### TUI 独立一步创建加密存储（已接线，尚待真机 E2E）
+
+- `tools/incus-tui/encrypted_pool.go` 将底层文件/磁盘建池与 `/storage/create` 的 AES-256-GCM 子数据集创建/密钥校验/注册整合为一次确认。每次随机生成 32 字节密钥，仅通过本地 Unix API body 传输；无需控制端、指纹复制或托管声明。先探测 `payincus_storage_encryption_v1` 并检查节点锁状态，拒绝旧节点或锁定状态后才分配设备。现有设备无强制覆盖、测试文件独占创建等保护保留。
+- 菜单合并为“创建加密 ZFS 存储池”，删除独立“创建加密数据集并显示密钥”；注册已有加密数据集及密钥加载改走 storage 命名空间，不再要求控制端指纹。保留管理员自行导入存储池的流程。
+- `main.go` 的专用临时结果页在节点确认加密身份后显示密钥及实际导入源 `池名/incus`，不把密钥放入普通日志视图。离开结果页清除 UI 引用。请求/错误日志沿用脱敏；节点不保存明文密钥文件。底层池已创建后若 API 失败、取消或身份响应无效，结果页保留密钥并说明加密初始化未确认完成，不宣称成功或自动删除数据。
+- 测试：`encrypted_pool_test.go` 覆盖无控制端依赖、旧版本/锁定时零存储操作、创建拒绝/身份不匹配时密钥保留、日志不泄密、结果页和离开后的 UI 清理。更新原菜单/两步托管断言为新流程的确认与取消契约。TUI `go test -race ./...`、`go vet ./...`、增量 lint（0 问题）和 Linux arm64 静态构建通过。当前只通过 fixture/模型测试，尚未部署到节点或完成 computer-use 真机创建验收。
+- 仍待完成：控制端创建自动交换与托管、存储池 UI 迁移、外部加密卷导入后解锁/持久托管、删除密钥清理、手动锁盘与受影响实例恢复。早先条目中的待接入状态以本条进展为准，不据此缩小完整目标。
+
+### 控制端自动建池与可恢复的节点初始化（进行中）
+
+- 新增 `POST /1.0/payincus/storage/pool`：调用方提供池名、专用设备或整数 GiB 文件容量及随机密钥；节点在原动作互斥和安全锁检查内创建底层池、`池名/incus` 加密根、验证密钥并登记。物理设备必须为空块设备；文件独占创建；不使用强制覆盖。
+- 新池根数据集在 `zpool create -O` 中带 `payincus:key-fingerprint` 用户属性。响应丢失后，只对相同密钥身份恢复未完成初始化；已注册加密根重试验证 GUID/密钥后返回状态，不重复建池。标记不匹配的既有池与无标记既有文件均拒绝。错误只返回固定安全说明，密钥经 stdin 进入 ZFS；新路由不在锁定白名单，仍受请求体日志排除保护。
+- `security/pool_test.go` 模拟加密数据集创建中断、同密钥继续、完成请求幂等、错误密钥和已存在文件拒绝。Linux 定制模块 race 测试通过；实际 ZFS/设备路径仍须真机测试。控制端先托管密钥再调用节点，最终以真实 Incus storage-pools 身份和加密状态确认完成；对应控制仓库代码和证据见 `docs/NODE_SECURITY.md`。
+- 本轮新增/修改仅在独立定制目录，无上游文件、API 扩展列表或数据库格式改动；新路由复用之前声明的 `payincus_storage_encryption_v1` 能力，尚未发布过该能力。未部署至运行节点；computer-use E2E 仍未完成。
+
+### 删除后的登记清理（进行中）
+
+- 新增 `POST /1.0/payincus/storage/forget`，只接受 dataset/GUID，不接收密钥。`security/storage_delete.go` 要求实际父池可枚举、目标及后代已不存在、登记 GUID 与请求一致后才移除单个目标。父/兄弟目标不变；请求幂等。该受限清理在节点锁定期间允许执行，不清除 API 锁或放宽创建权限；同样经过 daemon can_edit 认证与动作互斥。
+- 父池未导入、导出、离线、枚举失败/空响应时保留登记和密钥，不把“不可见”当作“已销毁”。当前整父池销毁后仍缺少可靠删除证明，控制端会保留检查点并报告清理未完成；此项和受管文件回收尚未完成，不能据此宣称磁盘全生命周期验收通过。
+- `security/storage_delete_test.go` 验证消失目标清理、重复请求、仍存在/不可枚举/错误 GUID 拒绝、其它目标及锁定状态保持。控制端有配套持久检查点和事务密钥删除测试。Linux race/静态检查结果以本轮记录为准，未做真实删除或部署。改动集中于定制模块，未修改上游驱动或数据库。
+
+### 按加密根手动锁盘与精确恢复（2026-10-28，尚待真机 E2E）
+
+- owner 已明确第 9 项为已加密磁盘锁盘，不是明文数据格式转换。`security/storage_lock.go` 持久化每个加密根的手动锁、完成状态及原运行实例清单；节点写入清单后才停止实例和卸载密钥。失败保留 pending 状态及原清单，重试不重新采集已停止实例。普通加载密钥/登记/池初始化重试均不能打开手动锁盘，必须通过远程控制端的明确解密操作。
+- `cmd/incusd/payincus_storage.go` 用原生 LoadNodeAll(Any)、ExpandedDevices、storage.LoadByName/ToAPI 解析实际存储归属；同一加密根下的关联池均受影响，其它池不停止。保存 project/name/volatile.uuid/Frozen，不保存密钥。停止后重新核对不存在相关运行实例；没有原生适配器或身份不完整时拒绝停机。
+- 新 `POST /storage/lock-pool|unlock-pool|resume` 只允许远程已认证控制端；本地 Unix 请求不能解除手动锁。unlock-pool 不清节点 API 锁。逐实例恢复 ACK 检查 dataset、revision、完整实例身份及手动/全局锁状态，只有确认恢复或控制端业务策略明确跳过后才从清单删除。状态目录、原子写入和跨进程文件锁继续复用，新增字段向后兼容。
+- 必要上游接入点：现有 `driver_zfs.go` Mount 与 `driver_zfs_volumes.go` MountVolume 的检查改为同时检查全局及手动加密根锁；`driver_qemu.go` 的统一 start 入口加入与 LXC 相同的 BeginStart 围栏，覆盖 HTTP 外的 VM 启动/迁移/恢复路径。附近均有 PayIncus 注释。全局原生 snapshot/stop 也覆盖 VM，防止 VM 仍占用磁盘导致卸载密钥失败；控制端原生恢复支持 container/virtual-machine 并维持冻结状态。LTS 同步复核这些入口、池配置 source、设备展开及实例 UUID/IsFrozen/Stop 契约，不能删除启动围栏或扩大普通锁定白名单。
+- `security/storage_lock_test.go` 覆盖先持久化后停机、停止失败不卸钥、重试保留清单、其它池访问不受影响、自动加载不能打开手动锁、远程明确解密、待恢复清单禁止重新锁盘覆盖、UUID/ACK 校验。Linux 定制模块 race 通过；真实 daemon TestPayIncusAuthenticatedRoute 编译及路由运行通过（隔离 build 容器已装原生 cowsql/LXC 开发依赖）。这证明真实 daemon 可编译并接入路由，不等同于实际 LXC/VM 锁盘与恢复验收。
+
+### 加密存储联调收尾（2026-10-28，以本条更新前述进行中状态）
+
+- TUI 一步创建已统一调用 `/storage/pool`，复用底层分配、身份标记和加密根注册。控制端存储页已接入创建、外部 hex 加密卷待导入/解锁托管、手动锁盘/恢复及删除清理；节点安全页只保留节点安全管理。对应控制仓库实现及 computer-use 证据见 `docs/NODE_SECURITY.md`。
+- Boot 不再仅因 Targets 非空就开启全局锁；安全策略关闭的普通加密存储可由控制端自动加载。安全策略已开启、已有全局锁及每根手动锁仍持久保留，关闭策略不解除已有锁。新增重启策略回归测试。
+- `GET /storage` 返回全局 locked 及可见数据集（包括明文项），防止未知被当作未加密。外部已存在的独立池根可登记；UnlockManaged 先检查系统挂载点和支持的加密身份，再验证密钥和接管为 prompt，不删除管理员原有 key 文件。当前只托管 AES-256-GCM/hex，不支持明文迁移或 raw/passphrase 转换。
+- 锁定下只额外放行原生 GET storage-pools 列表及单池身份，卷内容、资源详情及写操作不开放。`/storage/auto-unlock` 只允许远程控制端在全局及手动锁均未锁定时调用；普通 unlock 不能清手动锁，unlock-pool 不能清全局锁。
+- storage_delete.go 与 driver_zfs.go 的必要原生接入：销毁前核对登记 GUID，只有原生 destroy 成功才持久化删除证明，支持整池清理及 DB 部分失败重试；重新注册同名存储时清除旧证明。导出/离线不构成证明。身份标记匹配且只剩空父池时才回收自建池；匹配真实文件 vdev 路径并核验 inode 后才删除文件，外部池与兄弟数据保留。导入子数据集不走同名原生 loop 文件删除，避免误删仍在使用的父池 vdev。各上游接入附近有 PayIncus 注释；LTS 同步须保留成功之后的证明顺序、source 归属及外部数据保护。
+- storage_http_test.go 新增锁定身份读边界、外部根及系统挂载点保护；storage_delete_test.go 新增原生整池证明、prepare 不能证明成功、GUID/幂等、外部/兄弟/不匹配文件保护；TUI 测试确认不绕过节点分配器。Linux race、真实 daemon 路由运行及 go vet 已通过；最终全量检查结果按控制仓库收尾记录标注。
+- 真机仅为已授权 bad（Debian 13/arm64，10.211.55.11），有 daemon/TUI 备份。Netcatty 原生 UI 一步创建，ego-browser 管理界面创建、导入、托管、单池锁盘/恢复及全局安全锁定/逐池解锁/恢复均已运行。LXC 核验原关机保持、其它池不因单池锁盘停止及数据标记完整。删除测试池后原生池/数据集/文件及控制端池/密钥均清理。节点无 /dev/kvm，未作 VM 真机验收；未发布或推送。

@@ -26,11 +26,18 @@ type (
 	}
 )
 
+var encryptionRootPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_.:-]*(/[A-Za-z0-9_.:-]+)*$`)
+
 var datasetPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_.:-]*(/[A-Za-z0-9_.:-]+)+$`)
 
 // ValidDataset accepts dedicated child dataset names only.
 func ValidDataset(name string) bool {
 	return len(name) <= 200 && datasetPattern.MatchString(name) && !strings.Contains(name, "..")
+}
+
+// ValidEncryptionRoot accepts existing dedicated roots, including an externally created pool root.
+func ValidEncryptionRoot(name string) bool {
+	return len(name) <= 200 && encryptionRootPattern.MatchString(name) && !strings.Contains(name, "..")
 }
 
 // KeyFingerprint identifies a random hex key without retaining its bytes.
@@ -78,7 +85,7 @@ func Run(ctx context.Context, name string, args []string, input []byte) ([]byte,
 }
 
 func (s *Storage) property(ctx context.Context, dataset, property string) (string, error) {
-	if !ValidDataset(dataset) {
+	if !ValidEncryptionRoot(dataset) {
 		return "", errors.New("invalid protected dataset; use a dedicated child dataset")
 	}
 	output, err := s.Run(ctx, "zfs", []string{"get", "-H", "-o", "value", property, dataset}, nil)
@@ -115,6 +122,9 @@ func (s *Storage) Ready(ctx context.Context, target Target) error {
 	if encryption != "aes-256-gcm" {
 		return errors.New("expected aes-256-gcm dataset")
 	}
+	if err := s.safeMountpoint(ctx, target.Dataset); err != nil {
+		return err
+	}
 	location, err := s.property(ctx, target.Dataset, "keylocation")
 	if err != nil {
 		return err
@@ -125,9 +135,30 @@ func (s *Storage) Ready(ctx context.Context, target Target) error {
 	return nil
 }
 
+func (s *Storage) safeMountpoint(ctx context.Context, dataset string) error {
+	mountpoint, err := s.property(ctx, dataset, "mountpoint")
+	if err != nil {
+		return err
+	}
+	switch mountpoint {
+	case "/", "/etc", "/usr", "/var", "/home", "/boot", "/bin", "/sbin", "/lib", "/lib64", "/opt":
+		return errors.New("host system filesystem cannot be managed as an instance encryption root")
+	}
+	return nil
+}
+
 // Unlock loads or verifies a supplied key without clearing the node lock.
+// UnlockManaged also adopts a verified external key into prompt-only loading.
+func (s *Storage) UnlockManaged(ctx context.Context, target Target, key []byte) error {
+	return s.unlock(ctx, target, key, true)
+}
+
 func (s *Storage) Unlock(ctx context.Context, target Target, key []byte) error {
-	if !ValidDataset(target.Dataset) {
+	return s.unlock(ctx, target, key, false)
+}
+
+func (s *Storage) unlock(ctx context.Context, target Target, key []byte, adopt bool) error {
+	if !ValidEncryptionRoot(target.Dataset) {
 		return errors.New("invalid protected dataset")
 	}
 	fingerprint, err := KeyFingerprint(strings.TrimSpace(string(key)))
@@ -159,6 +190,17 @@ func (s *Storage) Unlock(ctx context.Context, target Target, key []byte) error {
 			return errors.New("ZFS identity changed")
 		}
 	}
+	if adopt {
+		if err := s.safeMountpoint(ctx, target.Dataset); err != nil {
+			return err
+		}
+		for property, expected := range map[string]string{"encryptionroot": target.Dataset, "keyformat": "hex", "encryption": "aes-256-gcm"} {
+			actual, err := s.property(ctx, target.Dataset, property)
+			if err != nil || actual != expected {
+				return errors.New("unsupported external encryption root")
+			}
+		}
+	}
 	args := []string{"load-key", "-L", "prompt", target.Dataset}
 	if status == "available" {
 		args = []string{"load-key", "-n", "-L", "prompt", target.Dataset}
@@ -166,6 +208,17 @@ func (s *Storage) Unlock(ctx context.Context, target Target, key []byte) error {
 	_, err = s.Run(ctx, "zfs", args, append(bytes.TrimSpace(key), '\n'))
 	if err != nil {
 		return errors.New("ZFS key validation/loading failed")
+	}
+	if adopt {
+		location, err := s.property(ctx, target.Dataset, "keylocation")
+		if err != nil {
+			return err
+		}
+		if location != "prompt" {
+			if _, err = s.Run(ctx, "zfs", []string{"set", "keylocation=prompt", target.Dataset}, nil); err != nil {
+				return errors.New("cannot configure prompt-only key loading")
+			}
+		}
 	}
 	return s.Ready(ctx, target)
 }
@@ -188,7 +241,7 @@ func (s *Storage) Create(ctx context.Context, dataset string, key []byte) error 
 
 // Lock unmounts descendants and verifies key removal.
 func (s *Storage) Lock(ctx context.Context, target Target) error {
-	if !ValidDataset(target.Dataset) {
+	if !ValidEncryptionRoot(target.Dataset) {
 		return errors.New("invalid protected dataset")
 	}
 	if target.GUID != "" {
@@ -240,4 +293,36 @@ func (s *Storage) Lock(ctx context.Context, target Target) error {
 		return errors.New("ZFS key unload verification failed")
 	}
 	return nil
+}
+
+// EncryptedDataset describes discoverable storage without returning key material.
+type EncryptedDataset struct {
+	Dataset        string `json:"dataset"`
+	EncryptionRoot string `json:"encryptionRoot"`
+	Algorithm      string `json:"algorithm"`
+	KeyStatus      string `json:"keyStatus"`
+	KeyFormat      string `json:"keyFormat"`
+}
+
+// Inventory includes external encryption roots, even before they are registered with the node.
+func (s *Storage) Inventory(ctx context.Context) ([]EncryptedDataset, error) {
+	output, err := s.Run(ctx, "zfs", []string{"list", "-H", "-t", "filesystem,volume", "-o", "name,encryption,encryptionroot,keystatus,keyformat"}, nil)
+	if err != nil {
+		return nil, errors.New("cannot inspect ZFS encryption state")
+	}
+	items := []EncryptedDataset{}
+	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		if line == "" {
+			continue
+		}
+		fields := strings.Split(line, "\t")
+		if len(fields) != 5 {
+			return nil, errors.New("invalid ZFS encryption inventory")
+		}
+		if fields[1] != "off" && fields[1] != "-" && fields[3] != "available" && fields[3] != "unavailable" {
+			return nil, errors.New("invalid ZFS key status")
+		}
+		items = append(items, EncryptedDataset{Dataset: fields[0], Algorithm: fields[1], EncryptionRoot: fields[2], KeyStatus: fields[3], KeyFormat: fields[4]})
+	}
+	return items, nil
 }

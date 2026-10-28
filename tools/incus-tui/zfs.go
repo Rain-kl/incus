@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -250,27 +249,15 @@ func (m model) zfsMenu(action string) (tea.Model, tea.Cmd) {
 	case "zpool":
 		m.page = "zpool"
 		m.fields = []field{{label: "新池名称"}, {label: "专用磁盘/分区 /dev/...（创建文件池时留空）"}, {label: "测试文件池容量 GiB（使用磁盘时留空）"}}
-	case "zfs-create":
-		var key [32]byte
-		_, err := rand.Read(key[:])
-		if err != nil {
-			m.message = "随机密钥生成失败"
-			return m, nil
-		}
-		value := hex.EncodeToString(key[:])
-		clear(key[:])
-		m.page = "zfs-create"
-		m.fields = []field{{label: "新加密数据集（例如 tank/incus）"}, {label: "新密钥：复制到控制台保存（不写入文件）", value: value, readonly: true}, {label: "从控制端保存结果复制 SHA256 指纹确认"}}
-		m.message = "请先在控制端保存密钥。程序不保存，但终端录屏和剪贴板历史可能保留副本。"
 	case "zfs-unlock":
 		m.page = "zfs-unlock"
-		m.fields = []field{{label: "已注册加密数据集"}, {label: "从控制端领取的 ZFS hex 密钥", secret: true}}
+		m.fields = []field{{label: "已注册加密数据集"}, {label: "ZFS hex 密钥", secret: true}}
 	case "zfs-bind":
 		m.page = "zfs-bind"
 		m.fields = []field{{label: "新的 Incus 存储池名称"}, {label: "已创建且已解锁的 ZFS 数据集"}}
 	case "zfs-register":
 		m.page = "zfs-register"
-		m.fields = []field{{label: "已有加密根数据集"}, {label: "已有 ZFS hex 密钥（先保存控制端）", secret: true}, {label: "从控制端保存结果复制 SHA256 指纹确认"}}
+		m.fields = []field{{label: "已有加密根数据集"}, {label: "已有 ZFS hex 密钥", secret: true}}
 	case "zfs-list":
 		m.busy = true
 		return m, func() tea.Msg {
@@ -288,21 +275,19 @@ func (m model) submitZFS(values []string) (tea.Model, tea.Cmd) {
 	switch m.page {
 	case "zpool":
 		m.message = fmt.Sprintf("确认创建池 %s：设备=%s，测试文件容量=%s GiB。设备创建可能不可逆；不会使用 -f 强制覆盖。", values[0], values[1], values[2])
-		m.confirm = func(ctx context.Context) error { return m.backend.createPool(ctx, values[0], values[1], values[2]) }
-	case "zfs-create", "zfs-register":
-		action := "create"
-		if m.page == "zfs-register" {
-			action = "register"
-		}
-		if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(values[1]) || keyFingerprint(values[1]) != values[2] {
-			m.message = "密钥格式或控制端确认指纹不匹配"
+		m.message += " 将自动创建 AES-256-GCM 加密数据集 " + values[0] + "/incus；完成后显示密钥，请保存后自行导入存储池。"
+		m.poolRequest = &encryptedPoolRequest{name: values[0], device: values[1], size: values[2]}
+		m.confirm = nil
+	case "zfs-register":
+		if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(values[1]) {
+			m.message = "请输入 64 位十六进制 ZFS 密钥"
 			return m, nil
 		}
-		m.message = "确认创建或核验已有加密根并注册到节点。已在控制端保存且核对指纹；本机不保存密钥。"
+		m.message = "核验已有加密数据集并登记到节点；不会将密钥写入本机文件。请自行保存密钥。"
 		m.confirm = func(ctx context.Context) error {
 			c := newLocalClient()
 			defer c.http.CloseIdleConnections()
-			_, err := c.call(ctx, "POST", "/1.0/payincus/security/"+action, map[string]any{"dataset": values[0], "key": values[1], "fingerprint": values[2], "stored": true})
+			_, err := c.call(ctx, "POST", "/1.0/payincus/storage/register", map[string]string{"dataset": values[0], "key": values[1]})
 			return err
 		}
 	case "zfs-unlock":
@@ -310,7 +295,7 @@ func (m model) submitZFS(values []string) (tea.Model, tea.Cmd) {
 		m.confirm = func(ctx context.Context) error {
 			c := newLocalClient()
 			defer c.http.CloseIdleConnections()
-			_, err := c.call(ctx, "POST", "/1.0/payincus/security/unlock", map[string]string{"dataset": values[0], "key": values[1]})
+			_, err := c.call(ctx, "POST", "/1.0/payincus/storage/unlock", map[string]string{"dataset": values[0], "key": values[1]})
 			return err
 		}
 	case "zfs-bind":

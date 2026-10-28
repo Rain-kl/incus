@@ -125,12 +125,14 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer stop()
 	defer cancel()
 	r = r.WithContext(ctx)
+	if r.URL.Path == Prefix+"/storage" || strings.HasPrefix(r.URL.Path, Prefix+"/storage/") {
+		code, value := s.guard.HandleStorage(r)
+		respond(w, code, value)
+		return
+	}
 	if strings.HasPrefix(r.URL.Path, Prefix+"/security") {
 		code, value := s.guard.Handle(r)
-		if code != 200 {
-			respond(w, 500, nodesecurity.PublicError().Error())
-			return
-		}
+		// PayIncus: preserve sanitized management errors; daemon lock enforcement masks blocked requests.
 		respond(w, code, value)
 		return
 	}
@@ -140,7 +142,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 
-		respond(w, 200, map[string]any{"api_extensions": []string{Extension, nodesecurity.Extension, nodesecurity.ResumeExtension}, "api_version": "1.0", "transport_only_agent": true})
+		respond(w, 200, map[string]any{"api_extensions": []string{Extension, nodesecurity.Extension, nodesecurity.ResumeExtension, nodesecurity.StorageExtension}, "api_version": "1.0", "transport_only_agent": true})
 		return
 	case Prefix + "/report":
 		if r.Method != http.MethodGet {

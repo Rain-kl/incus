@@ -6,14 +6,18 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
-// ObserveCLI runs before upstream aliases or command handlers; output is intentionally generic.
+// ObserveCLI runs before upstream handlers; only a confirmed lock uses the generic public error.
 func ObserveCLI(args []string) error {
 	category, critical := Command(args)
 	socket := filepath.Join(filepath.Dir(Directory()), "payincus-audit.socket")
@@ -27,15 +31,29 @@ func ObserveCLI(args []string) error {
 	request, _ := http.NewRequestWithContext(ctx, "POST", "http://unix/audit", bytes.NewReader(data))
 	response, err := client.Do(request)
 	if err == nil {
-		response.Body.Close()
+		defer response.Body.Close()
 		if response.StatusCode == 200 {
 			return nil
 		}
-		return PublicError()
+		message, readErr := io.ReadAll(io.LimitReader(response.Body, 4096))
+		if readErr != nil {
+			return fmt.Errorf("cannot read CLI audit response: %w", readErr)
+		}
+		detail := strings.TrimSpace(string(message))
+		if detail == "" {
+			detail = http.StatusText(response.StatusCode)
+		}
+		return fmt.Errorf("CLI audit HTTP %d: %s", response.StatusCode, detail)
 	}
 	// Root can queue events before daemon startup; no mode bypass occurs while offline.
 	blocked, err := Default().Audit(category, critical, os.Getuid(), os.Getpid())
-	if err != nil || blocked {
+	if err != nil {
+		if errors.Is(Default().Check(), ErrLocked) {
+			return PublicError()
+		}
+		return fmt.Errorf("local CLI audit failed: %w", err)
+	}
+	if blocked {
 		return PublicError()
 	}
 	return nil

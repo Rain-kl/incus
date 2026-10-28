@@ -198,29 +198,21 @@ func TestLocalAPIPreservesErrorsAndFullLogs(t *testing.T) {
 	}
 }
 
-func TestZFSConfirmationFingerprintAndReadOnlyKey(t *testing.T) {
-	m := model{backend: &backend{runner: &fakeRunner{}}, menuGroup: "zfs", cursor: 2}
-	updated, cmd := m.zfsMenu("zfs-create")
+func TestZFSStandaloneCreationConfirmation(t *testing.T) {
+	m := model{backend: &backend{runner: &fakeRunner{}}, menuGroup: "zfs"}
+	updated, cmd := m.zfsMenu("zpool")
 	m = asModel(t, updated)
-	if cmd != nil || m.page != "zfs-create" || len(m.fields) != 3 || !m.fields[1].readonly {
-		t.Fatal("missing enrollment step")
+	if cmd != nil || m.page != "zpool" || len(m.fields) != 3 {
+		t.Fatal("pool creation form unavailable")
 	}
-	key := m.fields[1].value
-	m.focus = 1
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
+	updated, cmd = m.submitZFS([]string{"test", "", "1"})
 	m = asModel(t, updated)
-	if m.fields[1].value != key {
-		t.Fatal("generated key was editable")
+	if cmd != nil || m.page != "confirm" || m.poolRequest == nil || !strings.Contains(m.message, "test/incus") {
+		t.Fatal("creation bypassed confirmation or obscured dataset source")
 	}
-	updated, cmd = m.submitZFS([]string{"tank/private", key, "wrong"})
-	m = asModel(t, updated)
-	if cmd != nil || m.page == "confirm" {
-		t.Fatal("accepted missing control-plane storage confirmation")
-	}
-	updated, cmd = m.submitZFS([]string{"tank/private", key, keyFingerprint(key)})
-	m = asModel(t, updated)
-	if cmd != nil || m.page != "confirm" || strings.Contains(m.View(), key) {
-		t.Fatal("creation bypassed confirmation or retained key on display")
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	if asModel(t, updated).poolRequest != nil {
+		t.Fatal("cancel retained pending disk operation")
 	}
 	b := &backend{runner: &fakeRunner{reply: func(call) ([]byte, error) { return nil, errors.New("unexpected") }}}
 	if b.createPool(context.Background(), "pool", "/dev/test", "1") == nil || b.createPool(context.Background(), "../pool", "", "1") == nil {

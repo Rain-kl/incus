@@ -69,6 +69,7 @@ import (
 	"github.com/lxc/incus/v7/internal/server/mirror"
 	"github.com/lxc/incus/v7/internal/server/network"
 	"github.com/lxc/incus/v7/internal/server/operations"
+	nodesecurity "github.com/lxc/incus/v7/internal/server/payincus/security"
 	"github.com/lxc/incus/v7/internal/server/project"
 	"github.com/lxc/incus/v7/internal/server/response"
 	"github.com/lxc/incus/v7/internal/server/scriptlet"
@@ -1560,6 +1561,13 @@ func (d *qemu) startupHook(monitor *qmp.Monitor, stage string) error {
 
 // start starts the instance and can use an existing InstanceOperation lock.
 func (d *qemu) start(stateful bool, op *operationlock.InstanceOperation) error {
+	// PayIncus: drain VM starts before storage-scoped snapshot/stop and key removal.
+	releaseStart, guardErr := nodesecurity.BeginStart()
+	if guardErr != nil {
+		return nodesecurity.PublicErrorFor(guardErr)
+	}
+	defer releaseStart()
+
 	d.logger.Debug("Start started", logger.Ctx{"stateful": stateful})
 	defer d.logger.Debug("Start finished", logger.Ctx{"stateful": stateful})
 

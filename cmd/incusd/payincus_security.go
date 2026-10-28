@@ -23,8 +23,9 @@ import (
 // PayIncus: the audit socket exposes only event submission and authenticates local UID/PID via the kernel.
 func startPayIncusAudit(d *Daemon) {
 	manager := nodesecurity.Default()
+	installPayIncusStorageWorkloads(d)
 	manager.SetSnapshot(func(ctx context.Context) ([]nodesecurity.ResumeInstance, error) {
-		instances, err := instance.LoadNodeAll(d.State(), instancetype.Container)
+		instances, err := instance.LoadNodeAll(d.State(), instancetype.Any)
 		if err != nil {
 			return nil, err
 		}
@@ -40,7 +41,7 @@ func startPayIncusAudit(d *Daemon) {
 		return pending, nil
 	})
 	manager.SetStop(func(ctx context.Context) error {
-		instances, err := instance.LoadNodeAll(d.State(), instancetype.Container)
+		instances, err := instance.LoadNodeAll(d.State(), instancetype.Any)
 		if err != nil {
 			return err
 		}
@@ -94,7 +95,7 @@ func startPayIncusAudit(d *Daemon) {
 	server.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		credential, ok := r.Context().Value(auditPeer{}).(*unix.Ucred)
 		if !ok || credential == nil || r.Method != "POST" || r.URL.Path != "/audit" {
-			http.Error(w, nodesecurity.PublicError().Error(), 500)
+			http.Error(w, "cannot authenticate local CLI audit request", http.StatusForbidden)
 			return
 		}
 		var input struct {
@@ -103,13 +104,22 @@ func startPayIncusAudit(d *Daemon) {
 		decoder := json.NewDecoder(io.LimitReader(r.Body, 4097))
 		decoder.DisallowUnknownFields()
 		if decoder.Decode(&input) != nil || len(input.Args) != 1 || decoder.Decode(new(any)) != io.EOF {
-			http.Error(w, nodesecurity.PublicError().Error(), 500)
+			http.Error(w, "invalid local CLI audit request", http.StatusBadRequest)
 			return
 		}
 		category, critical := nodesecurity.Command(input.Args)
 		blocked, err := manager.Audit(category, critical, int(credential.Uid), int(credential.Pid))
-		if blocked || err != nil {
-			http.Error(w, nodesecurity.PublicError().Error(), 500)
+		if err != nil {
+			// PayIncus: an audit write failure is not proof of a persisted security lock.
+			if errors.Is(manager.Check(), nodesecurity.ErrLocked) {
+				http.Error(w, nodesecurity.PublicError().Error(), http.StatusInternalServerError)
+				return
+			}
+			http.Error(w, "local CLI audit failed: "+err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		if blocked {
+			http.Error(w, nodesecurity.PublicError().Error(), http.StatusInternalServerError)
 			return
 		}
 		w.WriteHeader(200)

@@ -926,8 +926,11 @@ func (d *Daemon) createCmd(restAPI *http.ServeMux, apiVersion string, c APIEndpo
 			}
 
 			// PayIncus: all authenticated entry transports share one persistent lock; retain control recovery only.
-			if !nodesecurity.AllowedWhileLocked(r.Method, r.URL.Path) && nodesecurity.Check() != nil {
-				return response.InternalError(nodesecurity.PublicError())
+			if !nodesecurity.AllowedWhileLocked(r.Method, r.URL.Path) {
+				guardErr := nodesecurity.Check()
+				if guardErr != nil {
+					return response.InternalError(nodesecurity.PublicErrorFor(guardErr))
+				}
 			}
 
 			// Limit request body size unless the endpoint requires a large body.

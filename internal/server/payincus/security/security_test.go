@@ -500,3 +500,25 @@ func TestKeyHandoffNeverUsesRequestBodyDebugCapture(t *testing.T) {
 		t.Fatal("unrelated upstream logging changed")
 	}
 }
+
+func TestRestartWithoutSafetyPreservesStoragePolicy(t *testing.T) {
+	m := New(filepath.Join(t.TempDir(), "guard"))
+	if m.transact(true, func(s *State) error {
+		s.Targets = []Target{{Dataset: "pool/incus"}}
+		s.StorageLocks = map[string]StorageLock{"pool/incus": {Locked: true, Complete: true}}
+		return nil
+	}) != nil || m.Boot() != nil {
+		t.Fatal("fixture/restart failed")
+	}
+	state, err := m.Status()
+	if err != nil || state.Locked || !state.StorageLocks["pool/incus"].Locked {
+		t.Fatal("storage registration armed global safety or lost manual lock", state, err)
+	}
+	if m.Trigger("panel_request") != nil || m.Boot() != nil {
+		t.Fatal("lock/restart failed")
+	}
+	state, _ = m.Status()
+	if !state.Locked {
+		t.Fatal("restart cleared an existing global lock")
+	}
+}

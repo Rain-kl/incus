@@ -2600,9 +2600,10 @@ func (d *zfs) deactivateDevice(dataset string, property string, devPath string) 
 
 // MountVolume mounts a volume and increments ref counter. Please call UnmountVolume() when done with the volume.
 func (d *zfs) MountVolume(vol Volume, op *operations.Operation) error {
-	// PayIncus: direct volume operations must obey the same node lock.
-	if nodesecurity.Check() != nil {
-		return nodesecurity.PublicError()
+	// PayIncus: direct volume operations must obey node and manual storage locks.
+	guardErr := nodesecurity.CheckStorage(d.config["zfs.pool_name"])
+	if guardErr != nil {
+		return nodesecurity.PublicErrorFor(guardErr)
 	}
 
 	unlock, err := vol.MountLock()

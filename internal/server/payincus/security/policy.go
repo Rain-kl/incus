@@ -79,18 +79,23 @@ func Command(args []string) (string, bool) {
 // AllowedWhileLocked is an exact allowlist; read methods alone do not imply safety.
 func AllowedWhileLocked(method, path string) bool {
 	if method == http.MethodGet {
+		// Storage identity reads remain available so the panel can display and unlock encrypted pools.
+		poolParts := strings.Split(strings.Trim(path, "/"), "/")
+		if path == "/1.0/storage-pools" || (len(poolParts) == 3 && poolParts[0] == "1.0" && poolParts[1] == "storage-pools" && poolParts[2] != "" && !strings.Contains(poolParts[2], "..")) {
+			return true
+		}
 		parts := strings.Split(strings.Trim(path, "/"), "/")
 		if len(parts) == 4 && parts[0] == "internal" && parts[1] == "containers" && (parts[3] == "onstop" || parts[3] == "onstopns") {
 			return true
 		}
 		switch path {
-		case "/1.0", "/1.0/payincus", "/1.0/payincus/report", "/1.0/payincus/security", "/1.0/payincus/security/report":
+		case "/1.0/payincus/storage", "/1.0", "/1.0/payincus", "/1.0/payincus/report", "/1.0/payincus/security", "/1.0/payincus/security/report":
 			return true
 		}
 	}
 	if method == http.MethodPost {
 		switch path {
-		case "/1.0/payincus/security/ack", "/1.0/payincus/security/policy", "/1.0/payincus/security/recover", "/1.0/payincus/security/lock", "/1.0/payincus/security/unlock", "/1.0/payincus/security/resume":
+		case "/1.0/payincus/storage/unlock-pool", "/1.0/payincus/storage/forget", "/1.0/payincus/storage/unlock", "/1.0/payincus/security/ack", "/1.0/payincus/security/policy", "/1.0/payincus/security/recover", "/1.0/payincus/security/lock", "/1.0/payincus/security/unlock", "/1.0/payincus/security/resume":
 			return true
 		}
 	}
@@ -99,5 +104,5 @@ func AllowedWhileLocked(method, path string) bool {
 
 // SensitivePath excludes the entire management subtree from request-body debug capture.
 func SensitivePath(path string) bool {
-	return path == "/1.0/payincus/security" || strings.HasPrefix(path, "/1.0/payincus/security/")
+	return path == "/1.0/payincus/storage" || strings.HasPrefix(path, "/1.0/payincus/storage/") || path == "/1.0/payincus/security" || strings.HasPrefix(path, "/1.0/payincus/security/")
 }

@@ -174,7 +174,7 @@ func TestMenuGroupsKeepMaintenanceAndZFSOffHome(t *testing.T) {
 		if cmd != nil || m.menuGroup != group || m.cursor != 0 {
 			t.Fatal("submenu entry executed an operation")
 		}
-		if group == "zfs" && len(m.currentMenu()) != 8 {
+		if group == "zfs" && len(m.currentMenu()) != 7 {
 			t.Fatal("ZFS operations missing")
 		}
 		updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEsc})

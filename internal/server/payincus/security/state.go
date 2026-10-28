@@ -32,6 +32,14 @@ func PublicError() error {
 	return errors.New("Failed to begin transaction: sql: database disk image is malformed (11)")
 }
 
+// PublicErrorFor masks only an established global lock; unrelated failures retain their cause.
+func PublicErrorFor(err error) error {
+	if errors.Is(err, ErrLocked) {
+		return PublicError()
+	}
+	return err
+}
+
 // Target identifies a dedicated ZFS encryption root without storing its key.
 type Target struct {
 	Dataset     string `json:"dataset"`
@@ -56,15 +64,17 @@ type ResumeInstance struct {
 
 // State persists policy and lock state separately from storage outcomes.
 type State struct {
-	ResumeCaptured  bool             `json:"resumeCaptured"`
-	ResumeInstances []ResumeInstance `json:"resumeInstances"`
-	Enabled         bool             `json:"enabled"`
-	Locked          bool             `json:"locked"`
-	Revision        uint64           `json:"revision"`
-	Reason          string           `json:"reason"`
-	UpdatedAt       time.Time        `json:"updatedAt"`
-	Targets         []Target         `json:"targets"`
-	Results         []Result         `json:"results"`
+	ResumeCaptured   bool                   `json:"resumeCaptured"`
+	ResumeInstances  []ResumeInstance       `json:"resumeInstances"`
+	Enabled          bool                   `json:"enabled"`
+	Locked           bool                   `json:"locked"`
+	Revision         uint64                 `json:"revision"`
+	Reason           string                 `json:"reason"`
+	UpdatedAt        time.Time              `json:"updatedAt"`
+	Targets          []Target               `json:"targets"`
+	Results          []Result               `json:"results"`
+	StorageLocks     map[string]StorageLock `json:"storageLocks,omitempty"`
+	DestroyedStorage map[string]string      `json:"destroyedStorage,omitempty"`
 }
 
 // Event contains sanitized CLI metadata without arguments or secrets.
@@ -80,13 +90,15 @@ type Event struct {
 
 // Manager coordinates cross-process state, delivery queues and containment.
 type Manager struct {
-	dir      string
-	mu       sync.Mutex
-	actions  sync.Mutex
-	starts   sync.RWMutex
-	storage  *Storage
-	stop     func(context.Context) error
-	snapshot func(context.Context) ([]ResumeInstance, error)
+	dir          string
+	mu           sync.Mutex
+	actions      sync.Mutex
+	starts       sync.RWMutex
+	storage      *Storage
+	stop         func(context.Context) error
+	snapshot     func(context.Context) ([]ResumeInstance, error)
+	poolSnapshot func(context.Context, string) ([]ResumeInstance, error)
+	poolStop     func(context.Context, string) error
 }
 
 // Directory returns the non-secret node state location.
@@ -262,7 +274,7 @@ func (m *Manager) beginStart() (func(), error) {
 // Boot retains lockdown across daemon restarts.
 func (m *Manager) Boot() error {
 	return m.transact(true, func(s *State) error {
-		if s.Enabled || s.Locked || len(s.Targets) > 0 {
+		if s.Enabled || s.Locked {
 			if !s.Locked {
 				s.ResumeCaptured = false
 			}
@@ -307,6 +319,9 @@ func (m *Manager) Recover(revision uint64) error {
 		return errors.New("container containment has not completed")
 	}
 	for _, target := range state.Targets {
+		if state.StorageLocks[target.Dataset].Locked {
+			continue
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		err = m.storage.Ready(ctx, target)
 		cancel()
@@ -342,6 +357,7 @@ func (m *Manager) Register(ctx context.Context, target Target) error {
 				return errors.New("dataset already registered; key replacement requires a separate workflow")
 			}
 		}
+		delete(s.DestroyedStorage, target.Dataset)
 		s.Targets = append(s.Targets, target)
 		return nil
 	})

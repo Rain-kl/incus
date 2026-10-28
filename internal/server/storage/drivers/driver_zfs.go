@@ -1,6 +1,7 @@
 package drivers
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -483,6 +484,11 @@ func (d *zfs) Delete(op *operations.Operation) error {
 			}
 		}
 
+		// PayIncus: capture encryption GUIDs before native destruction so exported pools cannot fake key cleanup.
+		recordDestroyed, err := nodesecurity.TrackDeletion(context.Background(), d.config["zfs.pool_name"])
+		if err != nil {
+			return err
+		}
 		// Delete the pool.
 		if strings.Contains(d.config["zfs.pool_name"], "/") {
 			// Delete the dataset.
@@ -497,6 +503,10 @@ func (d *zfs) Delete(op *operations.Operation) error {
 				return err
 			}
 		}
+		// PayIncus: persist deletion proof only after the native destroy succeeded; retain custody on failure.
+		if err = recordDestroyed(); err != nil {
+			return err
+		}
 	}
 
 	// On delete, wipe everything in the directory.
@@ -505,11 +515,13 @@ func (d *zfs) Delete(op *operations.Operation) error {
 		return err
 	}
 
-	// Delete any loop file we may have used
+	// PayIncus: an imported dataset must never unlink a same-named vdev still used by its parent pool.
 	loopPath := loopFilePath(d.name)
-	err = os.Remove(loopPath)
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("Failed to remove '%s': %w", loopPath, err)
+	if d.config["source"] == loopPath {
+		err = os.Remove(loopPath)
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("Failed to remove '%s': %w", loopPath, err)
+		}
 	}
 
 	return nil
@@ -692,9 +704,10 @@ func (d *zfs) importPool() (bool, error) {
 
 // Mount mounts the storage pool.
 func (d *zfs) Mount() (bool, error) {
-	// PayIncus: background pool retries must not reload keys after a security mode lock.
-	if nodesecurity.Check() != nil {
-		return false, nodesecurity.PublicError()
+	// PayIncus: background pool retries must obey node and manual storage locks.
+	guardErr := nodesecurity.CheckStorage(d.config["zfs.pool_name"])
+	if guardErr != nil {
+		return false, nodesecurity.PublicErrorFor(guardErr)
 	}
 
 	// Import the pool if not already imported.
