@@ -160,7 +160,7 @@ func TestEnrollmentPreflightAndStageFailures(t *testing.T) {
 func TestMenuGroupsKeepMaintenanceAndZFSOffHome(t *testing.T) {
 	m := model{backend: &backend{runner: &fakeRunner{}}, height: 50}
 	root := m.View()
-	if strings.Contains(root, "导入 Panel 客户端证书") || strings.Contains(root, "安装并检查 ZFS") || !strings.Contains(root, "ZFS 管理") || !strings.Contains(root, "高级维护") {
+	if strings.Contains(root, "导入 Panel 客户端证书") || strings.Contains(root, "安装并检查 ZFS") || !strings.Contains(root, "ZFS") || !strings.Contains(root, "更多") {
 		t.Fatal("home menu was not consolidated")
 	}
 	for _, group := range []string{"zfs", "advanced", "repair", "update"} {

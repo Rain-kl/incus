@@ -14,7 +14,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -41,7 +40,7 @@ func (commandRunner) Run(ctx context.Context, name string, args []string, input 
 	if name == "/usr/bin/incus" {
 		return runIncusAdapter(ctx, args, input)
 	}
-	cmd := exec.CommandContext(ctx, name, args...)
+	cmd := systemCommand(ctx, name, args...)
 	if packageCommand {
 		cmd.Env = append(cmd.Environ(), "DEBIAN_FRONTEND=noninteractive", "DEBIAN_PRIORITY=critical", "APT_LISTCHANGES_FRONTEND=text", "NEEDRESTART_MODE=l", "TERM=dumb")
 		logOperation(ctx, "软件包安装使用非交互配置；采用包默认答案，needrestart 仅列出待重启服务；保留全部 stdout/stderr")

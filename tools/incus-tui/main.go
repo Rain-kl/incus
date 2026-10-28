@@ -45,6 +45,8 @@ type (
 		updateChannel         string
 		updating              bool
 		relaunch              bool
+		showLogs              bool
+		logOffset             int
 	}
 )
 
@@ -131,7 +133,7 @@ func (m *model) backToMenu() {
 	m.updateChannel = ""
 }
 
-func (m model) Init() tea.Cmd { return m.refresh(false) }
+func (m model) Init() tea.Cmd { return tea.Batch(m.refresh(false), logTick()) }
 func (m model) refresh(showLogs bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
@@ -160,6 +162,8 @@ func operation(ctx context.Context, cancel context.CancelFunc, fn func(context.C
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case logTickMsg:
+		return m, logTick()
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
@@ -180,6 +184,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.confirm = nil
 		m.fields = nil
 		m.page = ""
+		m.showLogs = true
+		m.logOffset = 0
 		m.message = msg.text
 		if msg.err != nil {
 			m.message = "操作失败：" + m.backend.logs.redact(msg.err.Error())
@@ -209,6 +215,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, tea.Quit
 		}
+		if m.busy || m.showLogs {
+			switch msg.String() {
+			case "pgup":
+				m.logOffset += max(1, m.height/2)
+				return m, nil
+			case "pgdown":
+				m.logOffset = max(0, m.logOffset-max(1, m.height/2))
+				return m, nil
+			case "end":
+				m.logOffset = 0
+				return m, nil
+			}
+			if !m.busy && (msg.String() == "esc" || msg.String() == "l" || msg.String() == "enter") {
+				m.showLogs = false
+				return m, nil
+			}
+		}
+		if !m.busy && m.page == "" && len(m.fields) == 0 && msg.String() == "l" {
+			m.showLogs = true
+			m.logOffset = 0
+			return m, nil
+		}
 		if m.busy {
 			if msg.String() == "esc" && m.cancel != nil {
 				m.cancel()
@@ -223,6 +251,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.page == "confirm" {
 			if msg.String() == "y" || msg.String() == "Y" {
 				m.busy = true
+				m.logOffset = 0
 				if m.updateChannel != "" {
 					m.updating = true
 					return m, nodeUpdateCommand(m.backend, m.updateChannel)
@@ -443,6 +472,9 @@ func (m model) View() string {
 	if width <= 0 {
 		width = 80
 	}
+	if m.busy || m.showLogs {
+		return m.operationView(width)
+	}
 	return ansi.Hardwrap(m.render(), width, false)
 }
 
@@ -511,9 +543,9 @@ func (m model) render() string {
 			out.WriteString(prefix + label + "\n")
 		}
 		if m.menuGroup == "" {
-			out.WriteString("\n↑/↓ 选择 · Enter 确认 · q 退出\n")
+			out.WriteString("\n↑/↓ 选择 · Enter 确认 · l 操作日志 · q 退出\n")
 		} else {
-			out.WriteString("\n↑/↓ 选择 · Enter 确认 · Esc / q 返回主菜单（菜单可滚动）\n")
+			out.WriteString("\n↑/↓ 选择 · Enter 确认 · l 操作日志 · Esc / q 返回主菜单（菜单可滚动）\n")
 		}
 	}
 	return out.String()
@@ -566,8 +598,8 @@ func main() {
 	}()
 	b := newBackend()
 	b.logs = &operationLog{writer: logFile, path: filepath.Clean(logFile.Name())}
-	program := tea.NewProgram(initialModel(b))
-	b.logs.emit = func(line string) { program.Println(line) }
+	// PayIncus: render diagnostics inside the alternate screen, never above the menu.
+	program := tea.NewProgram(initialModel(b), tea.WithAltScreen())
 	finalModel, err := program.Run()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "无法启动终端界面：", err)

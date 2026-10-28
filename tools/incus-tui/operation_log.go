@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-// PayIncus: keep complete setup diagnostics in terminal scrollback and the session log.
+// PayIncus: keep complete diagnostics on disk and a bounded, redacted tail for the UI.
 type operationLog struct {
 	mu      sync.Mutex
 	writer  io.Writer
@@ -20,6 +20,7 @@ type operationLog struct {
 	path    string
 	secrets []string
 	err     error
+	recent  []string
 }
 
 type operationLogKey struct{}
@@ -135,6 +136,10 @@ func logOperation(ctx context.Context, format string, args ...any) {
 			if err != nil {
 				l.err = err
 			}
+		}
+		l.recent = append(l.recent, entry)
+		if len(l.recent) > 200 {
+			l.recent = append([]string(nil), l.recent[len(l.recent)-200:]...)
 		}
 		writeErr := l.err
 		l.mu.Unlock()

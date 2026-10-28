@@ -13,6 +13,15 @@
 
 上游始终以正式 LTS 版本为准，仅同步 LTS 维护版本及经过兼容性验证的新 LTS 系列。普通功能版、开发分支及未发版提交均不纳入基线或同步目标。定制提交建立在记录的 LTS 基线上。
 
+## TUI 系统命令路径与日志页面（2026-10-28）
+
+- 目的：修复非登录 root 环境缺少 `/usr/sbin:/sbin` 时，一键 ZFS 依赖安装已成功却找不到 `modprobe`；隔离菜单、节点状态与命令输出，避免日志冲散界面。
+- 行为：`tools/incus-tui/system_command.go` 在每次执行时重新解析命令，PATH 查找失败后检查标准系统目录，并为子进程补齐系统 PATH；保留调用者已有 PATH 和绝对路径，不修改父进程环境。APT 的非交互、原始错误和取消语义保留。软件包/模块实际缺失时仍报告错误，不把失败当作成功，不自动删除包管理锁。
+- 界面：使用 alternate screen；执行中与结束后进入独立日志页，状态、文件路径、输出及操作提示分区。内存只保留最近 200 条已脱敏日志，完整内容继续写入原会话文件。PgUp/PgDn 翻页，End 跟随最新；结束后 Enter/Esc/l 返回，菜单按 l 重开。更新事务仍不可取消。
+- 接入点：`tools/incus-tui/{backend.go,system_command.go,operation_log.go,log_view.go,main.go}`；仅独立 TUI 模块，无新增上游 API/扩展、权限或数据格式。无需配置，适用于已支持的 Debian/Ubuntu；不修改上游文件。同步 LTS 时复核 Bubble Tea alternate-screen 与命令执行生命周期。
+- 测试：`system_command_test.go` 覆盖空 PATH、子进程系统目录及安装后重新查找；`log_view_test.go` 覆盖 80×24/40×12/120×40 边界、日志保留、分页、结束失败展示与返回菜单；现有 APT 非交互、ZFS 和更新取消保护测试保留。菜单守卫按现有“ZFS/更多”标签核对，修正旧标签断言。
+- 本地验证：TUI `go test -race ./...`、`go vet ./...`、`golangci-lint run --new-from-rev HEAD ./...` 及 Linux arm64 静态构建通过；控制仓库 `make check` 通过。Incus 全仓 `make check INCUS_OFFLINE=1` 因本机缺少 cowsql 在构建前失败；全量 TUI lint 有 8 项既有问题，增量检查为 0 项。真机验证：`10.211.55.11`（Debian 13 arm64 / 6.12.113+deb13-arm64）备份原程序到 `/var/backups/incus-tui/incus-tui-before-log-path-20261028`，原子替换 `/usr/bin/incus-tui` 为 `a228a4ea1906+local-tui-log-path`。真实 80×24 PTY 以 `PATH=/usr/bin:/bin` 启动，从 ZFS 菜单确认一键依赖配置，APT、`modprobe zfs`、`zfs version` 均 exit 0；验证 PgUp 历史、End 跟随、返回菜单及退出。会话日志 `/var/log/incus-tui/session-20261028-173312-2652880864.log`；原始 PTY 记录 `/home/ryan/incus-tui-pty-test.ansi`。仅验证依赖配置，未创建/格式化存储池，未重启 Incus 或连接器。
+
 ## 节点 API 与精简连接 Agent
 
 ### 目的与行为
