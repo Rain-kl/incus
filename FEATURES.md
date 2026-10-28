@@ -307,3 +307,40 @@ CI 接线修正：fork 初始没有官方 release tag，校验步骤从官方仓
 - 测试节点上发现 systemd 返回启动成功后，代理核心仍可能尚未就绪，第一次检测失败导致创建任务立即回滚；同一网络命名空间稍后检测可成功。
 - 网关在原有操作超时内重试实际 HTTPS 探测，未成功时始终保持出口阻断；记录不含节点凭据的检查错误类别。取消或超时仍返回未就绪，不允许直连回退。
 - Linux 节点包测试覆盖首次失败后恢复和取消时不再检测。完整实例出口验收结果须以实际部署后的测试为准；源代码改动尚未发布。
+
+## Xray 控制、校验热路径与出口恢复（2026-10-28）
+
+### 行为与边界
+
+- 保留独立 Xray 进程及各套餐出口组的独立网络命名空间，不导入 Xray Go 内核、不在 incusd 内创建 Xray 多实例；继续使用固定正式版 v26.3.27 及现有摘要。Incus 上游 LTS 核对仍为 v7.0.2，未同步开发提交。
+- 未变且服务/API 健康的出口组跳过临时配置写入、配置校验子进程、unit 写入和重启。主机级策略仅变更防火墙/实例清单时，不再重复校验或改写未变的 Xray 配置。配置变化及启动/修复仍验证后应用；验证失败保留最后有效文件。
+- 二进制验证缓存以路径、文件身份/大小/时间/权限为依据；Linux 身份包含 inode/ctime，变更即重新哈希并恢复固定载荷。缓存最多 128 项、使用时最长 5 分钟重新校验，不是后台定时扫描器。拒绝符号链接和非常规文件；不声明可对抗宿主 root 篡改程序或内存。
+- 使用受保护目录中的 `api.sock` 管理原生 Xray gRPC，复用本地连接，单次 RPC 上限 2 秒、响应上限 2 MiB、连接池上限 128。关闭组时释放对应连接。禁止环境代理介入本地 Unix 通信；不增加公网/网卡监听，不修改 Incus mTLS/节点 API 鉴权。
+- 固定版使用 `dokodemo-door` 的 Unix 入站及 API 路由，目标端口必须非零，否则该固定版会在收到连接时 panic。真实 gRPC 回归覆盖此约束；未使用较新版本才有的 `api.listen` Unix 配置。
+- `ListInbounds` 请求仅标签；该固定版 `ListOutbounds` 请求为空、响应可能包含设置，仅在有界本地缓冲中解析标签，禁止记录/上报响应或远端原始错误。故障切换通过原生 `OverrideBalancerTarget`，随后 `GetBalancerInfo` 读回目标确认；移除生产路径中的 `xray api bo` 和启动 shell 重试循环。缺少方法、异常响应和拒绝访问均不降级到 CLI 或直连。
+- systemd 启动后只确认 API/黑洞初始化，不凭进程启动设置转发 ready。主机代理通过真实 HTTPS 出口及网关 TCP/UDP DNS 检测后放行；显式 direct 模式仍在 API 与服务实例确认后走管理员选择的直连策略。套餐出口组需进程当前 InvocationID、API、HTTPS、TCP/UDP DNS 均满足，重启不可沿用旧探测结果。
+- 进程停止/启动前清理就绪标记；单套餐服务只清理自身 mark。API/探测故障不启用直连回退。主机级 API 连续失败三轮后只修复 Xray 服务；远端出口/DNS 失败不触发反复重启内核。失败健康状态保留，失败探测下一轮重新尝试；服务 InvocationID 改变时立即使旧探测失效，不等待长探测间隔。周期协调仍为 10 秒，外部探测有超时，不承诺故障检测零延迟。
+- 主机旧式代理在已应用策略上的进程/API 故障不阻止独立套餐组的周期协调。不得将 API 在线误认成完整数据路径可用，亦不承诺所有配置无损热更新；配置/监听/DNS 等仍受控重启，长期连接是否存活依变更及原生内核行为而定。
+
+### 接入点及上游 API 契约
+
+| 路径 / 接口 | 作用与契约 | 验证 |
+| --- | --- | --- |
+| `egress/core_api.go`，HandlerService.ListInbounds/ListOutbounds | 依据 XTLS/Xray-core v26.3.27 `app/proxyman/command/command.proto`，分别请求字段 1 的 true / 空请求，响应字段 1 为 handler 列表、handler 字段 1 为 tag | `TestCoreAPIContracts`、原生 Xray 回归 |
+| RoutingService.OverrideBalancerTarget/GetBalancerInfo | 依据同版本 `app/router/command/command.proto`；写入 balancerTag/target，读回 balancer.override.target，目标不匹配即失败 | 原生黑洞/指定代理切换、读回不匹配、取消/超时/异常响应 |
+| `egress/core_files.go`、`embed.go` | 校验/文件快路径与有界二进制缓存，不更改共享配置 | 配置不变不启动校验、不写文件；失败保留有效文件；取消、篡改修复、热路径基准 |
+| `egress/health.go`、`manager.go`、`groups.go` | 服务实例身份及 HTTP/DNS 就绪；保留网络命名空间、nftables、版本/代际检查与失败阻断 | DNS 双传输失败、systemd 状态及 InvocationID、真实 namespace/重启与包路径隔离 |
+| `cmd/payincus-network-worker/main.go` | 增加 `-network-core-api`、`-network-core-failover`、`-network-dns-address`，仅节点内部启动/探测用途 | systemd 真正运行 worker 与固定 Xray，不依赖 shell API 模拟 |
+| `go.mod` | 将已有 gRPC v1.84.0 从 indirect 标为直接依赖，保留原有 LTS 版本并标注 `PayIncus:` 原因；无新的 Xray runtime 依赖、无 go.sum/Go 工具链升级 | 构建、竞态及 lint；上游同步时核对依赖版本和协议适配 |
+
+`egress/` 均指 `internal/server/payincus/egress/`。新增实现集中于定制目录；未增加或修改上游 daemon/驱动运行时挂钩。gRPC 字段采用独立小适配层，无生成代码或 Xray 源码拷入。同步上游/Xray 时须对照固定版 proto、入站 Unix 行为、方法存在性、错误/取消、服务实例身份以及内核转发链逐项回归。
+
+### 集成验证
+
+- 定制模块与连接器 race 测试包含 gRPC 正常请求、错误脱敏、缺失能力、畸形响应、标签校验、读回确认、取消/超时；原生 Xray 真实切换黑洞/代理并发起 HTTPS，验证无直连泄漏。
+- `scripts/payincus/test-egress-systemd.sh`：可销毁容器中真实 systemd、固定 Xray、新 worker，覆盖私有/残留/占用命名空间、重新启动、DNS bind mount、排队恢复及所有代理策略 API 初始化。无宿主网络/PID/cgroup 挂载或内核模块加载；可用 `PAYINCUS_EGRESS_SYSTEMD_IMAGE` 指定已准备的本地镜像。
+- `scripts/payincus/test-egress-vm.sh`：仅在隔离 QEMU 中加载内核模块，验证不同代理组及 direct 的 TCP/UDP/DNS 来源、单组故障不串流、失败阻断和 IPv6/来源伪造限制。需已准备 amd64 固定载荷与匹配 Debian 内核/模块。CI Debian amd64 在 main 与既有 ZFS VM 构建环境复用，canary 独立运行代理 VM；均不在宿主上加载模块。
+- 本地基准仅衡量二进制核对热路径：完整哈希约 30–31ms、分配约 36.6MB/次，缓存命中约 8–12µs、分配约 2.5KB/次；不代表完整协调循环或代理转发吞吐提升。未进行生产部署或真实外部代理吞吐压测。
+- 本地已通过：定制模块/连接器 race、固定 Xray 原生 API/HTTPS 回归、真实 systemd 全部恢复场景、隔离 QEMU 套餐 TCP/UDP/DNS 数据路径、改动范围 golangci-lint、脚本 ShellCheck、workflow actionlint、`go mod tidy -diff` 及差异空白检查。CI 已补充对应集成步骤，但尚未推送或触发远程 CI；不将本地结果视为发布验收。
+
+- canary 合并保留既有套餐健康检查重试，并将 TCP/UDP DNS 纳入同一探测；保留该分支既有精简构建流程，仅增加本次代理模块 race、systemd、代理 VM 和新增脚本检查，不恢复已删除的其它测试步骤。合并时独立追加文档，避免覆盖已有特性记录。

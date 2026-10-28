@@ -82,8 +82,9 @@ func xrayConfig(in Instruction, probePorts []int, transparent bool) ([]byte, err
 	if transparent {
 		inbounds = append(inbounds, map[string]any{"tag": "dns-forward", "listen": "169.254.242.2", "port": 53, "protocol": "dokodemo-door", "settings": map[string]any{"address": "1.1.1.1", "port": 53, "network": "tcp,udp"}})
 		inbounds = append(inbounds, map[string]any{"tag": "transparent", "listen": "::", "port": transparentPort, "protocol": "dokodemo-door", "settings": map[string]any{"network": "tcp,udp", "followRedirect": true}, "streamSettings": map[string]any{"sockopt": map[string]any{"tproxy": "tproxy"}}})
-		inbounds = append(inbounds, map[string]any{"tag": "api-in", "listen": "127.0.0.1", "port": apiPort, "protocol": "dokodemo-door", "settings": map[string]any{"address": "127.0.0.1"}})
-		config["api"] = map[string]any{"tag": "api", "services": []string{"RoutingService"}}
+		// Pinned dokodemo Unix listeners need a non-zero target port even for virtual API routing.
+		inbounds = append(inbounds, map[string]any{"tag": "api-in", "listen": coreAPIPath(stateDir), "protocol": "dokodemo-door", "settings": map[string]any{"address": "127.0.0.1", "port": apiPort, "network": "unix"}})
+		config["api"] = map[string]any{"tag": "api", "services": []string{"RoutingService", "HandlerService"}}
 		rules = append(rules, map[string]any{"type": "field", "inboundTag": []string{"api-in"}, "outboundTag": "api"})
 		route := map[string]any{"type": "field", "inboundTag": []string{"transparent", "dns-forward"}, "outboundTag": "direct"}
 		if in.Egress.Mode == "proxy" {

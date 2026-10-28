@@ -588,12 +588,12 @@ func namespaceRules() string {
 }
 
 func gatewayUnit(binaryPath, configPath string, failover bool) string {
-	override := ""
+	worker, _ := workerExecutable()
+	override := fmt.Sprintf("ExecStartPost=%s -network-core-api %s", worker, coreAPIPath(filepath.Dir(configPath)))
 	if failover {
-		// Type=simple starts ExecStartPost before Xray has necessarily opened its
-		// API socket. Retry the initial blackhole override before enabling traffic.
-		override = fmt.Sprintf("ExecStartPost=/bin/sh -ec 'for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do /usr/sbin/ip netns exec %s %s api bo --server=127.0.0.1:%d -timeout=1 -b egress blocked >/dev/null 2>&1 && exit 0; sleep 0.25; done; exit 1'\n", namespace, binaryPath, apiPort)
+		override += " -network-core-failover"
 	}
+	override += "\n"
 
 	return fmt.Sprintf(`[Unit]
 Description=Incudal Xray container egress
@@ -604,7 +604,7 @@ Before=incus.service incus-containers.service
 Type=simple
 ExecStartPre=/usr/sbin/nft flush set inet incudal_egress ready
 ExecStart=/usr/sbin/ip netns exec %s %s run -config %s
-%sExecStartPost=/usr/sbin/nft add element inet incudal_egress ready { 0x420000 }
+%s
 ExecStopPost=-/usr/sbin/nft flush set inet incudal_egress ready
 Restart=always
 RestartSec=3

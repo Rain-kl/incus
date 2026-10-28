@@ -156,10 +156,18 @@ func socksDial(ctx context.Context, port int, address string) (net.Conn, error) 
 }
 
 // ProbeCLI is executed inside the gateway namespace, without credentials in argv.
-func ProbeCLI(port int, target string) {
+func ProbeCLI(port int, target, dnsAddress string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 	defer cancel()
-	_ = json.NewEncoder(os.Stdout).Encode(ProbeURL(ctx, port, target))
+	result := ProbeResult{Success: true}
+	if port > 0 {
+		result = ProbeURL(ctx, port, target)
+	}
+	if result.Success && dnsAddress != "" && probeDNSForURL(ctx, dnsAddress, target) != nil {
+		result.Success = false
+		result.Error = "network"
+	}
+	_ = json.NewEncoder(os.Stdout).Encode(result)
 }
 
 func executeProbe(ctx context.Context, dir string, job ProbeRequest) []ProbeResult {

@@ -12,6 +12,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
+	"time"
 )
 
 // Release builds populate the ignored archives using scripts/prepare-xray.py.
@@ -43,7 +45,61 @@ func Available() bool {
 	return runtime.GOOS == "linux" && err == nil
 }
 
+type binaryVerification struct {
+	identity string
+	checked  time.Time
+}
+
+var verifiedBinaries = struct {
+	sync.Mutex
+	files map[string]binaryVerification
+}{files: map[string]binaryVerification{}}
+
+func binaryIdentity(path string) (string, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("invalid Xray executable")
+	}
+	// Sys includes inode and ctime on Linux, so replacing a file or restoring mtime invalidates the cache.
+	return fmt.Sprintf("%v:%d:%v:%v", info.Sys(), info.Size(), info.ModTime(), info.Mode()), nil
+}
+
 func extractBinary(dir string) (string, error) {
+	verifiedBinaries.Lock()
+	defer verifiedBinaries.Unlock()
+	m, err := manifest()
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, "xray-"+m.Version+"-"+runtime.GOARCH)
+	identity, statErr := binaryIdentity(path)
+	if statErr != nil && !os.IsNotExist(statErr) {
+		return "", statErr
+	}
+	previous, exists := verifiedBinaries.files[path]
+	if statErr == nil && exists && previous.identity == identity && time.Since(previous.checked) < 5*time.Minute {
+		return path, nil
+	}
+	path, err = extractVerifiedBinary(dir)
+	if err != nil {
+		delete(verifiedBinaries.files, path)
+		return "", err
+	}
+	identity, err = binaryIdentity(path)
+	if err != nil {
+		return "", err
+	}
+	if len(verifiedBinaries.files) >= 128 {
+		clear(verifiedBinaries.files)
+	}
+	verifiedBinaries.files[path] = binaryVerification{identity: identity, checked: time.Now()}
+	return path, nil
+}
+
+func extractVerifiedBinary(dir string) (string, error) {
 	m, err := manifest()
 	if err != nil {
 		return "", err
@@ -60,6 +116,12 @@ func extractBinary(dir string) (string, error) {
 		if e == nil {
 			sum := sha256.Sum256(b)
 			if hex.EncodeToString(sum[:]) == expected {
+				{
+					err := os.Chmod(path, 0o700)
+					if err != nil {
+						return "", err
+					}
+				}
 				return path, nil
 			}
 		}

@@ -224,6 +224,12 @@ func TestPackageEgressDatapath(t *testing.T) {
 	start("pkg-wan", core, "run", "-config", upstreamPath)
 	cores := map[string]*exec.Cmd{}
 	for _, group := range in.Groups {
+		{
+			err := os.MkdirAll(runtime[group.Key].dir(), 0o700)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
 		body, err := groupCoreConfig(group, runtime[group.Key])
 		if err != nil {
 			t.Fatal(err)
@@ -234,12 +240,29 @@ func TestPackageEgressDatapath(t *testing.T) {
 		cores[group.Key] = start(runtime[group.Key].ns(), core, "run", "-config", path)
 	}
 
+	{
+		err := os.MkdirAll(stateDir, 0o700)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	legacyBody, _ := xrayConfig(legacy, nil, true)
 	legacyPath := filepath.Join(dir, "legacy.json")
 	_ = os.WriteFile(legacyPath, legacyBody, 0o600)
 	start(namespace, core, "run", "-config", legacyPath)
 	time.Sleep(time.Second)
-	command("ip", "netns", "exec", namespace, core, "api", "bo", "--server=127.0.0.1:15491", "-b", "egress", nodeTag(1))
+	{
+		err := WaitCoreAPI(ctx, coreAPIPath(stateDir), true)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	{
+		err := overrideCore(ctx, coreAPIPath(stateDir), nodeTag(1))
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	command("nft", "add", "element", "inet", "incudal_egress", "ready", "{", mark, "}")
 
 	for _, ns := range []string{"", runtime["v1"].ns()} {

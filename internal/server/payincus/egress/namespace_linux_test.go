@@ -79,12 +79,20 @@ func TestSystemdNamespaceStartup(t *testing.T) {
 			}
 		}
 
+		previous, err := unitReference(ctx, "incudal-xray.service")
+		if err != nil {
+			t.Fatal(err)
+		}
 		_ = exec.CommandContext(ctx, "systemctl", "reset-failed", "incudal-xray.service").Run()
 		command("systemctl", "restart", "incudal-xray.service")
 		time.Sleep(300 * time.Millisecond)
 		command("systemctl", "is-active", "--quiet", "incudal-xray.service")
+		current, err := unitReference(ctx, "incudal-xray.service")
+		if err != nil || current == previous {
+			t.Fatal("restarted core did not expose a fresh invocation identity")
+		}
 		out, err := networkCommand(ctx, "ip", "netns", "exec", namespace, "ss", "-H", "-lnt").CombinedOutput()
-		if err != nil || !strings.Contains(string(out), ":15490") || !strings.Contains(string(out), ":15491") {
+		if err != nil || !strings.Contains(string(out), ":15490") || coreReady(ctx, coreAPIPath(stateDir), nil) != nil {
 			t.Fatalf("restarted core has no listeners: %s %v", out, err)
 		}
 
@@ -256,15 +264,21 @@ func TestSystemdNamespaceStartup(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, required := range []string{":53", ":15490", ":15491"} {
+	for _, required := range []string{":53", ":15490"} {
 		if !strings.Contains(string(sockets), required) {
 			t.Fatalf("missing native Xray socket %s: %s", required, sockets)
 		}
 	}
 
+	{
+		err := coreReady(ctx, coreAPIPath(stateDir), []string{"direct"})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	set := command("nft", "list", "set", "inet", "incudal_egress", "ready")
-	if !strings.Contains(set, "0x00420000") && !strings.Contains(set, "0x420000") {
-		t.Fatalf("service did not activate the real ready set: %s", set)
+	if strings.Contains(set, "0x00420000") || strings.Contains(set, "0x420000") {
+		t.Fatalf("API startup alone opened the gateway: %s", set)
 	}
 
 	t.Logf("real systemd/Xray direct startup succeeded after %s namespace recovery", mode)
@@ -305,6 +319,7 @@ func TestSystemdNamespaceStartup(t *testing.T) {
 		t.Fatal("fixture did not reproduce a stale resolver bind mount")
 	}
 
+	command("nft", "add", "element", "inet", "incudal_egress", "ready", "{", mark, "}")
 	command("systemctl", "reset-failed", "incudal-xray.service")
 	command("systemctl", "restart", "incudal-xray.service")
 	if resolverInsideCore() != string(newResolver) {
@@ -325,18 +340,20 @@ func TestSystemdNamespaceStartup(t *testing.T) {
 	command("systemctl", "daemon-reload")
 	command("systemctl", "reset-failed", "incudal-xray.service")
 	command("systemctl", "start", orderUnit)
-	for attempt := 0; attempt < 20; attempt++ {
-		ready := command("nft", "list", "set", "inet", "incudal_egress", "ready")
-		if strings.Contains(ready, "0x00420000") || strings.Contains(ready, "0x420000") {
+	for attempt := 0; attempt < 30; attempt++ {
+		if coreReady(ctx, coreAPIPath(stateDir), nil) == nil && networkCommand(ctx, "systemctl", "is-active", "--quiet", "incudal-xray.service").Run() == nil {
 			break
 		}
-
-		if attempt == 19 {
-			t.Fatal("queued core restart never restored readiness")
+		if attempt == 29 {
+			t.Fatal("queued core restart never restored API readiness")
 		}
-
 		time.Sleep(100 * time.Millisecond)
 	}
+	set = command("nft", "list", "set", "inet", "incudal_egress", "ready")
+	if strings.Contains(set, "0x00420000") || strings.Contains(set, "0x420000") {
+		t.Fatal("queued restart opened traffic without data-plane checks")
+	}
+
 	// Exercise the actual service/API startup for every offered proxy strategy.
 	// Closed local upstreams keep the fixture offline and must never enable direct
 	// fallback. These tests leave the unit restored to zero-node direct mode.

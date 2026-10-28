@@ -58,6 +58,25 @@ jobs:
           git merge-base --is-ancestor v7.0.2 HEAD
       - name: Prepare pinned Xray
         run: python3 scripts/payincus/prepare-xray.py "${{ matrix.arch }}"
+      - name: Xray control contracts (race detector)
+        run: go test -race ./internal/server/payincus/egress ./cmd/payincus-network-worker
+      - name: Real systemd and native proxy API recovery
+        if: matrix.arch == 'amd64' && matrix.target == 'debian-13'
+        timeout-minutes: 10
+        run: bash scripts/payincus/test-egress-systemd.sh
+      - name: Native proxy data paths in an isolated VM
+        if: matrix.arch == 'amd64' && matrix.target == 'debian-13'
+        timeout-minutes: 10
+        run: |
+          CGO_ENABLED=0 go test -c -o "$RUNNER_TEMP/egress.test" ./internal/server/payincus/egress
+          docker run --rm -v "$PWD:/source:ro" -v "$RUNNER_TEMP/egress.test:/tests/egress.test:ro" debian:13 sh -ec '
+            apt-get update -qq
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+              qemu-system-x86 linux-image-amd64 busybox-static cpio kmod iproute2 nftables util-linux python3
+            bash /source/scripts/payincus/test-egress-vm.sh /tests/egress.test
+          '
+      - name: Proxy test script syntax
+        run: bash -n scripts/payincus/{test-egress-systemd,test-egress-vm}.sh
       - name: Build integrated binaries
         if: matrix.target == 'ubuntu-24.04'
         run: bash scripts/payincus/build.sh

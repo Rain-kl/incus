@@ -77,6 +77,7 @@ require (
 	golang.org/x/term v0.47.0
 	golang.org/x/text v0.43.0
 	golang.org/x/tools v0.52.0
+	google.golang.org/grpc v1.84.0 // PayIncus: local Xray API adapter; retain the upstream-selected version.
 	google.golang.org/protobuf v1.36.12
 	k8s.io/utils v0.0.0-20260707023825-cf1189d6abe3
 	software.sslmate.com/src/go-pkcs12 v0.7.4
@@ -181,6 +182,5 @@ require (
 	golang.org/x/mod v0.42.0 // indirect
 	golang.org/x/time v0.16.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20261012220534-4341edf3f941 // indirect
-	google.golang.org/grpc v1.84.0 // indirect
 	moul.io/http2curl/v2 v2.3.0 // indirect
 )
