@@ -103,7 +103,7 @@ func TestPoolNeverOverwritesExistingFile(t *testing.T) {
 		}
 		return nil, errors.New("pool absent")
 	}}
-	if s.CreatePool(context.Background(), "pool", "", 1, strings.Repeat("a", 64)) == nil {
+	if s.CreatePool(context.Background(), "pool", "", 1, "", false, strings.Repeat("a", 64)) == nil {
 		t.Fatal("existing file was accepted")
 	}
 	data, _ := os.ReadFile(path)

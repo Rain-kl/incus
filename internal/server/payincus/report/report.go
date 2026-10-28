@@ -82,6 +82,9 @@ func collectResources() map[string]any {
 		"cpuTotal":  runtime.NumCPU(),
 		"nvidiaGpu": collectNvidiaGPUs(),
 	}
+	if model := readCPUModel(); model != "" {
+		resources["cpuModel"] = model
+	}
 	{
 		cpuUsagePercent := readCPUUsagePercent()
 		if cpuUsagePercent >= 0 {
@@ -165,6 +168,31 @@ func detectIncusSocket() (string, bool) {
 type cpuStat struct {
 	idle  uint64
 	total uint64
+}
+
+// readCPUModel returns the first CPU model name from /proc/cpuinfo, bounded in length.
+func readCPUModel() string {
+	content, err := os.ReadFile("/proc/cpuinfo")
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(content), "\n") {
+		key, value, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		switch strings.TrimSpace(key) {
+		case "model name", "Model Name", "Hardware", "cpu model":
+			model := strings.Join(strings.Fields(value), " ")
+			if model != "" {
+				if len(model) > 128 {
+					model = model[:128]
+				}
+				return model
+			}
+		}
+	}
+	return ""
 }
 
 func readCPUUsagePercent() float64 {
