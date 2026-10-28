@@ -307,6 +307,8 @@ CI 接线修正：fork 初始没有官方 release tag，校验步骤从官方仓
 - 测试节点上发现 systemd 返回启动成功后，代理核心仍可能尚未就绪，第一次检测失败导致创建任务立即回滚；同一网络命名空间稍后检测可成功。
 - 网关在原有操作超时内重试实际 HTTPS 探测，未成功时始终保持出口阻断；记录不含节点凭据的检查错误类别。取消或超时仍返回未就绪，不允许直连回退。
 - Linux 节点包测试覆盖首次失败后恢复和取消时不再检测。完整实例出口验收结果须以实际部署后的测试为准；源代码改动尚未发布。
+- 套餐组在相同操作时限内等待当前 systemd InvocationID 和 Xray 控制 API 就绪，再执行 HTTPS/DNS 检测；API 超时或取消仍保持阻断。接入点为 `egress/groups.go`，沿用现有 systemd 与 Xray 控制 API，无新增配置或上游 API；`TestGroupCoreWaitsForAPIAndHonorsCancellation` 覆盖延迟就绪、超时和取消。
+- 2026-10-28 在用户授权的 OrbStack `debian-test` 中备份原 daemon，临时替换为含未提交修复的 Linux arm64 `incusd` 并重启；旧版备份位于 `/var/backups/incusd-before-egress-ready-NQWNGobA`。用户端以原代理套餐创建测试实例 `e2e-egress-ready-20261028`（节点名 `u2-bfy19roq`），任务 #32 成功，两次出口绑定完成，容器运行；容器内 DNS 解析成功、HTTPS 出口地址与配置的荷兰代理节点一致。该测试不证明所有故障场景和长期稳定性；替换不是节点包发布，原套餐失败实例保留。
 
 ## Xray 控制、校验热路径与出口恢复（2026-10-28）
 

@@ -3,12 +3,41 @@ package egress
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestGroupCoreWaitsForAPIAndHonorsCancellation(t *testing.T) {
+	attempts := 0
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	reference, ready := waitGroupCore(ctx, func() (string, error) {
+		attempts++
+		if attempts == 1 {
+			return "", errors.New("API not ready")
+		}
+		return "current-invocation", nil
+	})
+	if !ready || reference != "current-invocation" || attempts != 2 {
+		t.Fatal("group did not wait for its current core API")
+	}
+	ctx, cancel = context.WithTimeout(context.Background(), 50*time.Millisecond)
+	_, ready = waitGroupCore(ctx, func() (string, error) { return "", errors.New("API unavailable") })
+	cancel()
+	if ready {
+		t.Fatal("unavailable core must remain blocked after timeout")
+	}
+	ctx, cancel = context.WithCancel(context.Background())
+	cancel()
+	_, ready = waitGroupCore(ctx, func() (string, error) { t.Fatal("check ran after cancellation"); return "", nil })
+	if ready {
+		t.Fatal("cancelled core must remain blocked")
+	}
+}
 
 func TestGroupHealthWaitsForStartupAndHonorsCancellation(t *testing.T) {
 	attempts := 0

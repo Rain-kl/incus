@@ -357,6 +357,16 @@ func retryGroupHealth(ctx context.Context, probe func() bool) bool {
 	}
 }
 
+func waitGroupCore(ctx context.Context, check func() (string, error)) (string, bool) {
+	var reference string
+	ready := retryGroupHealth(ctx, func() bool {
+		var err error
+		reference, err = check()
+		return err == nil && reference != ""
+	})
+	return reference, ready
+}
+
 func groupHash(group EgressGroup) string {
 	data, _ := json.Marshal(group)
 	sum := sha256.Sum256(data)
@@ -533,8 +543,22 @@ func (m *Manager) reconcileGroups(ctx context.Context, in Instruction, inv inven
 				}
 			}
 
-			reference, e := unitReference(groupCtx, g.unit())
-			if e != nil || coreReady(groupCtx, coreAPIPath(g.dir()), []string{nodeTag(group.Nodes[0].ID)}) != nil {
+			reference, coreIsReady := waitGroupCore(groupCtx, func() (string, error) {
+				reference, err := unitReference(groupCtx, g.unit())
+				if err != nil {
+					return "", err
+				}
+				err = coreReady(groupCtx, coreAPIPath(g.dir()), []string{nodeTag(group.Nodes[0].ID)})
+				if err != nil {
+					return "", err
+				}
+				current, err := unitReference(groupCtx, g.unit())
+				if err != nil || current != reference {
+					return "", errCoreAPI
+				}
+				return reference, nil
+			})
+			if !coreIsReady {
 				result.state.Error = "xray"
 				return
 			}
