@@ -1,6 +1,7 @@
 package egress
 
 import (
+	"bytes"
 	"context"
 	"crypto/x509"
 	"encoding/json"
@@ -437,7 +438,14 @@ func TestRealXrayHTTPSProbe(t *testing.T) {
 			return l.Addr().(*net.TCPAddr).Port
 		}
 
-		entryPort, controlPort := freePort(), freePort()
+		entryPort := freePort()
+		apiDir, e := os.MkdirTemp("", "xray-api-")
+		if e != nil {
+			t.Fatal(e)
+		}
+		defer func() { _ = os.RemoveAll(apiDir) }()
+		apiSocket := coreAPIPath(apiDir)
+		defer closeCoreAPI(apiSocket)
 		in := testInstruction()
 		in.Nodes = []Node{{ID: 7, Outbound: outbound}}
 		in.Egress.ProbeURL = server.URL
@@ -458,8 +466,10 @@ func TestRealXrayHTTPSProbe(t *testing.T) {
 			case "transparent":
 				listeners = append(listeners, map[string]any{"tag": "transparent", "listen": "127.0.0.1", "port": entryPort, "protocol": "socks", "settings": map[string]any{"auth": "noauth"}})
 			case "api-in":
-				v["port"] = controlPort
+				v["listen"] = apiSocket
 				listeners = append(listeners, v)
+			case "dns-forward":
+				listeners = append(listeners, map[string]any{"tag": "dns-forward", "listen": "127.0.0.1", "port": freePort(), "protocol": "socks", "settings": map[string]any{"auth": "noauth"}})
 			}
 		}
 
@@ -479,6 +489,8 @@ func TestRealXrayHTTPSProbe(t *testing.T) {
 		}
 
 		cmd := exec.CommandContext(ctx, binary, "run", "-config", path)
+		var coreOutput bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &coreOutput, &coreOutput
 		{
 			e = cmd.Start()
 			if e != nil {
@@ -487,43 +499,21 @@ func TestRealXrayHTTPSProbe(t *testing.T) {
 		}
 
 		defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
-		// Exercise the real service readiness command. The wrapper injects one
-		// unavailable API attempt and then runs the pinned Xray API locally.
-		wrapper := filepath.Join(dir, "ip-wrapper")
-		marker := filepath.Join(dir, "first-api-attempt")
-		wrapperBody := fmt.Sprintf("#!/bin/sh\nif [ ! -f '%s' ]; then touch '%s'; exit 1; fi\nshift 3\nexec \"$@\"\n", marker, marker)
-		{
-			e = os.WriteFile(wrapper, []byte(wrapperBody), 0o700)
-			if e != nil {
-				t.Fatal(e)
-			}
+		e = WaitCoreAPI(ctx, apiSocket, true)
+		if e != nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			t.Fatalf("native API readiness failed: %v; fixture core output: %s", e, coreOutput.String())
 		}
-
-		activation := ""
-		for _, line := range strings.Split(gatewayUnit(binary, path, true), "\n") {
-			if strings.HasPrefix(line, "ExecStartPost=/bin/sh -ec '") {
-				activation = strings.TrimSuffix(strings.TrimPrefix(line, "ExecStartPost=/bin/sh -ec '"), "'")
-			}
+		if !strings.Contains(gatewayUnit(binary, path, true), "-network-core-api") || strings.Contains(gatewayUnit(binary, path, true), " api bo ") {
+			t.Fatal("startup must wait on the Go API adapter, not a CLI balancer command")
 		}
-
-		activation = strings.ReplaceAll(activation, "/usr/sbin/ip", wrapper)
-		activation = strings.ReplaceAll(activation, fmt.Sprintf("127.0.0.1:%d", apiPort), fmt.Sprintf("127.0.0.1:%d", controlPort))
-		if activation == "" {
-			t.Fatal("service readiness retry is missing")
-		}
-		{
-			e = exec.CommandContext(ctx, "/bin/sh", "-ec", activation).Run()
-			if e != nil {
-				t.Fatal("service failed to wait for the Xray API")
-			}
-		}
-
 		override := func(tag string) {
 			t.Helper()
 			{
-				out, e := exec.CommandContext(ctx, binary, "api", "bo", fmt.Sprintf("--server=127.0.0.1:%d", controlPort), "-b", "egress", tag).CombinedOutput()
-				if e != nil {
-					t.Fatalf("Xray RoutingService override failed: %s", out)
+				err := overrideCore(ctx, apiSocket, tag)
+				if err != nil {
+					t.Fatalf("native gRPC balancer override failed: %v", err)
 				}
 			}
 		}

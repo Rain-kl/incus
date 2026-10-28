@@ -371,6 +371,7 @@ func prepareGroupNamespace(ctx context.Context, g groupRuntime, resolvers []stri
 }
 
 func cleanupGroup(ctx context.Context, g groupRuntime) {
+	closeCoreAPI(coreAPIPath(g.dir()))
 	_ = run(ctx, "systemctl", "disable", "--now", g.unit())
 	_ = run(ctx, "ip", "rule", "del", "pref", fmt.Sprint(17000+g.Slot), "fwmark", g.mark()+"/"+groupMask, "lookup", g.table())
 	_ = run(ctx, "ip", "route", "flush", "table", g.table())

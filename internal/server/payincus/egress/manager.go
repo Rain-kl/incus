@@ -25,22 +25,26 @@ type savedNetwork struct {
 
 // Manager serializes persisted network policy application and health checks.
 type Manager struct {
-	groupChecks  map[string]time.Time
-	groupHashes  map[string]string
-	groupReady   map[string]bool
-	mu           sync.Mutex
-	dir          string
-	desired      *Instruction
-	status       Status
-	applyGate    chan struct{}
-	probeGate    chan struct{}
-	wake         chan struct{}
-	healthCancel context.CancelFunc
-	lastHash     string
-	lastHealth   time.Time
-	active       int
-	failures     map[int]int
-	successes    map[int]int
+	groupChecks         map[string]time.Time
+	groupHashes         map[string]string
+	groupReady          map[string]bool
+	groupRefs           map[string]string
+	mu                  sync.Mutex
+	dir                 string
+	desired             *Instruction
+	status              Status
+	applyGate           chan struct{}
+	probeGate           chan struct{}
+	wake                chan struct{}
+	healthCancel        context.CancelFunc
+	lastHash            string
+	lastHealth          time.Time
+	legacyRef           string
+	coreAPIFailures     int
+	coreRestartRequired bool
+	active              int
+	failures            map[int]int
+	successes           map[int]int
 }
 
 // NewManager loads persisted desired network state for reconciliation.
@@ -291,6 +295,15 @@ func (m *Manager) reconcileLocked(parent context.Context, withHealth bool) {
 		return
 	}
 
+	if in.Egress.Mode != "off" || len(in.Groups) > 0 {
+		{
+			_, err := workerExecutable()
+			if err != nil {
+				m.setErrorAt("preflight", "preflight", err)
+				return
+			}
+		}
+	}
 	for _, name := range []string{"ip", "nft", "systemctl", "sysctl", "nsenter", "mount"} {
 		{
 			_, e := exec.LookPath(name)
@@ -381,19 +394,21 @@ func (m *Manager) reconcileLocked(parent context.Context, withHealth bool) {
 			unit, _ := os.ReadFile("/etc/systemd/system/incudal-xray.service")
 			// ip netns exec bind-mounts resolv.conf. Atomic replacement cannot update
 			// that existing mount; restart the core when bootstrap upstreams change.
-			coreChanged = !bytes.Equal(previousResolver, namespaceResolverConfig(resolvers)) || !bytes.Equal(previous, config) || !bytes.Equal(unit, []byte(gatewayUnit(binaryPath, configPath, in.Egress.Mode == "proxy" && in.Egress.Strategy == "failover"))) || !coreActive
-			{
-				e = atomicFile(configPath+".next", config, 0o600)
-				if e != nil {
-					m.setErrorAt("xray", "config", e)
-					return
+			coreChanged = !bytes.Equal(previousResolver, namespaceResolverConfig(resolvers)) || !bytes.Equal(previous, config) || !bytes.Equal(unit, []byte(gatewayUnit(binaryPath, configPath, in.Egress.Mode == "proxy" && in.Egress.Strategy == "failover"))) || !coreActive || m.coreRestartRequired
+			if coreChanged {
+				{
+					e = atomicFile(configPath+".next", config, 0o600)
+					if e != nil {
+						m.setErrorAt("xray", "config", e)
+						return
+					}
 				}
-			}
-			{
-				e = validateCore(ctx, binaryPath, configPath+".next")
-				if e != nil {
-					m.setErrorAt("xray", "config", e)
-					return
+				{
+					e = validateCore(ctx, binaryPath, configPath+".next")
+					if e != nil {
+						m.setErrorAt("xray", "config", e)
+						return
+					}
 				}
 			}
 		}
@@ -418,7 +433,7 @@ func (m *Manager) reconcileLocked(parent context.Context, withHealth bool) {
 		}
 
 		transactionRules := rules
-		if in.Egress.Mode != "off" && !coreChanged && coreActive {
+		if in.Egress.Mode == "direct" && !coreChanged && coreActive && coreReady(ctx, coreAPIPath(m.dir), []string{"direct"}) == nil {
 			transactionRules += "add element inet incudal_egress ready { 0x420000 }\n"
 		}
 		{
@@ -438,24 +453,23 @@ func (m *Manager) reconcileLocked(parent context.Context, withHealth bool) {
 				}
 			}
 		} else {
-			{
-				e = os.Rename(configPath+".next", configPath)
-				if e != nil {
-					m.setError("xray")
-					return
-				}
-			}
-
-			unit := gatewayUnit(binaryPath, configPath, in.Egress.Mode == "proxy" && in.Egress.Strategy == "failover")
-			{
-				e = atomicFile("/etc/systemd/system/incudal-xray.service", []byte(unit), 0o644)
-				if e != nil {
-					m.setError("xray")
-					return
-				}
-			}
-
 			if coreChanged {
+				{
+					e = os.Rename(configPath+".next", configPath)
+					if e != nil {
+						m.setError("xray")
+						return
+					}
+				}
+
+				unit := gatewayUnit(binaryPath, configPath, in.Egress.Mode == "proxy" && in.Egress.Strategy == "failover")
+				{
+					e = atomicFile("/etc/systemd/system/incudal-xray.service", []byte(unit), 0o644)
+					if e != nil {
+						m.setError("xray")
+						return
+					}
+				}
 				{
 					e = run(ctx, "systemctl", "daemon-reload")
 					if e == nil {
@@ -473,6 +487,8 @@ func (m *Manager) reconcileLocked(parent context.Context, withHealth bool) {
 				}
 
 				m.active = 0
+				m.coreRestartRequired = false
+				m.coreAPIFailures = 0
 				m.lastHealth = time.Time{}
 			}
 		}
@@ -502,6 +518,9 @@ func (m *Manager) reconcileLocked(parent context.Context, withHealth bool) {
 			return
 		}
 
+		if in.Egress.Mode == "proxy" {
+			m.lastHealth = time.Time{}
+		}
 		m.lastHash = hash
 		m.mu.Lock()
 		m.status.AppliedRevision = in.Revision
@@ -515,12 +534,6 @@ func (m *Manager) reconcileLocked(parent context.Context, withHealth bool) {
 		log.Printf("[egress] applied revision=%d networks=%d", in.Revision, len(inv.Bridges))
 	}
 
-	if in.Egress.Mode != "off" && exec.CommandContext(ctx, "systemctl", "is-active", "--quiet", "incudal-xray.service").Run() != nil {
-		m.setErrorAt("xray", "start", nil)
-		m.lastHash = ""
-		return
-	}
-
 	if in.SchemaVersion >= 2 {
 		{
 			err := m.reconcileGroups(ctx, in, inv, false)
@@ -531,8 +544,55 @@ func (m *Manager) reconcileLocked(parent context.Context, withHealth bool) {
 		}
 	}
 
+	if in.Egress.Mode != "off" && exec.CommandContext(ctx, "systemctl", "is-active", "--quiet", "incudal-xray.service").Run() != nil {
+		m.setErrorAt("xray", "start", nil)
+		m.lastHash = ""
+		return
+	}
+
+	if in.Egress.Mode != "off" {
+		expected := []string{}
+		for _, node := range in.Nodes {
+			expected = append(expected, nodeTag(node.ID))
+		}
+		{
+			e := coreReady(ctx, coreAPIPath(m.dir), expected)
+			if e != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				blockLegacyGateway(ctx)
+				m.lastHealth = time.Time{}
+				m.coreAPIFailures++
+				if m.coreAPIFailures >= 3 {
+					m.coreRestartRequired = true
+					m.lastHash = ""
+				}
+				m.setErrorAt("xray", "health", e)
+				return
+			}
+		}
+		m.coreAPIFailures = 0
+		reference, e := unitReference(ctx, "incudal-xray.service")
+		if e != nil {
+			blockLegacyGateway(ctx)
+			m.lastHealth = time.Time{}
+			m.setErrorAt("xray", "health", e)
+			return
+		}
+		if reference != m.legacyRef {
+			m.legacyRef = reference
+			m.lastHealth = time.Time{}
+			m.active = 0
+		}
+
+		if in.Egress.Mode == "direct" {
+			_ = nft(ctx, "add element inet incudal_egress ready { 0x420000 }", false)
+		}
+	}
+
 	m.mu.Lock()
-	if m.status.AppliedRevision == in.Revision {
+	if m.status.AppliedRevision == in.Revision && m.status.ErrorStage != "health" {
 		m.status.State = "applied"
 		m.status.Error = "none"
 		m.status.ErrorStage = ""
@@ -556,11 +616,12 @@ func (m *Manager) reconcileLocked(parent context.Context, withHealth bool) {
 		m.mu.Lock()
 		m.healthCancel = nil
 		m.mu.Unlock()
-		m.lastHealth = time.Now()
 	}
 }
 
 func (m *Manager) health(ctx context.Context, in Instruction) {
+	first := m.lastHealth.IsZero()
+	m.lastHealth = time.Time{}
 	healthy := []int{}
 	exe, err := workerExecutable()
 	if err != nil {
@@ -613,26 +674,41 @@ func (m *Manager) health(ctx context.Context, in Instruction) {
 		selected := chooseFailover(in.Nodes, m.active, m.successes, m.failures)
 		// Re-assert each round: systemd may have restarted Xray since the last
 		// probe. Existing healthy connections stay on their original outbound.
-		binaryPath, e := extractBinary(m.dir)
 		target := "blocked"
 		if selected != 0 {
 			target = nodeTag(selected)
 		}
-
-		if e == nil {
-			e = run(ctx, "ip", "netns", "exec", namespace, binaryPath, "api", "bo", fmt.Sprintf("--server=127.0.0.1:%d", apiPort), "-b", "egress", target)
-		}
-
-		if e != nil {
-			m.setErrorAt("xray", "health", e)
-			return
+		{
+			e := overrideCore(ctx, coreAPIPath(m.dir), target)
+			if e != nil {
+				blockLegacyGateway(ctx)
+				m.setErrorAt("xray", "health", e)
+				return
+			}
 		}
 
 		m.active = selected
 	}
 
+	usable := len(healthy) > 0
+	if in.Egress.Strategy == "failover" {
+		usable = m.active != 0
+	}
+	if !usable || !gatewayDNSHealthy(ctx, "169.254.242.2:53", in.Egress.ProbeURL) {
+		blockLegacyGateway(ctx)
+		m.setErrorAt("xray", "health", errCoreAPI)
+		return
+	}
+	{
+		e := nft(ctx, "add element inet incudal_egress ready { 0x420000 }", false)
+		if e != nil {
+			m.setErrorAt("network", "health", e)
+			return
+		}
+	}
+
 	m.mu.Lock()
-	if m.lastHealth.IsZero() || m.status.ActiveNodeID != m.active || len(m.status.HealthyNodeIDs) != len(healthy) {
+	if first || m.status.ActiveNodeID != m.active || len(m.status.HealthyNodeIDs) != len(healthy) {
 		log.Printf("[egress] proxy health healthy=%d total=%d activeNode=%d", len(healthy), len(in.Nodes), m.active)
 		if len(healthy) == 0 {
 			log.Printf("[egress] no healthy proxy outbounds; new proxied connections remain blocked")
@@ -649,6 +725,7 @@ func (m *Manager) health(ctx context.Context, in Instruction) {
 	}
 
 	m.mu.Unlock()
+	m.lastHealth = time.Now()
 }
 
 func chooseFailover(nodes []Node, active int, successes, failures map[int]int) int {
@@ -722,7 +799,7 @@ func RestoreCLI() error {
 				return run(ctx, "systemctl", "--no-block", "restart", "incudal-xray.service")
 			}
 
-			return nft(ctx, "add element inet incudal_egress ready { 0x420000 }", false)
+			return nil
 		}
 	}
 

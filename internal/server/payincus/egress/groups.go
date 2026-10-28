@@ -82,6 +82,10 @@ func groupCoreConfig(group EgressGroup, g groupRuntime) ([]byte, error) {
 			return nil, fmt.Errorf("invalid Xray inbound")
 		}
 
+		if in["tag"] == "api-in" {
+			in["listen"] = coreAPIPath(g.dir())
+		}
+
 		if in["tag"] == "dns-forward" {
 			in["listen"] = g.ip()
 		}
@@ -123,6 +127,7 @@ After=network-online.target incudal-network.service
 Requires=incudal-network.service
 [Service]
 Type=simple
+ExecStartPre=-/usr/sbin/nft delete element inet incudal_package_egress ready { %s }
 ExecStart=/usr/sbin/ip netns exec %s %s run -config %s
 ExecStopPost=-/usr/sbin/nft delete element inet incudal_package_egress ready { %s }
 Restart=always
@@ -135,7 +140,7 @@ StandardOutput=journal
 StandardError=journal
 [Install]
 WantedBy=multi-user.target
-`, g.Key, g.ns(), binary, filepath.Join(g.dir(), "xray.json"), g.mark())
+`, g.Key, g.mark(), g.ns(), binary, filepath.Join(g.dir(), "xray.json"), g.mark())
 }
 
 func readGroupRegistry() map[string]groupRuntime {
@@ -276,61 +281,33 @@ func ensureGroupCore(ctx context.Context, group EgressGroup, g groupRuntime, res
 		return err
 	}
 
-	next := filepath.Join(g.dir(), "xray.json.next")
-	{
-		err = atomicFile(next, body, 0o600)
-		if err != nil {
-			return err
-		}
-	}
-	{
-		err = validateCore(ctx, binary, next)
-		if err != nil {
-			return err
-		}
-	}
-
 	current, _ := os.ReadFile(filepath.Join(g.dir(), "xray.json"))
 	unitPath := filepath.Join("/etc/systemd/system", g.unit())
 	unit := groupUnit(g, binary)
 	oldUnit, _ := os.ReadFile(unitPath)
-	changed := string(previousResolver) != string(namespaceResolverConfig(resolvers)) || string(current) != string(body) || string(oldUnit) != unit || networkCommand(ctx, "systemctl", "is-active", "--quiet", g.unit()).Run() != nil
-	if changed {
-		{
-			err = os.Rename(next, filepath.Join(g.dir(), "xray.json"))
-			if err != nil {
-				return err
-			}
-		}
-		{
-			err = atomicFile(unitPath, []byte(unit), 0o644)
-			if err != nil {
-				return err
-			}
-		}
-		{
-			err = run(ctx, "systemctl", "daemon-reload")
-			if err != nil {
-				return err
-			}
-		}
-		{
-			err = run(ctx, "systemctl", "enable", g.unit())
-			if err != nil {
-				return err
-			}
-		}
-		{
-			err = run(ctx, "systemctl", "restart", g.unit())
-			if err != nil {
-				return err
-			}
-		}
-	} else {
-		_ = os.Remove(next)
+	unchanged := string(previousResolver) == string(namespaceResolverConfig(resolvers)) && string(current) == string(body) && string(oldUnit) == unit
+	healthy := unchanged && networkCommand(ctx, "systemctl", "is-active", "--quiet", g.unit()).Run() == nil && coreReady(ctx, coreAPIPath(g.dir()), []string{nodeTag(group.Nodes[0].ID)}) == nil
+	changed, err := stageCoreFiles(ctx, binary, filepath.Join(g.dir(), "xray.json"), unitPath, body, unit, !healthy)
+	if err != nil {
+		return err
+	}
+	if !changed {
+		return nil
 	}
 
-	return nil
+	{
+		err = run(ctx, "systemctl", "daemon-reload")
+		if err != nil {
+			return err
+		}
+	}
+	{
+		err = run(ctx, "systemctl", "enable", g.unit())
+		if err != nil {
+			return err
+		}
+	}
+	return run(ctx, "systemctl", "restart", g.unit())
 }
 
 func groupHealthy(ctx context.Context, group EgressGroup, g groupRuntime) bool {
@@ -339,7 +316,7 @@ func groupHealthy(ctx context.Context, group EgressGroup, g groupRuntime) bool {
 		return false
 	}
 
-	out, err := networkCommand(ctx, "ip", "netns", "exec", g.ns(), exe, "-network-probe-port", "21000", "-network-probe-url", group.Egress.ProbeURL).Output()
+	out, err := networkCommand(ctx, "ip", "netns", "exec", g.ns(), exe, "-network-probe-port", "21000", "-network-probe-url", group.Egress.ProbeURL, "-network-dns-address", net.JoinHostPort(g.ip(), "53")).Output()
 	var result ProbeResult
 	return err == nil && json.Unmarshal(out, &result) == nil && result.Success
 }
@@ -438,10 +415,19 @@ func (m *Manager) reconcileGroups(ctx context.Context, in Instruction, inv inven
 		m.groupChecks = map[string]time.Time{}
 		m.groupHashes = map[string]string{}
 		m.groupReady = map[string]bool{}
+		m.groupRefs = map[string]string{}
+	}
+	if m.groupRefs == nil {
+		m.groupRefs = map[string]string{}
 	}
 	// Install structural guards before creating/updating a gateway. Start with no newly enabled groups.
 	for _, group := range in.Groups {
-		ready[group.Key] = m.groupReady[group.Key] && !restore && m.groupHashes[group.Key] == groupHash(group)
+		ready[group.Key] = false
+		g := active[group.Key]
+		if m.groupReady[group.Key] && !restore && m.groupHashes[group.Key] == groupHash(group) {
+			reference, e := unitReference(ctx, g.unit())
+			ready[group.Key] = e == nil && reference == m.groupRefs[group.Key] && coreReady(ctx, coreAPIPath(g.dir()), []string{nodeTag(group.Nodes[0].ID)}) == nil
+		}
 	}
 
 	bridge, inet, err := compileGroupRules(in, active, ready)
@@ -465,11 +451,12 @@ func (m *Manager) reconcileGroups(ctx context.Context, in Instruction, inv inven
 	}
 
 	type outcome struct {
-		group   EgressGroup
-		state   EgressGroupStatus
-		ready   bool
-		hash    string
-		checked time.Time
+		group     EgressGroup
+		state     EgressGroupStatus
+		ready     bool
+		hash      string
+		checked   time.Time
+		reference string
 	}
 
 	results := make([]outcome, len(in.Groups))
@@ -509,6 +496,15 @@ func (m *Manager) reconcileGroups(ctx context.Context, in Instruction, inv inven
 				}
 			}
 
+			reference, e := unitReference(groupCtx, g.unit())
+			if e != nil || coreReady(groupCtx, coreAPIPath(g.dir()), []string{nodeTag(group.Nodes[0].ID)}) != nil {
+				result.state.Error = "xray"
+				return
+			}
+			result.reference = reference
+			if reference != m.groupRefs[group.Key] {
+				wasReady = false
+			}
 			result.ready = wasReady
 			if oldHash != result.hash || time.Since(lastCheck) >= 30*time.Second || !wasReady {
 				result.ready = groupHealthy(groupCtx, group, g)
@@ -528,6 +524,7 @@ func (m *Manager) reconcileGroups(ctx context.Context, in Instruction, inv inven
 		m.groupHashes[result.group.Key] = result.hash
 		m.groupReady[result.group.Key] = result.ready
 		m.groupChecks[result.group.Key] = result.checked
+		m.groupRefs[result.group.Key] = result.reference
 		status = append(status, result.state)
 	}
 
@@ -551,6 +548,10 @@ func (m *Manager) reconcileGroups(ctx context.Context, in Instruction, inv inven
 				rules, rulesErr := networkCommand(ctx, "ip", "rule", "show").Output()
 				if len(bytes.TrimSpace(routes)) == 0 && rulesErr == nil && !strings.Contains(string(rules), "lookup "+g.table()) && networkCommand(ctx, "ip", "link", "show", g.iface()).Run() != nil && networkCommand(ctx, "ip", "netns", "exec", g.ns(), "true").Run() != nil {
 					delete(all, key)
+					delete(m.groupChecks, key)
+					delete(m.groupReady, key)
+					delete(m.groupHashes, key)
+					delete(m.groupRefs, key)
 				}
 			}
 		}

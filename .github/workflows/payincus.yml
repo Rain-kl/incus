@@ -64,6 +64,10 @@ jobs:
         run: python3 scripts/payincus/prepare-xray.py "${{ matrix.arch }}"
       - name: Extension and connector contracts (race detector)
         run: go test -race ./internal/server/payincus/... ./cmd/payincus-agent ./cmd/payincus-network-worker
+      - name: Real systemd and native proxy API recovery
+        if: matrix.arch == 'amd64' && matrix.target == 'debian-13'
+        timeout-minutes: 10
+        run: bash scripts/payincus/test-egress-systemd.sh
       - name: Real daemon API integration and upstream daemon unit tests
         run: |
           # Compile as the runner; only executing daemon tests requires root.
@@ -76,24 +80,26 @@ jobs:
         run: |
           go test -race ./...
           go vet ./...
-      - name: Native ZFS lifecycle in an isolated VM
+      - name: Native ZFS and proxy data paths in isolated VMs
         if: matrix.arch == 'amd64' && matrix.target == 'debian-13'
         timeout-minutes: 25
         run: |
           CGO_ENABLED=0 go test -c -o "$RUNNER_TEMP/security.test" ./internal/server/payincus/security
-          docker run --rm -v "$PWD:/source:ro" -v "$RUNNER_TEMP/security.test:/tests/security.test:ro" debian:13 sh -ec '
+          CGO_ENABLED=0 go test -c -o "$RUNNER_TEMP/egress.test" ./internal/server/payincus/egress
+          docker run --rm -v "$PWD:/source:ro" -v "$RUNNER_TEMP/security.test:/tests/security.test:ro" -v "$RUNNER_TEMP/egress.test:/tests/egress.test:ro" debian:13 sh -ec '
             sed -i "s/Components: main/Components: main contrib/g" /etc/apt/sources.list.d/debian.sources
             apt-get update -qq
             DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
-              qemu-system-x86 linux-image-amd64 linux-headers-amd64 zfs-dkms zfsutils-linux busybox-static cpio kmod
+              qemu-system-x86 linux-image-amd64 linux-headers-amd64 zfs-dkms zfsutils-linux busybox-static cpio kmod iproute2 nftables util-linux python3
             bash /source/scripts/payincus/test-zfs-vm.sh /tests/security.test
+            bash /source/scripts/payincus/test-egress-vm.sh /tests/egress.test
           '
       - name: Installer contracts
         run: python3 scripts/payincus/test-install.py
       - name: Packaging script checks
         run: |
-          bash -n scripts/payincus/{build,build-debian,package,install,test-zfs-vm}.sh
-          shellcheck scripts/payincus/{build,build-debian,package,install,test-zfs-vm}.sh
+          bash -n scripts/payincus/{build,build-debian,package,install,test-zfs-vm,test-egress-systemd,test-egress-vm}.sh
+          shellcheck scripts/payincus/{build,build-debian,package,install,test-zfs-vm,test-egress-systemd,test-egress-vm}.sh
       - name: Build integrated binaries
         if: matrix.target == 'ubuntu-24.04'
         run: bash scripts/payincus/build.sh
