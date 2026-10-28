@@ -59,6 +59,8 @@ jobs:
       - name: Prepare pinned Xray
         run: python3 scripts/payincus/prepare-xray.py "${{ matrix.arch }}"
       - name: Xray control contracts (race detector)
+        # 纯 Go 逻辑与发行版无关，仅在 Ubuntu 目标上运行，避免 Debian 任务重复执行。
+        if: matrix.target == 'ubuntu-24.04'
         run: go test -race ./internal/server/payincus/egress ./cmd/payincus-network-worker
       - name: Real systemd and native proxy API recovery
         if: matrix.arch == 'amd64' && matrix.target == 'debian-13'
@@ -86,14 +88,26 @@ jobs:
           RELEASE_REF: ${{ github.ref_name }}
           SOURCE_SHA: ${{ github.sha }}
         run: bash scripts/payincus/package.sh
+      - name: Cache Go build cache (Debian container)
+        if: matrix.target == 'debian-13'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/payincus-gobuild
+          key: gobuild-debian-13-${{ matrix.arch }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            gobuild-debian-13-${{ matrix.arch }}-${{ hashFiles('go.sum') }}-
+            gobuild-debian-13-${{ matrix.arch }}-
       - name: Build and package on Debian 13
         if: matrix.target == 'debian-13'
         env:
           RELEASE_REF: ${{ github.ref_name }}
           SOURCE_SHA: ${{ github.sha }}
         run: |
+          mkdir -p "$HOME/.cache/payincus-gobuild"
           docker run --rm -v "$PWD:/source" -w /source \
             -v "$(go env GOROOT):/opt/go:ro" \
+            -v "$(go env GOMODCACHE):/gomod" -e GOMODCACHE=/gomod \
+            -v "$HOME/.cache/payincus-gobuild:/gobuild" -e GOCACHE=/gobuild \
             -e RELEASE_REF -e SOURCE_SHA -e GOARCH=${{ matrix.arch }} \
             debian:13 bash scripts/payincus/build-debian.sh
       - name: Inspect package and checksums
