@@ -16,7 +16,10 @@ for app in $(busybox --list); do
 done
 copy_binary() {
   local path
-  path="$(command -v "$1")"
+  if ! path="$(command -v "$1")"; then
+    printf 'Missing VM build dependency: %s\n' "$1" >&2
+    return 1
+  fi
   mkdir -p "$root$(dirname "$path")"
   cp -L "$path" "$root$path"
   ldd "$path" | awk '{for(i=1;i<=NF;i++)if($i~/^\//)print $i}' | while read -r library; do
@@ -58,7 +61,9 @@ poweroff -f
 INIT
 chmod +x "$root/init"
 (cd "$root"; find . -print0 | cpio --null -o --format=newc 2>/dev/null | gzip -1 > "$work/initrd.gz")
+vm_status=0
 timeout 240 qemu-system-x86_64 -accel tcg -m 2048 -smp 2 -nic none -nographic -no-reboot \
-  -kernel "$kernel_path" -initrd "$work/initrd.gz" -append 'console=ttyS0 rdinit=/init panic=-1 quiet' > "$work/result.log" 2>&1
+  -kernel "$kernel_path" -initrd "$work/initrd.gz" -append 'console=ttyS0 rdinit=/init panic=-1 quiet' > "$work/result.log" 2>&1 || vm_status=$?
 cat "$work/result.log"
+if [[ "$vm_status" != 0 ]]; then exit "$vm_status"; fi
 grep -q 'PACKAGE_VM_TEST_EXIT=0' "$work/result.log"

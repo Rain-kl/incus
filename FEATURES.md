@@ -346,3 +346,9 @@ CI 接线修正：fork 初始没有官方 release tag，校验步骤从官方仓
 - 本地已通过：定制模块/连接器 race、固定 Xray 原生 API/HTTPS 回归、真实 systemd 全部恢复场景、隔离 QEMU 套餐 TCP/UDP/DNS 数据路径、改动范围 golangci-lint、脚本 ShellCheck、workflow actionlint、`go mod tidy -diff` 及差异空白检查。CI 已补充对应集成步骤，但尚未推送或触发远程 CI；不将本地结果视为发布验收。
 
 - canary 合并保留既有套餐健康检查重试，并将 TCP/UDP DNS 纳入同一探测；保留该分支既有精简构建流程，仅增加本次代理模块 race、systemd、代理 VM 和新增脚本检查，不恢复已删除的其它测试步骤。合并时独立追加文档，避免覆盖已有特性记录。
+
+## 修复干净 CI 环境的代理 VM 依赖（2026-10-28）
+
+- GitHub Actions 的 Debian amd64 代理 VM 步骤缺少提供 `sysctl` 的 `procps`，准备 initramfs 时 `command -v sysctl` 在 `set -e` 下直接退出。此前本地镜像预装了该包，未覆盖干净依赖清单；其余三个构建矩阵通过不能替代此项验收。
+- `.github/workflows/payincus.yml` 显式安装 `procps`。`scripts/payincus/test-egress-vm.sh` 在缺少待复制工具时输出依赖名称；QEMU 失败/超时时先打印 guest 日志，再保留原退出码，防止再次静默失败。不跳过真实数据路径测试，不修改生产代码或上游 API。
+- 本地验证已通过：按 CI 原始 Debian 13 依赖清单建立全新镜像，复现 `Missing VM build dependency: sysctl`；仅补齐 `procps` 后完整 QEMU 数据路径返回 `PACKAGE_VM_TEST_EXIT=0`。模拟 QEMU 返回 42 时打印日志且保留退出码；ShellCheck、workflow actionlint、bash 语法及差异空白检查通过。远程集成与发布以对应提交的 Actions 为准。
