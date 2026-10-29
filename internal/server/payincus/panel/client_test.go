@@ -65,7 +65,7 @@ func TestSecurityReportSignedContract(t *testing.T) {
 		if r.Header.Get("x-incudal-body-sha256") != hash || r.Header.Get("x-incudal-signature") != expected {
 			t.Error("unsigned or mismatched report")
 		}
-		_, _ = w.Write([]byte(`{"ack":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]}`))
+		_, _ = w.Write([]byte(`{"ack":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],"recoveryBlocked":true,"recoveryGeneration":11}`))
 	}))
 	defer server.Close()
 	client := New(config.Config{PanelURL: server.URL, AgentID: "fixture", AgentSecret: secret, RequestTimeout: time.Second})
@@ -73,9 +73,13 @@ func TestSecurityReportSignedContract(t *testing.T) {
 	if err != nil || len(ids) != 1 {
 		t.Fatal(err)
 	}
+	if !client.RecoveryBlocked() || client.RecoveryGeneration() != 11 {
+		t.Fatal("authenticated security report did not update the controller lock generation")
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := client.SecurityReport(ctx, map[string]any{}); err == nil {
+	_, err = client.SecurityReport(ctx, map[string]any{})
+	if err == nil {
 		t.Fatal("ignored cancellation")
 	}
 }

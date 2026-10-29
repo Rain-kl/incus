@@ -10,8 +10,10 @@ import (
 	"strings"
 )
 
-func decode(r *http.Request, target any) error {
-	decoder := json.NewDecoder(io.LimitReader(r.Body, 32769))
+func decode(r *http.Request, target any) error { return decodeBounded(r, target, 32768) }
+
+func decodeBounded(r *http.Request, target any, limit int64) error {
+	decoder := json.NewDecoder(io.LimitReader(r.Body, limit+1))
 	decoder.DisallowUnknownFields()
 	err := decoder.Decode(target)
 	if err != nil {
@@ -74,6 +76,56 @@ func (m *Manager) handle(r *http.Request, storage bool) (int, any) {
 			return 503, "security state unavailable: " + err.Error()
 		}
 		return 200, s
+	}
+	if action == "/startup" && r.TLS == nil {
+		if r.Method == http.MethodGet {
+			startupErr := m.PrepareStartup(r.Context())
+			if startupErr != nil {
+				return 503, "startup preparation incomplete"
+			}
+			state, err := m.Status()
+			if err != nil {
+				return 503, "state unavailable"
+			}
+			return 200, state
+		}
+		if r.Method != http.MethodPost {
+			return 405, "method not allowed"
+		}
+		var input struct {
+			Keys       []StartupKey `json:"keys"`
+			Locked     bool         `json:"locked"`
+			Generation uint64       `json:"generation"`
+		}
+		if decodeBounded(r, &input, 128<<10) != nil || len(input.Keys) > 256 {
+			return 400, "invalid request"
+		}
+		defer func() {
+			for i := range input.Keys {
+				input.Keys[i].Key = ""
+			}
+		}()
+		if input.Locked {
+			var err error
+			if input.Generation > 0 {
+				err = m.TriggerControl(input.Generation)
+			} else {
+				err = m.Trigger("panel_request")
+			}
+			if err != nil {
+				return 503, "state unavailable"
+			}
+			return 200, m.Report()
+		}
+		startupErr := m.Startup(r.Context(), input.Keys)
+		if startupErr != nil {
+			return 409, "startup incomplete; inspect node journal"
+		}
+		state, err := m.Status()
+		if err != nil {
+			return 503, "state unavailable"
+		}
+		return 200, state
 	}
 	if r.Method != http.MethodPost {
 		return 405, "method not allowed"
@@ -268,12 +320,13 @@ func (m *Manager) handle(r *http.Request, storage bool) (int, any) {
 			return 403, "recovery requires an authenticated remote control connection"
 		}
 		var input struct {
-			Revision *uint64 `json:"revision"`
+			Revision          *uint64 `json:"revision"`
+			ControlGeneration uint64  `json:"controlGeneration"`
 		}
 		if decode(r, &input) != nil || input.Revision == nil {
 			return 400, "invalid recovery request"
 		}
-		recoverErr := m.Recover(*input.Revision)
+		recoverErr := m.RecoverApproved(*input.Revision, input.ControlGeneration)
 		if recoverErr != nil {
 			return 409, recoverErr.Error()
 		}
@@ -281,7 +334,18 @@ func (m *Manager) handle(r *http.Request, storage bool) (int, any) {
 		if !remote {
 			return 403, "manual lock requires the control panel"
 		}
-		actionErr := m.Trigger("panel_request")
+		var input struct {
+			Generation uint64 `json:"generation"`
+		}
+		if r.ContentLength != 0 && decode(r, &input) != nil {
+			return 400, "invalid request"
+		}
+		var actionErr error
+		if input.Generation > 0 {
+			actionErr = m.TriggerControl(input.Generation)
+		} else {
+			actionErr = m.Trigger("panel_request")
+		}
 		if actionErr != nil {
 			return 503, actionErr.Error()
 		}

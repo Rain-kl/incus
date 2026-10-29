@@ -113,8 +113,15 @@ func TestRestartCorruptionAndFailedStop(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if m.Check() == nil {
-		t.Fatal("armed node auto-unlocked after restart")
+	state, err := m.Status()
+	if err != nil || state.Locked || !state.RecoveryPending {
+		t.Fatal("normal daemon restart must retain a recovery fence without alarming", state, err)
+	}
+	if _, err := m.beginStart(); err == nil {
+		t.Fatal("instance start bypassed pending startup recovery")
+	}
+	if err := m.Trigger("fixture"); err != nil {
+		t.Fatal("explicit security event did not lock the node", err)
 	}
 	m.SetStop(func(context.Context) error { return errors.New("busy") })
 	m.Lockdown(context.Background())

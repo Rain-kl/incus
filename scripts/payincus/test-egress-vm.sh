@@ -1,8 +1,8 @@
 #!/bin/bash
 # PayIncus: exercise real TCP/UDP/DNS isolation inside QEMU without host module or disk access.
 set -euo pipefail
-if [[ $# != 1 || ! -f "$1" ]]; then
-  echo 'Usage: test-egress-vm.sh /path/to/egress.test' >&2
+if [[ $# != 2 || ! -f "$1" || ! -f "$2" ]]; then
+  echo 'Usage: test-egress-vm.sh /path/to/egress.test /path/to/payincus-network-worker' >&2
   exit 1
 fi
 source_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -35,6 +35,8 @@ cp -a "/lib/modules/$kernel" "$root/lib/modules/"
 ln -sf /usr/bin/kmod "$root/sbin/modprobe"
 printf 'icmp 1 ICMP\ntcp 6 TCP\nudp 17 UDP\nipv6-icmp 58 IPv6-ICMP\n' > "$root/etc/protocols"
 cp "$1" "$root/test"
+cp "$2" "$root/payincus-network-worker"
+chmod 0755 "$root/payincus-network-worker"
 python3 - "$source_root/internal/server/payincus/egress/assets" "$root/xray" <<'PY'
 import gzip, hashlib, json, pathlib, sys
 assets = pathlib.Path(sys.argv[1])

@@ -470,3 +470,46 @@ CI 接线修正：fork 初始没有官方 release tag，校验步骤从官方仓
 ### 默认心跳间隔（2026-10-29）
 
 连接器默认心跳由 10 秒改为 5 秒，新 TUI 连接配置写入 5 秒；既有显式配置与 5–3600 秒限制保留。采集与请求串行，采集耗时超过周期时不会并发执行。接口及状态报告沿用现有协议，无数据库变更；config_test.go 覆盖默认、显式及边界。
+
+
+## 2026-10-29：内部发行 2.0.0、正常启动恢复与共享出口维护
+
+**上游基线**：官方 `lxc/incus` 正式 LTS `v7.0.2`，提交 `01f81e5e607bbb5818410318e4b3496ad1820824`；2026-10-29 再次核对，未使用普通功能版或未发布提交。Incus 自身版本未修改。
+
+### 内部版本与发行
+
+- `scripts/payincus/VERSION` 为内部版本唯一事实源，当前 `2.0.0`。`build.sh` 把内部版本及本次 SHA 同时注入 Agent 和 TUI：正式 `v2.0.0`，开发 `v2.0.0-<12SHA>`。每次修改源代码重新构建都会更新 Agent 版本。
+- 资产 `incus-2.0.0[-canary.<12SHA>]-linux-<OS>-<版本>-<架构>.deb`；manifest 保留真实 upstreamTag/Commit。软件包名仍为 `payincus-incus`，不改其它发行版包。
+- `payincus.yml`：canary push、PR、人工 workflow_dispatch、`v*` tag 可集成；main 普通 push 不集成。正式 tag 必须与 VERSION 一致且提交属于 main。`payincus-publish.yml` 仅发布验证成功的 canary 产物，tag `canary-2.0.0-<12SHA>`。安装器严格选择该渠道、OS 与架构，不读取旧命名兼容包。
+
+### 正常停止与自动恢复
+
+- 安全模式 `enabled` 不再意味着重启即 `locked`。`Boot` 保留真正锁定，正常启动设置独立 `recoveryPending`，在控制端授权前阻止容器/VM 启动。控制通道和遥测继续工作。
+- `security/lifecycle.go`：正常 Shutdown 先持久化运行工作负载的 project/name/UUID/frozen 状态，再停止实例，逐根卸载并验证 ZFS keystatus。每根错误独立汇总；未导入池已无加载密钥，冷启动不会为证明卸载而导入池。失败不伪报成功，不把正常停止标为安全告警。
+- 冷启动由 incusd 自身先停止崩溃后残留实例并卸载仍驻留的密钥，准备流程不依赖连接器在线；失败会重试。连接器在本机未锁且存在待恢复任务时才申请密钥；本地状态读取失败不申请。控制端已锁、证明失败粘性锁、状态未知都不提供密钥。控制端暂不可达时自动重试。
+- 外层复用现有 HMAC 节点身份认证与 PostgreSQL nonce 去重，确认身份后才校验内层 AES-256-GCM 证明。内层明文 token、毫秒时间戳、随机 nonce，时间容忍正负 180 秒（含边界），并独立持久化 nonce 防窗口内重放。密钥派生为 SHA256(`payincus-startup-v1\0` + 高熵 Agent secret)，96-bit 随机 IV，128-bit tag；AAD 绑定协议、方向、Agent ID。响应也加密并绑定请求 nonce。算法采用 AES-256-GCM；用户原始名称 ARCTEL 未对应到明确算法。
+- 已确认身份的内层错误证明持久化 `recoveryBlocked`；未认证请求无法锁定任意节点。控制端立即尝试通过证书指纹固定的 mTLS API 下发锁定，并在后续安全报告响应重试。Agent 收到认证后的锁定决定后写本地锁，现有异步隔离流程继续关闭实例/卸 key。管理员成功执行恢复流程后方可清除控制端此标志。控制锁消息携带单调 generation；节点持久化已确认代数，恢复审批同时确认该代数，重复或延迟的旧锁消息不会把已恢复节点再次锁定，新一代告警仍会锁定。
+- 只有已注册 GUID/指纹匹配且非手动锁定的加密根会加载密钥；密钥不写磁盘、不进入日志或 State。恢复按原生工作负载身份校验，正常停止前正在运行的实例恢复运行，Frozen 状态保留；冷启动同时复用原生 boot.autostart / volatile.last_state.power。正常启动恢复失败保留未完成清单并自动重试。`startupRecovering` 单独标记本机正常恢复执行器；真正告警与管理员恢复会清除此标记，本机循环不会抢跑控制端异步恢复清单或跳过控制端的实例资格检查。
+- 系统强制 SIGKILL、OOM kill 或突然断电无法执行停机用户态代码；不承诺清理已被攻击者复制的内存或密钥。进程重启时重新执行准备流程，正常 systemctl stop 会执行停机卸 key 路径；ZFS 被外部进程占用时不会强制绕过内核失败。
+
+**上游接入点**：`cmd/incusd/daemon.go` Boot 注释更新及 Stop 内、数据库关闭前调用定制 Shutdown 并返回清理错误；`cmd/incusd/instances.go` 正常启动等待授权，不误报锁定。原有 LXC/QEMU `BeginStart` 接入复用，未改上游 API。native adapter 位于独立 `cmd/incusd/payincus_security.go`，使用 `instance.LoadNodeAll/LoadByProjectAndName`、Start/Stop/Freeze 与 volatile.uuid。同步上游时复核 Stop 信号顺序、数据库存活期、setupChan 及 boot.autostart/volatile.last_state.power 语义。
+
+**接口扩展**：`payincus_security_startup_v1`、`payincus_xray_maintenance_v1` 在节点根端点明确公布。
+
+**接口**：本地 UNIX socket `GET/POST /1.0/payincus/security/startup`（TLS 远程不可调用），控制端 `POST /api/agent/startup-keys`（HMAC + AEAD、no-store）。原有 `/security/recover`、`/storage/auto-unlock` 仍保留明确管理语义；控制端后台存储加载器在 recoveryPending 时不执行，防绕过启动证明。
+
+### 共享出口与 Xray TUI
+
+- 出口组 key 由历史版本身份改为共享策略 `p<ID>`，内容变化通过现有 host revision 确认/重试，不维护策略版本或历史快照。负载均衡、故障转移、最低延迟走统一策略执行器：多节点组保留 Xray 原生 balancer/observatory，所有 probe-N 各自固定候选节点，DNS 通过 TCP 转换及 loopback 路由进入同一 balancer，不能固定首代理。故障转移通过 RoutingService 覆盖并回读目标，活跃候选失败立即切备，首选恢复需两次成功探测。每组隔离健康状态，按策略检测间隔刷新。额外内网 CIDR 仅在对应策略组生效，不影响其它组。
+- `egress/maintenance.go` 集中只读脱敏目录、分批代理检测、托管核心重启与重建；`/1.0/payincus/xray` 仅供本机 TUI。GET 返回节点 ID/protocol/address/port 和状态，POST 固定 action=test/restart/reconfigure，禁止任意脚本或命令参数。
+- 重建与应用/健康检查共用 applyGate，与探测共用 probeGate。先撤销就绪位，再停止托管核心，重建专属命名空间、veth、resolver、生成配置及 systemd unit；保留策略意图、ownership、流量分类及 unreachable 保护，不清除宿主全部 nft/路由/conntrack。失败保持阻断并可重试。仅管理已验证注册表中的资源，不动其它网络。
+- TUI Xray 菜单：查看节点、测试、重启、日志、重新配置；调用本机 API，不调用 Incus CLI，因此不会被 CLI 安全模式误触发。输出只含允许的非机密字段。
+
+### 测试与验证
+
+接口对应测试：`security/lifecycle_test.go`、`security/security_test.go`、`panel/recovery_test.go`、`egress/*test.go`、`service_test.go`、`tools/incus-tui/*test.go`，发行契约 `scripts/payincus/test-install.py`。控制端相关接口测试在 PayIncus `test-node-security-startup.ts`、`test-node-security-db.ts`、`test-package-egress.ts`、`test-egress.ts` 与前端守卫。测试结果由本次测试记录及 CI 提供，未执行项不得视为通过。
+
+
+**本次已验证（2026-10-29，GPT Luna）**：前后端类型、相关安全/出口 API 与隔离 PostgreSQL 集成、界面守卫通过；Debian 13 原生集成二进制完成编译；隔离 QEMU 的真实 ZFS 测试通过正常 Shutdown 卸 key → Boot 保持未锁待授权 → Startup 加载 key 后恢复工作负载回调、验证原加密数据可读，并通过既有扩容验证。完整上游 `make check` 含宿主系统集成测试，未在共享工作机执行；后续集成矩阵与发布结果另行记录，不将本地契约测试当作完整上游套件。
+
+**部署约束**：Incus 数据库、控制连接配置及守护进程启动必须读取的系统目录/系统卷需位于可独立启动的非托管存储。托管加密根用于实例数据；把 Incus 自身元数据放进必须通过 Incus API 才能解锁的根会造成启动依赖环，不能据此承诺自恢复。

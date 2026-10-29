@@ -21,7 +21,7 @@ import (
 	"github.com/lxc/incus/v7/internal/server/payincus/tunnel"
 )
 
-var version = "v1.3.0"
+var version = "v2.0.0"
 
 func main() {
 	path := flag.String("config", "/etc/incudal-agent/config.yaml", "panel connection configuration")
@@ -59,6 +59,7 @@ func main() {
 	}})
 	defer worker.SyncConfig(false, "", 0)
 	go securityReports(ctx, local, remote)
+	go startupRecovery(ctx, local, remote)
 	var caddyPending atomic.Bool
 	tick := time.NewTicker(cfg.HeartbeatInterval)
 	defer tick.Stop()
@@ -176,8 +177,13 @@ func securityReports(ctx context.Context, local *nodeclient.Client, remote *pane
 			var ids []string
 			ids, err = remote.SecurityReport(callCtx, report)
 			if err == nil {
-				lastPayload = payload
-				deliveredAt = time.Now()
+				if remote.RecoveryBlocked() {
+					err = local.Call(callCtx, "POST", "/security/startup", map[string]any{"locked": true, "generation": remote.RecoveryGeneration()}, nil)
+				}
+				if err == nil {
+					lastPayload = payload
+					deliveredAt = time.Now()
+				}
 			}
 			if err == nil && len(ids) > 0 {
 				err = local.Call(callCtx, "POST", "/security/ack", map[string]any{"ids": ids}, nil)

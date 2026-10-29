@@ -11,15 +11,17 @@ source_sha="${SOURCE_SHA:-$(git rev-parse HEAD)}"
 . /etc/os-release
 target="${ID}-${VERSION_ID}"
 case "$target" in ubuntu-24.04|debian-13) ;; *) echo "Unsupported build distribution: $target" >&2; exit 1 ;; esac
-channel=integration
-if [[ "$ref" == payincus-v* ]]; then
-  version="${ref#payincus-v}"
-  [[ "$version" =~ ^7\.0\.2(-rc\.[0-9]+)?$ ]] || { echo 'Expected a 7.0.2 stable or RC tag' >&2; exit 1; }
-  if [[ "$version" == 7.0.2 ]]; then channel=stable; fi
-  deb_version="${version/-rc./~rc.}"
+internal_version="$(cat scripts/payincus/VERSION)"
+[[ "$internal_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Invalid internal version' >&2; exit 1; }
+channel=canary
+if [[ "$ref" == v* ]]; then
+  [[ "$ref" == "v$internal_version" ]] || { echo 'Release tag must match VERSION' >&2; exit 1; }
+  channel=stable
+  version="$internal_version"
+  deb_version="$version"
 else
-  version="7.0.2-integration.${source_sha:0:12}"
-  deb_version="7.0.2~integration.${source_sha:0:12}"
+  version="${internal_version}-canary.${source_sha:0:12}"
+  deb_version="${internal_version}~canary.${source_sha:0:12}"
 fi
 binaries="${BUILD_DIR:-$root/scripts/payincus/dist/$arch}"
 out="${RELEASE_DIR:-$root/scripts/payincus/dist/release}"
@@ -88,7 +90,7 @@ fi
 # Starting or restarting instances and replacing the old connector require a maintenance window.
 POSTINST
 chmod 0755 "$stage/rootfs/DEBIAN/postinst"
-filename="payincus-incus-${version}-linux-${target}-${arch}"
+filename="incus-${version}-linux-${target}-${arch}"
 # Archives contain the same file layout and scripts as the deb, plus an explicit manifest.
 export version source_sha arch channel target
 python3 - "$stage/rootfs/usr/share/doc/payincus-incus/manifest.json" <<'PY'

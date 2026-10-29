@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import unittest
 
 SCRIPT = Path(__file__).with_name('install.sh').read_text()
+INTERNAL_VERSION = '2.0.0'
 
 
 def evaluate_publish_condition(node, github):
@@ -44,13 +45,13 @@ class InstallerTests(unittest.TestCase):
             binary = root / 'bin'
             binary.mkdir()
             payload = b'deb fixture bytes'
-            version = '7.0.2-integration.abcdef012345' if channel == 'canary' else '7.0.2'
-            name = f'payincus-incus-{version}-linux-{target}-{arch}.deb'
+            version = f'{INTERNAL_VERSION}-canary.abcdef012345' if channel == 'canary' else INTERNAL_VERSION
+            name = f'incus-{version}-linux-{target}-{arch}.deb'
             checksum = hashlib.sha256(payload).hexdigest()
             (root / 'package').write_bytes(payload + (b'corrupt' if damage else b''))
             (root / 'checksum').write_text(f'{checksum}  {name}\n')
             prefix = 'https://github.com/Rain-kl/incus/releases/download/test/'
-            release = {'tag_name': 'integration-7.0.2-abcdef012345' if channel == 'canary' else 'payincus-v7.0.2',
+            release = {'tag_name': f'canary-{INTERNAL_VERSION}-abcdef012345' if channel == 'canary' else f'v{INTERNAL_VERSION}',
                        'prerelease': channel == 'canary', 'draft': draft, 'published_at': '2026-10-23T00:00:00Z',
                        'assets': [] if missing else [
                            {'name': name, 'size': 86402662, 'browser_download_url': ('https://evil.invalid/' if bad_url else prefix) + name},
@@ -125,9 +126,9 @@ if '--allow-downgrades' in sys.argv and os.environ.get('NEEDRESTART_MODE') != 'l
                 result, log = self.run_installer(channel, target, arch, mode='--update')
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn('--reinstall --allow-downgrades', log)
-                self.assertIn('Downloading payincus-incus-', result.stdout)
+                self.assertIn('Downloading incus-', result.stdout)
                 self.assertIn('(82.4 MiB)', result.stdout)
-                self.assertIn('Verified SHA256 checksum for payincus-incus-', result.stdout)
+                self.assertIn('Verified SHA256 checksum for incus-', result.stdout)
                 self.assertIn('100.0%', result.stderr)
                 self.assertIn('Node package installed:', result.stdout)
                 self.assertNotIn('interactive terminal', result.stdout)
@@ -160,7 +161,7 @@ if '--allow-downgrades' in sys.argv and os.environ.get('NEEDRESTART_MODE') != 'l
         condition = ast.parse(expression, mode='eval').body
         cases = itertools.product(
             ('push', 'workflow_dispatch', 'pull_request', 'pull_request_target', 'schedule'),
-            ('success', 'failure', 'cancelled'), ('canary', 'main', 'payincus-v7.0.2'),
+            ('success', 'failure', 'cancelled'), ('canary', 'main', 'v2.0.0'),
             ('Rain-kl/incus', 'untrusted/fork'))
         for event, conclusion, branch, repository in cases:
             with self.subTest(event=event, conclusion=conclusion, branch=branch, repository=repository):
@@ -170,6 +171,38 @@ if '--allow-downgrades' in sys.argv and os.environ.get('NEEDRESTART_MODE') != 'l
                 expected = (event in ('push', 'workflow_dispatch') and conclusion == 'success'
                             and branch == 'canary' and repository == 'Rain-kl/incus')
                 self.assertEqual(evaluate_publish_condition(condition, github), expected)
+
+    def test_internal_release_version_is_single_source_and_upstream_stays_lts(self):
+        root = Path(__file__).resolve().parents[2]
+        version_file = root / 'scripts/payincus/VERSION'
+        self.assertEqual(version_file.read_text().strip(), INTERNAL_VERSION)
+        build = (root / 'scripts/payincus/build.sh').read_text()
+        self.assertIn('scripts/payincus/VERSION', build)
+        package = (root / 'scripts/payincus/package.sh').read_text()
+        self.assertIn('scripts/payincus/VERSION', package)
+        self.assertIn('upstreamTag": "v7.0.2"', package)
+        self.assertIn('upstreamCommit": "01f81e5e607bbb5818410318e4b3496ad1820824"', package)
+
+    def test_canary_and_formal_artifact_names_follow_internal_version(self):
+        root = Path(__file__).resolve().parents[2]
+        canary = f'incus-{INTERNAL_VERSION}-canary.abcdef012345-linux-debian-13-amd64.deb'
+        stable = f'incus-{INTERNAL_VERSION}-linux-debian-13-amd64.deb'
+        for channel, expected in (('canary', canary), ('latest', stable)):
+            with self.subTest(channel=channel):
+                result, _ = self.run_installer(channel=channel)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(expected, result.stdout)
+
+    def test_main_push_is_excluded_and_formal_tag_requires_main_ancestry(self):
+        root = Path(__file__).resolve().parents[2]
+        workflow = (root / '.github/workflows/payincus.yml').read_text()
+        self.assertRegex(workflow, r"tags:\s*\['v\*'\]")
+        self.assertRegex(workflow, r"if: startsWith\(github\.ref, 'refs/tags/'\)")
+        self.assertIn('git merge-base --is-ancestor HEAD origin/main', workflow)
+        push_block = re.search(r'(?ms)^  push:\n(.*?)(?=^  [a-z_]+:|^permissions:)', workflow)
+        self.assertIsNotNone(push_block, 'Missing push trigger block')
+        self.assertRegex(push_block[1], r'branches:\s*\[canary\]')
+        self.assertNotRegex(push_block[1], r'branches:\s*\[main,\s*canary\]')
 
 
 if __name__ == '__main__':

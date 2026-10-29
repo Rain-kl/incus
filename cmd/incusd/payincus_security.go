@@ -40,6 +40,45 @@ func startPayIncusAudit(d *Daemon) {
 		}
 		return pending, nil
 	})
+	// PayIncus: recover native workload identities after normal restarts, including crash power-state records.
+	manager.SetStartupRecovery(func(ctx context.Context) ([]nodesecurity.ResumeInstance, error) {
+		instances, err := instance.LoadNodeAll(d.State(), instancetype.Any)
+		if err != nil {
+			return nil, err
+		}
+		pending := []nodesecurity.ResumeInstance{}
+		for _, inst := range instances {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			config := inst.ExpandedConfig()
+			if config["boot.autostart"] == "true" || (config["boot.autostart"] != "false" && inst.LocalConfig()["volatile.last_state.power"] == "RUNNING") {
+				pending = append(pending, nodesecurity.ResumeInstance{Project: inst.Project().Name, Name: inst.Name(), UUID: inst.LocalConfig()["volatile.uuid"], Frozen: inst.IsFrozen()})
+			}
+		}
+		return pending, nil
+	}, func(ctx context.Context, item nodesecurity.ResumeInstance) error {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		inst, err := instance.LoadByProjectAndName(d.State(), item.Project, item.Name)
+		if err != nil {
+			return err
+		}
+		if inst.LocalConfig()["volatile.uuid"] != item.UUID {
+			return errors.New("workload identity changed")
+		}
+		if !inst.IsRunning() {
+			err = inst.Start(false)
+			if err != nil {
+				return err
+			}
+		}
+		if item.Frozen && !inst.IsFrozen() {
+			return inst.Freeze()
+		}
+		return nil
+	})
 	manager.SetStop(func(ctx context.Context) error {
 		instances, err := instance.LoadNodeAll(d.State(), instancetype.Any)
 		if err != nil {

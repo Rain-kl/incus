@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/lxc/incus/v7/internal/server/payincus/config"
@@ -18,10 +19,12 @@ const heartbeatPath = "/api/agent/heartbeat"
 
 // Client provides authenticated access to its peer API.
 type Client struct {
-	panelURL    string
-	agentID     string
-	agentSecret string
-	httpClient  *http.Client
+	panelURL           string
+	agentID            string
+	agentSecret        string
+	httpClient         *http.Client
+	recoveryBlocked    atomic.Bool
+	recoveryGeneration atomic.Uint64
 }
 
 // HeartbeatResult contains panel connection instructions and response timing.
@@ -175,11 +178,21 @@ func (client *Client) SecurityReport(ctx context.Context, payload map[string]any
 		return nil, fmt.Errorf("report status %d", response.StatusCode)
 	}
 	var result struct {
-		Ack []string `json:"ack"`
+		Ack                []string `json:"ack"`
+		RecoveryBlocked    bool     `json:"recoveryBlocked"`
+		RecoveryGeneration uint64   `json:"recoveryGeneration"`
 	}
 	err = json.NewDecoder(io.LimitReader(response.Body, 32768)).Decode(&result)
 	if err != nil || result.Ack == nil || len(result.Ack) > 128 {
 		return nil, fmt.Errorf("invalid acknowledgement")
 	}
+	client.recoveryGeneration.Store(result.RecoveryGeneration)
+	client.recoveryBlocked.Store(result.RecoveryBlocked)
 	return result.Ack, nil
 }
+
+// RecoveryBlocked exposes the authenticated controller decision from the last acknowledged report.
+func (client *Client) RecoveryBlocked() bool { return client.recoveryBlocked.Load() }
+
+// RecoveryGeneration identifies the latest authenticated controller decision.
+func (client *Client) RecoveryGeneration() uint64 { return client.recoveryGeneration.Load() }

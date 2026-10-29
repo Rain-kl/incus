@@ -2,8 +2,8 @@ name: PayIncus Integration
 
 on:
   push:
-    branches: [main, canary]
-    tags: ['payincus-v*']
+    branches: [canary]
+    tags: ['v*']
   pull_request:
     branches: [main, canary]
   workflow_dispatch:
@@ -56,6 +56,12 @@ jobs:
           git cat-file -e v7.0.2^{commit}
           test "$(git rev-parse v7.0.2^{commit})" = 01f81e5e607bbb5818410318e4b3496ad1820824
           git merge-base --is-ancestor v7.0.2 HEAD
+      - name: Verify internal release provenance
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          test "$GITHUB_REF_NAME" = "v$(cat scripts/payincus/VERSION)"
+          git fetch origin main
+          git merge-base --is-ancestor HEAD origin/main
       - name: Prepare pinned Xray
         run: python3 scripts/payincus/prepare-xray.py "${{ matrix.arch }}"
       - name: Xray control contracts (race detector)
@@ -64,7 +70,12 @@ jobs:
         run: go test -race ./internal/server/payincus/egress ./cmd/payincus-network-worker
       - name: Storage telemetry and native node contracts
         if: matrix.target == 'ubuntu-24.04'
-        run: go test -race -tags libsqlite3 ./internal/server/payincus/report ./internal/server/payincus/security ./internal/server/payincus/tunnel ./cmd/payincus-agent ./internal/server/storage/drivers
+        run: go test -race -tags libsqlite3 ./internal/server/payincus ./internal/server/payincus/report ./internal/server/payincus/security ./internal/server/payincus/panel ./internal/server/payincus/tunnel ./cmd/payincus-agent ./internal/server/storage/drivers
+      - name: TUI and installer contracts
+        if: matrix.target == 'ubuntu-24.04'
+        run: |
+          (cd tools/incus-tui && go test -race ./...)
+          python3 scripts/payincus/test-install.py
       - name: Real systemd and native proxy API recovery
         if: matrix.arch == 'amd64' && matrix.target == 'debian-13'
         timeout-minutes: 10
@@ -74,15 +85,19 @@ jobs:
         timeout-minutes: 10
         run: |
           CGO_ENABLED=0 go test -c -o "$RUNNER_TEMP/egress.test" ./internal/server/payincus/egress
-          docker run --rm -v "$PWD:/source:ro" -v "$RUNNER_TEMP/egress.test:/tests/egress.test:ro" debian:13 sh -ec '
+          CGO_ENABLED=0 go build -o "$RUNNER_TEMP/payincus-network-worker" ./cmd/payincus-network-worker
+          docker run --rm -v "$PWD:/source:ro" -v "$RUNNER_TEMP/egress.test:/tests/egress.test:ro" -v "$RUNNER_TEMP/payincus-network-worker:/tests/payincus-network-worker:ro" debian:13 sh -ec '
             apt-get update -qq
             DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
               qemu-system-x86 linux-image-amd64 busybox-static cpio kmod iproute2 nftables util-linux procps python3
-            bash /source/scripts/payincus/test-egress-vm.sh /tests/egress.test
+            bash /source/scripts/payincus/test-egress-vm.sh /tests/egress.test /tests/payincus-network-worker
           '
       - name: Proxy test script syntax
         run: bash -n scripts/payincus/{test-egress-systemd,test-egress-vm,test-zfs-vm}.sh
       - name: Build integrated binaries
+        env:
+          RELEASE_REF: ${{ github.ref_name }}
+          SOURCE_SHA: ${{ github.sha }}
         if: matrix.target == 'ubuntu-24.04'
         run: bash scripts/payincus/build.sh
       - name: Assemble native integration packages
@@ -127,7 +142,7 @@ jobs:
 
   publish:
     name: Publish integration prerelease
-    if: startsWith(github.ref, 'refs/tags/payincus-v')
+    if: startsWith(github.ref, 'refs/tags/v')
     needs: integration
     runs-on: ubuntu-24.04
     permissions:
@@ -151,8 +166,7 @@ jobs:
             done
           done
           flags=(--latest)
-          if [[ "$GITHUB_REF_NAME" == *-rc.* ]]; then flags=(--prerelease); fi
           gh release create "$GITHUB_REF_NAME" --verify-tag "${flags[@]}" \
-            --title "PayIncus Incus ${GITHUB_REF_NAME#payincus-v}" \
+            --title "PayIncus Incus ${GITHUB_REF_NAME#v}" \
             --notes-file scripts/payincus/RELEASE-NOTES.md \
             release/payincus-linux-*/*

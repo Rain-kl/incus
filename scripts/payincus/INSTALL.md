@@ -31,7 +31,7 @@ sudo bash /tmp/incus-install.sh canary
 
 也支持 `curl ... | sudo bash -s -- canary`，交互界面会重新打开 `/dev/tty`。无交互终端时只安装，提示稍后运行 `sudo incus-tui`；自动化安装可传第二个参数 `--no-tui`。
 
-`latest` 默认使用 GitHub 最新稳定发布，要求 tag 为 `payincus-v7.0.2` 这类正式版本；没有稳定包时失败，不降级到预发布。`canary` 在最近 100 个 GitHub release 中选择发布时间最新的 `integration-<LTS>-<SHA前12位>` prerelease。选择该 release 后必须有对应系统/架构 deb 和 `SHA256SUMS-<系统>-<架构>`；不回退到旧 release 或其他平台。旧版仅提供通用文件名的集成包不符合新安装契约，需发布新包。
+`latest` 默认使用 GitHub 最新稳定发布，要求 tag 为 `v2.0.0` 这类正式版本；没有稳定包时失败，不降级到预发布。`canary` 在最近 100 个 GitHub release 中选择发布时间最新的 `canary-<内部版本>-<SHA前12位>` prerelease。选择该 release 后必须有对应系统/架构 deb 和 `SHA256SUMS-<系统>-<架构>`；不回退到旧 release 或其他平台。旧版仅提供通用文件名的集成包不符合新安装契约，需发布新包。
 
 校验文件与 deb 来自同一 GitHub release，使用 HTTPS；SHA256 检测损坏和不匹配，不能替代独立签名或仓库账号信任。脚本不关闭 TLS 校验、不执行下载的配置、不修改 apt 软件源。常规安装模式不自动处理降级或重启现有 daemon；TUI 更新模式另见下文。安装已有节点前应安排维护窗口。
 
@@ -89,3 +89,15 @@ TUI 内 APT 使用 `DEBIAN_FRONTEND=noninteractive` 采用软件包默认配置�
 安全模式默认关闭，DIR 节点也可在控制端开启。触发后全部 LXC 停止、API 持续锁定，ZFS 按注册情况卸载/清钥；Agent 与 incusd 保持通信。TUI 加载密钥不会批准节点恢复，须控制端授权后自动恢复锁定前运行的容器。重启、重连、关闭安全模式均不清除已有锁定。详情与限制见根目录 FEATURES.md 及配套 PayIncus 仓库 `docs/NODE_SECURITY.md`。
 
 控制端不再分发独立 Agent。由控制端安装命令传入的 Panel 地址和一次性 token 会在 TUI 中预填并隐藏 token，确认后才兑换；无终端时稍后手工配置。此接入流程不提供独立旧 Agent 的升级迁移，已使用本集成包的节点更新见上文。
+
+
+## 内部版本 2.0.0
+
+内部发行版本由 `scripts/payincus/VERSION` 决定；它与 Incus 上游自身的版本相互独立。正式 tag 为 `v2.0.0`，必须来自 main；main 普通推送不集成，canary 推送自动集成并发布 prerelease。
+
+- 正式资产：`incus-2.0.0-linux-debian-13-amd64.deb`。
+- 开发资产：`incus-2.0.0-canary.<提交前12位>-linux-debian-13-amd64.deb`。
+- Debian 内部软件包版本使用 `2.0.0~canary.<提交前12位>`，使正式版排序高于开发版。
+- Agent/TUI 展示：正式 `v2.0.0`，开发 `v2.0.0-<提交前12位>`。构建时从同一内部版本与提交生成，每次代码变化自动更新 Agent 身份。
+- TUI → Xray：查看当前代理节点与脱敏状态、检测、重启代理核心、查看日志、重新配置运行环境。重新配置保留策略意图与临时流量阻断保护，不触碰非托管网络或删除容器。
+- 正常升级/停止不会触发安全锁。停止会保存运行实例身份、停止工作负载并卸载已注册 ZFS 根的密钥。再次启动后，经控制端在线授权恢复密钥及原运行清单；控制端不可达时保持等待，可自动重试。已锁定节点仍需管理员批准恢复。

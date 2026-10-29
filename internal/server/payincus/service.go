@@ -23,8 +23,9 @@ import (
 
 // Constants define protocol identifiers and timing limits.
 const (
-	Prefix    = "/1.0/payincus"
-	Extension = "payincus_node_v1"
+	Prefix                   = "/1.0/payincus"
+	Extension                = "payincus_node_v1"
+	XrayMaintenanceExtension = "payincus_xray_maintenance_v1"
 )
 
 // Engine is the boundary between HTTP contracts and host-side networking.
@@ -143,7 +144,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 
-		respond(w, 200, map[string]any{"api_extensions": []string{Extension, nodesecurity.Extension, nodesecurity.ResumeExtension, nodesecurity.StorageExtension, nodesecurity.StoragePoolDirExtension, nodesecurity.StoragePoolAllocExtension, nodesecurity.StoragePoolResizeExtension}, "api_version": "1.0", "transport_only_agent": true})
+		respond(w, 200, map[string]any{"api_extensions": []string{Extension, XrayMaintenanceExtension, nodesecurity.StartupExtension, nodesecurity.Extension, nodesecurity.ResumeExtension, nodesecurity.StorageExtension, nodesecurity.StoragePoolDirExtension, nodesecurity.StoragePoolAllocExtension, nodesecurity.StoragePoolResizeExtension}, "api_version": "1.0", "transport_only_agent": true})
 		return
 	case Prefix + "/report":
 		if r.Method != http.MethodGet {
@@ -175,6 +176,26 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		payload["networkStatus"] = s.engine.Report()
 		payload["nodeApi"] = Extension
 		respond(w, 200, payload)
+		return
+	case Prefix + "/xray":
+		if r.TLS != nil {
+			respond(w, 403, "local maintenance only")
+			return
+		}
+		method := "xray.inspect"
+		if r.Method == http.MethodPost {
+			var input struct {
+				Action string `json:"action"`
+			}
+			if decode(r, &input) != nil || (input.Action != "test" && input.Action != "restart" && input.Action != "reconfigure") {
+				respond(w, 400, "invalid_request")
+				return
+			}
+			method = "xray." + input.Action
+		} else if r.Method != http.MethodGet {
+			break
+		}
+		s.control(w, r, method, json.RawMessage(`{}`), 5*time.Minute)
 		return
 	case Prefix + "/network":
 		if r.Method == http.MethodGet {

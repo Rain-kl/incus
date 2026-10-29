@@ -59,7 +59,7 @@ jobs:
               assert data["architecture"] == arch
               assert data["targetDistribution"] == target
               assert data["upstreamCommit"] == "01f81e5e607bbb5818410318e4b3496ad1820824"
-              assert data["channel"] == "integration"
+              assert data["channel"] == "canary"
           PY
       - name: Publish immutable integration prerelease
         env:
@@ -68,7 +68,7 @@ jobs:
           CI_URL: ${{ github.event.workflow_run.html_url }}
         run: |
           set -euo pipefail
-          tag="integration-7.0.2-${SOURCE_SHA:0:12}"
+          tag="canary-$(cat scripts/payincus/VERSION)-${SOURCE_SHA:0:12}"
           for target in ubuntu-24.04 debian-13; do
             for arch in amd64 arm64; do
               mv "release/payincus-linux-$target-$arch/SHA256SUMS" "release/payincus-linux-$target-$arch/SHA256SUMS-$target-$arch"
@@ -77,5 +77,5 @@ jobs:
           cp scripts/payincus/RELEASE-NOTES.md release-notes.md
           printf '\nSource: %s\nValidated CI: %s\n' "$SOURCE_SHA" "$CI_URL" >> release-notes.md
           gh release create "$tag" --target "$SOURCE_SHA" --prerelease \
-            --title "PayIncus 7.0.2 integration ${SOURCE_SHA:0:12}" \
+            --title "Incus $(cat scripts/payincus/VERSION) canary ${SOURCE_SHA:0:12}" \
             --notes-file release-notes.md release/payincus-linux-*/*

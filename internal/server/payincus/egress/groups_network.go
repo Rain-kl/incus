@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -112,10 +113,26 @@ func validateGroups(in Instruction) error {
 	interfaces := map[string]bool{}
 	names := map[string]bool{}
 	for _, group := range in.Groups {
-		if !groupKeyPattern.MatchString(group.Key) || groups[group.Key] || group.Egress.Mode != "proxy" || len(group.Nodes) != 1 || len(group.Egress.ProxyNodeIDs) != 1 || group.Nodes[0].ID != group.Egress.ProxyNodeIDs[0] {
+		if !groupKeyPattern.MatchString(group.Key) || groups[group.Key] || group.Egress.Mode != "proxy" || len(group.Nodes) == 0 || len(group.Nodes) > 16 || len(group.Egress.ProxyNodeIDs) != len(group.Nodes) || (group.Egress.Strategy != "balance" && group.Egress.Strategy != "failover" && group.Egress.Strategy != "leastPing") || group.Egress.ProbeIntervalSeconds < 10 || group.Egress.ProbeIntervalSeconds > 3600 || len(group.Egress.InternalCIDRs) > 64 {
 			return fmt.Errorf("invalid_request")
 		}
-
+		probe, err := url.Parse(group.Egress.ProbeURL)
+		if err != nil || probe.Scheme != "https" || probe.Hostname() == "" || probe.User != nil || len(group.Egress.ProbeURL) > 2048 {
+			return fmt.Errorf("invalid_request")
+		}
+		nodes := map[int]bool{}
+		for index, node := range group.Nodes {
+			if node.ID <= 0 || nodes[node.ID] || node.ID != group.Egress.ProxyNodeIDs[index] {
+				return fmt.Errorf("invalid_request")
+			}
+			nodes[node.ID] = true
+		}
+		for _, value := range group.Egress.InternalCIDRs {
+			_, _, parseErr := net.ParseCIDR(value)
+			if len(value) > 64 || (parseErr != nil && net.ParseIP(value) == nil) {
+				return fmt.Errorf("invalid_request")
+			}
+		}
 		groups[group.Key] = true
 	}
 
@@ -145,6 +162,10 @@ func compileGroupRules(in Instruction, runtime map[string]groupRuntime, ready ma
 		}
 	}
 
+	policies := map[string]Policy{}
+	for _, group := range in.Groups {
+		policies[group.Key] = group.Egress
+	}
 	var bridge, inet strings.Builder
 	bridge.WriteString("table bridge incudal_package_ports { chain classify { type filter hook prerouting priority -310; policy accept;\n")
 	// Clear only our assigned bits on tenant ingress, before any trusted classification.
@@ -237,7 +258,16 @@ func compileGroupRules(in Instruction, runtime map[string]groupRuntime, ready ma
 		inet.WriteString("ip daddr 169.254.244.0/24 drop\n")
 		if b.Mode == "profile" {
 			// Only actual host-managed networks are bypassed, not all RFC1918 destinations.
-			for _, cidr := range in.GroupInternal {
+			internal := append([]string{}, in.GroupInternal...)
+			for _, value := range policies[b.GroupKey].InternalCIDRs {
+				ip, network, err := net.ParseCIDR(value)
+				if err == nil && ip.To4() != nil && !strings.Contains(value, ":") {
+					internal = append(internal, network.String())
+				} else if net.ParseIP(value).To4() != nil && !strings.Contains(value, ":") {
+					internal = append(internal, value+"/32")
+				}
+			}
+			for _, cidr := range compactNetworks(internal) {
 				fmt.Fprintf(&inet, "ip daddr %s meta mark set meta mark & "+groupKeep+" return\n", cidr)
 			}
 

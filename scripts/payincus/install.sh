@@ -42,14 +42,14 @@ folder = Path(folder)
 data = json.loads((folder / 'releases.json').read_text())
 releases = data if isinstance(data, list) else [data]
 releases = [r for r in releases if not r.get('draft') and (
-    (channel == 'latest' and not r.get('prerelease') and re.fullmatch(r'payincus-v\d+\.\d+\.\d+', r.get('tag_name', '')))
-    or (channel == 'canary' and r.get('prerelease') and re.fullmatch(r'integration-\d+\.\d+\.\d+-[0-9a-f]{12}', r.get('tag_name', ''))))]
+    (channel == 'latest' and not r.get('prerelease') and re.fullmatch(r'v\d+\.\d+\.\d+', r.get('tag_name', '')))
+    or (channel == 'canary' and r.get('prerelease') and re.fullmatch(r'canary-\d+\.\d+\.\d+-[0-9a-f]{12}', r.get('tag_name', ''))))]
 if not releases:
     sys.exit(f'No {channel} PayIncus release available; no other channel will be installed.')
 release = max(releases, key=lambda r: r.get('published_at', ''))
 assets = release.get('assets', [])
 suffix = f'-linux-{target}-{arch}.deb'
-packages = [a for a in assets if a['name'].startswith('payincus-incus-') and a['name'].endswith(suffix)]
+packages = [a for a in assets if a['name'].startswith('incus-') and a['name'].endswith(suffix)]
 if len(packages) != 1:
     sys.exit(f"Release {release['tag_name']} has no unique package for {target}/{arch}; no incompatible package will be substituted.")
 checks = [a for a in assets if a['name'] == f'SHA256SUMS-{target}-{arch}']

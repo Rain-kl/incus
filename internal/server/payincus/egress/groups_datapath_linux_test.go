@@ -3,12 +3,20 @@ package egress
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/binary"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +24,43 @@ import (
 	"testing"
 	"time"
 )
+
+func configureDatapathProbeTLS(t *testing.T) {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 120))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	probeIP := netip.MustParseAddr("198.19.0.2")
+	template := x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: probeIP.String()}, IPAddresses: []net.IP{net.IP(probeIP.AsSlice())}, NotBefore: now.Add(-time.Minute), NotAfter: now.Add(time.Hour), IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment | x509.KeyUsageCertSign, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
+	certificate, err := x509.CreateCertificate(rand.Reader, &template, &template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	certificatePath := filepath.Join(dir, "fixture.pem")
+	keyPath := filepath.Join(dir, "fixture-key.pem")
+	err = os.WriteFile(certificatePath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificate}), 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PACKAGE_TLS_CERT", certificatePath)
+	t.Setenv("PACKAGE_TLS_KEY", keyPath)
+	t.Setenv("SSL_CERT_FILE", certificatePath)
+}
 
 // Only run inside a disposable full-kernel VM with no external NIC. The VM
 // fixture owns all namespaces, routes and firewall rules it creates.
@@ -32,6 +77,7 @@ func TestPackageEgressDatapath(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
 	defer cancel()
+	configureDatapathProbeTLS(t)
 	command := func(name string, args ...string) string {
 		t.Helper()
 		out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
@@ -42,7 +88,7 @@ func TestPackageEgressDatapath(t *testing.T) {
 		return string(out)
 	}
 
-	for _, ns := range []string{"pkg-wan", "pkg-a", "pkg-b", "pkg-direct", "pkg-old", "pkg-unknown"} {
+	for _, ns := range []string{"pkg-wan", "pkg-a", "pkg-b", "pkg-direct", "pkg-old", "pkg-unknown", "pkg-failover"} {
 		command("ip", "netns", "add", ns)
 		command("ip", "-n", ns, "link", "set", "lo", "up")
 	}
@@ -65,7 +111,7 @@ func TestPackageEgressDatapath(t *testing.T) {
 	command("ip", "link", "add", "incusbr0", "type", "bridge")
 	command("ip", "addr", "add", "10.10.0.1/24", "dev", "incusbr0")
 	command("ip", "link", "set", "incusbr0", "up")
-	for i, item := range []struct{ ns, nic string }{{"pkg-a", "ipgaaaaaaaaaaa"}, {"pkg-b", "ipgbbbbbbbbbbb"}, {"pkg-direct", "ipgccccccccccc"}, {"pkg-old", "old-veth"}, {"pkg-unknown", "ipgddddddddddd"}} {
+	for i, item := range []struct{ ns, nic string }{{"pkg-a", "ipgaaaaaaaaaaa"}, {"pkg-b", "ipgbbbbbbbbbbb"}, {"pkg-direct", "ipgccccccccccc"}, {"pkg-old", "old-veth"}, {"pkg-unknown", "ipgddddddddddd"}, {"pkg-failover", "ipg" + strings.Repeat("e", 11)}} {
 		command("ip", "link", "add", item.nic, "type", "veth", "peer", "name", "eth0", "netns", item.ns)
 		command("ip", "link", "set", item.nic, "master", "incusbr0")
 		command("ip", "link", "set", item.nic, "up")
@@ -86,6 +132,17 @@ func TestPackageEgressDatapath(t *testing.T) {
 	}
 
 	in := testGroups()
+	failover := in.Groups[0]
+	failover.Key = "p3"
+	failover.Egress.Strategy = "failover"
+	failover.Egress.ProbeURL = "https://198.19.0.2/"
+	failover.Egress.ProxyNodeIDs = []int{1, 2}
+	failover.Nodes = []Node{
+		{ID: 1, Outbound: json.RawMessage(`{"protocol":"socks","settings":{"servers":[{"address":"198.18.0.2","port":1080}]}}`)},
+		{ID: 2, Outbound: json.RawMessage(`{"protocol":"socks","settings":{"servers":[{"address":"198.18.0.2","port":1081}]}}`)},
+	}
+	in.Groups = append(in.Groups, failover)
+	in.Bindings = append(in.Bindings, EgressBinding{InstanceName: "pkg-failover", Generation: 1, Mode: "profile", GroupKey: "p3", Nics: []EgressNIC{{HostName: "ipg" + strings.Repeat("e", 11), IPv4: "10.10.0.7", Bridge: "incusbr0"}}})
 	runtime, err := allocateGroups(in.Groups, map[string]groupRuntime{})
 	if err != nil {
 		t.Fatal(err)
@@ -103,14 +160,14 @@ func TestPackageEgressDatapath(t *testing.T) {
 	// Repeated reconciliation must not accumulate routing rules. Group rules
 	// must win over the legacy 17420 mask, which also matches group marks.
 	{
-		err := prepareGroupNamespace(ctx, runtime["v1"], []string{"1.1.1.1"})
+		err := prepareGroupNamespace(ctx, runtime["p1"], []string{"1.1.1.1"})
 		if err != nil {
 			t.Fatal(err)
 		}
 	}
 
 	hostRulesText := command("ip", "rule", "show")
-	if strings.Count(hostRulesText, "fwmark "+runtime["v1"].mark()+"/"+groupMask+" lookup "+runtime["v1"].table()) != 1 {
+	if strings.Count(hostRulesText, "fwmark "+runtime["p1"].mark()+"/"+groupMask+" lookup "+runtime["p1"].table()) != 1 {
 		t.Fatalf("duplicate or missing group route rule: %s", hostRulesText)
 	}
 	{
@@ -134,7 +191,7 @@ func TestPackageEgressDatapath(t *testing.T) {
 		}
 	}
 
-	install(map[string]bool{"v1": true, "v2": true})
+	install(map[string]bool{"p1": true, "p2": true, "p3": true})
 	legacy := testInstruction()
 	legacy.SchemaVersion = 2
 	legacy.Egress.Strategy = "failover"
@@ -257,6 +314,11 @@ func TestPackageEgressDatapath(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	groupAPI := coreAPIPath(runtime["p3"].dir())
+	err = WaitCoreAPI(ctx, groupAPI, true)
+	if err != nil {
+		t.Fatal("multi-node group Xray API did not become ready", err)
+	}
 	{
 		err := overrideCore(ctx, coreAPIPath(stateDir), nodeTag(1))
 		if err != nil {
@@ -265,7 +327,7 @@ func TestPackageEgressDatapath(t *testing.T) {
 	}
 	command("nft", "add", "element", "inet", "incudal_egress", "ready", "{", mark, "}")
 
-	for _, ns := range []string{"", runtime["v1"].ns()} {
+	for _, ns := range []string{"", runtime["p1"].ns()} {
 		ns := ns
 		args := []string{"nft", "-f", "-"}
 		if ns != "" {
@@ -296,7 +358,7 @@ func TestPackageEgressDatapath(t *testing.T) {
 			_ = monitor.Wait()
 			if t.Failed() {
 				t.Logf("trace ns=%s: %s", ns, trace.String())
-				for _, args := range [][]string{{"ip", "rule", "show"}, {"ip", "route", "show", "table", "all"}, {"ip", "-n", runtime["v1"].ns(), "rule", "show"}} {
+				for _, args := range [][]string{{"ip", "rule", "show"}, {"ip", "route", "show", "table", "all"}, {"ip", "-n", runtime["p1"].ns(), "rule", "show"}} {
 					out, _ := exec.Command(args[0], args[1:]...).CombinedOutput()
 					t.Logf("%s", out)
 				}
@@ -304,7 +366,7 @@ func TestPackageEgressDatapath(t *testing.T) {
 		})
 	}
 
-	client := func(ns, target, want string, success bool) {
+	client := func(ns, target, want string, success bool) string {
 		t.Helper()
 		cmd := exec.CommandContext(ctx, "ip", "netns", "exec", ns, exe, "-test.run=^TestPackageEndpoint$", "-test.v")
 		cmd.Env = append(os.Environ(), "PACKAGE_CLIENT_TARGET="+target)
@@ -314,6 +376,115 @@ func TestPackageEgressDatapath(t *testing.T) {
 		}
 
 		t.Logf("%s %s: success=%v %s", ns, target, success, out)
+		return string(out)
+	}
+
+	failoverHealth := &groupHealthState{}
+	group := in.Groups[2]
+	if !groupHealthy(ctx, group, runtime["p3"], failoverHealth) || failoverHealth.active != 1 {
+		t.Fatalf("two-node failover group did not select the healthy first proxy: %#v", failoverHealth)
+	}
+	client("pkg-failover", "http://198.19.0.2/", "198.19.0.3", true)
+	client("pkg-failover", "dns:10.10.0.1:53", "198.19.0.3", true)
+	failureRule := `table inet fixture_proxy_failure {
+ chain forward { type filter hook forward priority -400; policy accept;
+  ip daddr 198.18.0.2 tcp dport 1080 drop
+ }
+}`
+	err = nft(ctx, failureRule, false)
+	if err != nil {
+		t.Fatal("could not isolate the primary proxy failure", err)
+	}
+	if !groupHealthy(ctx, group, runtime["p3"], failoverHealth) || failoverHealth.active != 2 {
+		t.Fatalf("failed primary did not switch the group to its backup: %#v", failoverHealth)
+	}
+	client("pkg-failover", "http://198.19.0.2/", "198.19.0.4", true)
+	client("pkg-failover", "dns:10.10.0.1:53", "198.19.0.4", true)
+	err = nft(ctx, "delete table inet fixture_proxy_failure", false)
+	if err != nil {
+		t.Fatal("could not restore the primary proxy fixture", err)
+	}
+	// Exercise native Xray selection separately from failover's explicit API override.
+	restartGroupCore := func(strategy string) {
+		t.Helper()
+		err = cores["p3"].Process.Kill()
+		if err != nil {
+			t.Fatal("could not stop previous isolated group core", err)
+		}
+		err = cores["p3"].Wait()
+		if err != nil && !strings.Contains(err.Error(), "killed") {
+			t.Fatal("could not reap previous isolated group core", err)
+		}
+		group.Egress.Strategy = strategy
+		if strategy == "leastPing" {
+			group.Egress.ProbeIntervalSeconds = 10
+		}
+		config, configErr := groupCoreConfig(group, runtime["p3"])
+		if configErr != nil {
+			t.Fatal("could not generate native selection config", configErr)
+		}
+		path := filepath.Join(dir, "p3-"+strategy+".json")
+		err = os.WriteFile(path, config, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = os.Remove(coreAPIPath(runtime["p3"].dir()))
+		cores["p3"] = start(runtime["p3"].ns(), core, "run", "-config", path)
+		err = WaitCoreAPI(ctx, groupAPI, false)
+		if err != nil {
+			t.Fatal("native strategy Xray API did not become ready", strategy, err)
+		}
+	}
+	restartGroupCore("balance")
+	if !groupHealthy(ctx, group, runtime["p3"], &groupHealthState{}) {
+		t.Fatal("balanced group failed HTTPS and DNS readiness checks")
+	}
+	balanceExits := map[string]bool{}
+	for i := 0; i < 8; i++ {
+		output := client("pkg-failover", "http://198.19.0.2/", "", true)
+		if strings.Contains(output, "198.19.0.3") {
+			balanceExits["198.19.0.3"] = true
+		}
+		if strings.Contains(output, "198.19.0.4") {
+			balanceExits["198.19.0.4"] = true
+		}
+	}
+	if len(balanceExits) != 2 {
+		t.Fatalf("native Xray balance did not use both exits over fresh connections: %#v", balanceExits)
+	}
+	restartGroupCore("leastPing")
+	if !groupHealthy(ctx, group, runtime["p3"], &groupHealthState{}) {
+		t.Fatal("leastPing group failed HTTPS and DNS readiness checks")
+	}
+	initial := client("pkg-failover", "http://198.19.0.2/", "", true)
+	if strings.Contains(initial, "198.18.0.1") || (!strings.Contains(initial, "198.19.0.3") && !strings.Contains(initial, "198.19.0.4")) {
+		t.Fatalf("leastPing did not use a healthy proxy exit: %s", initial)
+	}
+	initialDNS := client("pkg-failover", "dns:10.10.0.1:53", "", true)
+	if strings.Contains(initialDNS, "198.18.0.1") || (!strings.Contains(initialDNS, "198.19.0.3") && !strings.Contains(initialDNS, "198.19.0.4")) {
+		t.Fatalf("leastPing DNS did not use a healthy proxy exit: %s", initialDNS)
+	}
+	failureRule = `table inet fixture_proxy_failure {
+ chain forward { type filter hook forward priority -400; policy accept;
+  ip daddr 198.18.0.2 tcp dport 1080 drop
+ }
+}`
+	err = nft(ctx, failureRule, false)
+	if err != nil {
+		t.Fatal("could not isolate the primary proxy failure for leastPing", err)
+	}
+	time.Sleep(12 * time.Second)
+	backup := client("pkg-failover", "http://198.19.0.2/", "198.19.0.4", true)
+	if strings.Contains(backup, "198.18.0.1") {
+		t.Fatalf("leastPing failed open to host direct after primary failure: %s", backup)
+	}
+	backupDNS := client("pkg-failover", "dns:10.10.0.1:53", "198.19.0.4", true)
+	if strings.Contains(backupDNS, "198.18.0.1") {
+		t.Fatalf("leastPing DNS failed open to host direct after primary failure: %s", backupDNS)
+	}
+	err = nft(ctx, "delete table inet fixture_proxy_failure", false)
+	if err != nil {
+		t.Fatal("could not restore primary proxy after native strategy checks", err)
 	}
 
 	for _, item := range []struct{ ns, want string }{{"pkg-a", "198.19.0.3"}, {"pkg-b", "198.19.0.4"}, {"pkg-direct", "198.18.0.1"}, {"pkg-old", "198.19.0.5"}} {
@@ -341,16 +512,16 @@ func TestPackageEgressDatapath(t *testing.T) {
 		}
 	}
 
-	_ = cores["v1"].Process.Kill()
-	_ = cores["v1"].Wait()
-	command("nft", "delete", "element", "inet", "incudal_package_egress", "ready", "{", runtime["v1"].mark(), "}")
+	_ = cores["p1"].Process.Kill()
+	_ = cores["p1"].Wait()
+	command("nft", "delete", "element", "inet", "incudal_package_egress", "ready", "{", runtime["p1"].mark(), "}")
 	client("pkg-a", "http://198.19.0.2/", "", false)
 	client("pkg-b", "http://198.19.0.2/", "198.19.0.4", true)
 	client("pkg-direct", "http://198.19.0.2/", "198.18.0.1", true)
 	client("pkg-old", "http://198.19.0.2/", "198.19.0.5", true)
 	// Missing gateway route must not fall back to the host's native default.
-	command("ip", "route", "del", "default", "via", runtime["v1"].ip(), "dev", runtime["v1"].iface(), "table", runtime["v1"].table())
-	install(map[string]bool{"v1": true, "v2": true})
+	command("ip", "route", "del", "default", "via", runtime["p1"].ip(), "dev", runtime["p1"].iface(), "table", runtime["p1"].table())
+	install(map[string]bool{"p1": true, "p2": true})
 	client("pkg-a", "http://198.19.0.2/", "", false)
 	client("pkg-b", "http://198.19.0.2/", "198.19.0.4", true)
 	// Boot restoration installs bindings with no ready groups; native direct remains usable.
@@ -365,7 +536,7 @@ func TestPackageEgressDatapath(t *testing.T) {
 	}
 
 	client("pkg-direct", "http://198.19.0.2/", "", false)
-	install(map[string]bool{"v2": true})
+	install(map[string]bool{"p2": true})
 	client("pkg-b", "http://198.19.0.2/", "198.19.0.4", true)
 }
 
@@ -544,6 +715,18 @@ func TestPackageEndpoint(t *testing.T) {
 		}
 	}()
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = fmt.Fprintf(w, "fixture:wan:%s", r.RemoteAddr) })
+	certificate, err := tls.LoadX509KeyPair(os.Getenv("PACKAGE_TLS_CERT"), os.Getenv("PACKAGE_TLS_KEY"))
+	if err != nil {
+		t.Fatal("fixture TLS identity unavailable", err)
+	}
+	tlsListener, err := net.Listen("tcp4", ":443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tlsServer := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "fixture:tls") })}
+	go func() {
+		_ = tlsServer.Serve(tls.NewListener(tlsListener, &tls.Config{Certificates: []tls.Certificate{certificate}, MinVersion: tls.VersionTLS12}))
+	}()
 	go func() { _ = http.ListenAndServe(":25", handler) }()
 	t.Fatal(http.ListenAndServe(":80", handler))
 }

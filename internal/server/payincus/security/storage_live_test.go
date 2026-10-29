@@ -142,4 +142,42 @@ func TestZFSNativeLifecycle(t *testing.T) {
 	if err != nil || string(data) != "isolated encrypted fixture" {
 		t.Fatal("data did not survive pool export/import")
 	}
+	item := ResumeInstance{Project: "default", Name: "native-fixture", UUID: "native-fixture-uuid"}
+	m.SetSnapshot(func(context.Context) ([]ResumeInstance, error) { return []ResumeInstance{item}, nil })
+	m.SetStop(func(context.Context) error { return nil })
+	if err := m.Shutdown(ctx); err != nil {
+		t.Fatal("normal shutdown failed", err)
+	}
+	state, err = m.Status()
+	if err != nil || state.Locked || !state.RecoveryPending {
+		t.Fatal("normal shutdown must preserve unlocked recovery state", state, err)
+	}
+	keyStatus, err := m.storage.property(ctx, target.Dataset, "keystatus")
+	if err != nil || keyStatus != "unavailable" {
+		t.Fatal("normal shutdown did not unload the ZFS key", keyStatus, err)
+	}
+	restored := false
+	m.SetStartupRecovery(func(context.Context) ([]ResumeInstance, error) { return []ResumeInstance{item}, nil }, func(ctx context.Context, got ResumeInstance) error {
+		if got != item {
+			return errors.New("wrong native recovery identity")
+		}
+		keyStatus, err := m.storage.property(ctx, target.Dataset, "keystatus")
+		if err != nil || keyStatus != "available" {
+			return errors.New("startup restored workload before loading ZFS key")
+		}
+		restored = true
+		return nil
+	})
+	if err := m.Startup(ctx, []StartupKey{{Dataset: target.Dataset, Key: string(key)}}); err != nil {
+		t.Fatal("normal startup failed to reload key and restore fixture", err)
+	}
+	state, err = m.Status()
+	if err != nil || state.Locked || state.RecoveryPending || !restored {
+		t.Fatal("normal startup did not finish unlocked recovery", state, err)
+	}
+	run("zfs", "mount", target.Dataset)
+	data, err = os.ReadFile(file)
+	if err != nil || string(data) != "isolated encrypted fixture" {
+		t.Fatal("normal shutdown/startup lost encrypted data", err)
+	}
 }

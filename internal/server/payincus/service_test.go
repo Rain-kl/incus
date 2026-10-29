@@ -2,6 +2,7 @@ package payincus
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -49,8 +50,16 @@ func TestEndpointContracts(t *testing.T) {
 		{"GET", "/report?interval=60", "", "", 200},
 		{"GET", "/report?interval=10", "", "", 200},
 		{"GET", "/report?interval=5", "", "", 200},
-		{"GET", "/report?interval=4", "", "", 400},
+		{"GET", "/report?interval=0", "", "", 400},
 		{"GET", "/report?interval=-1", "", "", 400},
+		{"GET", "/xray", "", "xray.inspect", 200},
+		{"POST", "/xray", `{"action":"test"}`, "xray.test", 200},
+		{"POST", "/xray", `{"action":"restart"}`, "xray.restart", 200},
+		{"POST", "/xray", `{"action":"reconfigure"}`, "xray.reconfigure", 200},
+		{"POST", "/xray", `{"action":"inspect"}`, "", 400},
+		{"POST", "/xray", `{"action":"shell"}`, "", 400},
+		{"POST", "/xray", `broken`, "", 400},
+		{"PUT", "/xray", `{}`, "", 405},
 		{"POST", "/caddy", `{"action":"install"}`, "", 200},
 		{"POST", "/caddy", `{"action":"uninstall"}`, "", 200},
 		{"POST", "/caddy", `{"action":"shell"}`, "", 400},
@@ -89,6 +98,29 @@ func TestEndpointContracts(t *testing.T) {
 				t.Fatalf("called %q, expected %q", engine.method, tc.control)
 			}
 		})
+	}
+}
+
+func TestXrayLocalOnlyAndControlErrors(t *testing.T) {
+	engine := &fakeEngine{}
+	service := newService(context.Background(), true, engine)
+	remote := httptest.NewRequest(http.MethodGet, Prefix+"/xray", nil)
+	remote.TLS = &tls.ConnectionState{}
+	response := httptest.NewRecorder()
+	service.ServeHTTP(response, remote)
+	if response.Code != http.StatusForbidden || engine.method != "" {
+		t.Fatalf("remote request reached local Xray maintenance: status=%d method=%q", response.Code, engine.method)
+	}
+	for _, tc := range []struct {
+		err  error
+		code int
+	}{{errors.New("busy"), 409}, {context.Canceled, 408}, {context.DeadlineExceeded, 504}, {errors.New("sensitive fixture detail"), 500}} {
+		service := newService(context.Background(), true, &fakeEngine{err: tc.err})
+		response := httptest.NewRecorder()
+		service.ServeHTTP(response, httptest.NewRequest(http.MethodPost, Prefix+"/xray", strings.NewReader(`{"action":"reconfigure"}`)))
+		if response.Code != tc.code || strings.Contains(response.Body.String(), "sensitive fixture detail") {
+			t.Fatalf("Xray operation error was not safely mapped: %d %s", response.Code, response.Body.String())
+		}
 	}
 }
 
@@ -287,15 +319,22 @@ func TestStorageEncryptionNamespaceHTTPContract(t *testing.T) {
 		} `json:"metadata"`
 	}
 	err = json.NewDecoder(resp.Body).Decode(&result)
-	if err != nil || !strings.Contains(strings.Join(result.Metadata.Extensions, ","), nodesecurity.StorageExtension) {
-		t.Fatal("storage encryption capability is not discoverable", err)
+	if err != nil {
+		t.Fatal("capability response could not be decoded", err)
+	}
+	advertised := strings.Join(result.Metadata.Extensions, ",")
+	for _, extension := range []string{nodesecurity.StorageExtension, nodesecurity.StartupExtension, XrayMaintenanceExtension} {
+		if !strings.Contains(advertised, extension) {
+			t.Fatalf("PayIncus extension %q is not discoverable", extension)
+		}
 	}
 }
 
 func TestLockedHeartbeatKeepsOnlyRecoveryStorage(t *testing.T) {
 	service := newService(context.Background(), true, &fakeEngine{})
 	service.guard = nodesecurity.New(filepath.Join(t.TempDir(), "guard"))
-	if err := service.guard.Trigger("fixture"); err != nil {
+	err := service.guard.Trigger("fixture")
+	if err != nil {
 		t.Fatal(err)
 	}
 	service.collect = func(string, int) map[string]any { t.Fatal("locked report collected instance/host data"); return nil }

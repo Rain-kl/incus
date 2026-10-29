@@ -1401,7 +1401,7 @@ func (d *Daemon) init() error {
 
 	d.events.SetLocalLocation(d.serverName)
 
-	// PayIncus: persist restart lock before any pool import or instance auto-recovery.
+	// PayIncus: retain alarms but fence normal startup for control-plane key recovery; see FEATURES.md.
 	if os.Getenv("INCUS_PAYINCUS") == "1" {
 		guardErr := nodesecurity.Default().Boot()
 		if guardErr != nil {
@@ -1836,6 +1836,8 @@ func closeGlobalDatabase(clusterDB *db.Cluster) {
 // Stop stops the shared daemon.
 func (d *Daemon) Stop(ctx context.Context, sig os.Signal) error {
 	logger.Info("Starting shutdown sequence", logger.Ctx{"signal": sig})
+	// PayIncus: report verified key-unload failures through the existing shutdown error result.
+	var payincusStopErr error
 
 	s := d.State()
 
@@ -1926,6 +1928,14 @@ func (d *Daemon) Stop(ctx context.Context, sig os.Signal) error {
 		case <-done:
 		}
 
+		// PayIncus: normal stops checkpoint workloads and unload keys without setting the alarm lock.
+		if os.Getenv("INCUS_PAYINCUS") == "1" {
+			payincusStopErr = nodesecurity.Default().Shutdown(ctx)
+			if payincusStopErr != nil {
+				logger.Error("Node storage shutdown incomplete", logger.Ctx{"err": payincusStopErr})
+			}
+		}
+
 		// Full shutdown requested.
 		if sig == unix.SIGPWR {
 			if !evacuated {
@@ -1978,6 +1988,8 @@ func (d *Daemon) Stop(ctx context.Context, sig os.Signal) error {
 		}
 	}
 
+	// PayIncus: a failed key unload must not be reported as a successful daemon stop.
+	trackError(payincusStopErr, "Unload node storage")
 	trackError(d.tasks.Stop(3*time.Second), "Stop tasks")                // Give tasks a bit of time to cleanup.
 	trackError(d.clusterTasks.Stop(3*time.Second), "Stop cluster tasks") // Give tasks a bit of time to cleanup.
 

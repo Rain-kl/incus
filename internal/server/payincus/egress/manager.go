@@ -29,6 +29,7 @@ type Manager struct {
 	groupHashes         map[string]string
 	groupReady          map[string]bool
 	groupRefs           map[string]string
+	groupHealth         map[string]*groupHealthState
 	mu                  sync.Mutex
 	dir                 string
 	desired             *Instruction
@@ -177,6 +178,14 @@ func (m *Manager) Probe(ctx context.Context, request ProbeRequest) ([]ProbeResul
 // HandleControl validates versioned network and probe payloads.
 func (m *Manager) HandleControl(ctx context.Context, method string, params json.RawMessage) (any, error) {
 	switch method {
+	case "xray.inspect":
+		return m.Inspect(), nil
+	case "xray.test":
+		return m.TestConfigured(ctx)
+	case "xray.restart":
+		return m.Maintain(ctx, false)
+	case "xray.reconfigure":
+		return m.Maintain(ctx, true)
 	case "network.apply", "network.apply.v2":
 		var in Instruction
 		if json.Unmarshal(params, &in) != nil || in.Revision <= 0 || (in.Egress.Mode != "off" && in.Egress.Mode != "direct" && in.Egress.Mode != "proxy") || len(in.Nodes) > 16 || len(in.Firewall.Rules) > 200 {

@@ -89,13 +89,13 @@ func AllowedWhileLocked(method, path string) bool {
 			return true
 		}
 		switch path {
-		case "/1.0/payincus/storage", "/1.0", "/1.0/payincus", "/1.0/payincus/report", "/1.0/payincus/security", "/1.0/payincus/security/report":
+		case "/1.0/payincus/security/startup", "/1.0/payincus/storage", "/1.0", "/1.0/payincus", "/1.0/payincus/report", "/1.0/payincus/security", "/1.0/payincus/security/report":
 			return true
 		}
 	}
 	if method == http.MethodPost {
 		switch path {
-		case "/1.0/payincus/storage/unlock-pool", "/1.0/payincus/storage/forget", "/1.0/payincus/storage/unlock", "/1.0/payincus/security/ack", "/1.0/payincus/security/policy", "/1.0/payincus/security/recover", "/1.0/payincus/security/lock", "/1.0/payincus/security/unlock", "/1.0/payincus/security/resume":
+		case "/1.0/payincus/security/startup", "/1.0/payincus/storage/unlock-pool", "/1.0/payincus/storage/forget", "/1.0/payincus/storage/unlock", "/1.0/payincus/security/ack", "/1.0/payincus/security/policy", "/1.0/payincus/security/recover", "/1.0/payincus/security/lock", "/1.0/payincus/security/unlock", "/1.0/payincus/security/resume":
 			return true
 		}
 	}

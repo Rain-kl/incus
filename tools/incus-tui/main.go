@@ -16,7 +16,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
-var version = "development"
+var version = "v2.0.0"
 
 type field struct {
 	label, value string
@@ -62,11 +62,21 @@ var menu = []menuItem{
 	{"初始化", "initialize"},
 	{"接入", "token"},
 	{"ZFS", "zfs"},
+	{"Xray", "xray"},
 	{"修复", "repair"},
 	{"更新", "update"},
 	{"更多", "advanced"},
 	{"刷新", "refresh"},
 	{"退出", "quit"},
+}
+
+var xrayMenu = []menuItem{
+	{"查看节点与运行状态", "xray-inspect"},
+	{"测试代理节点", "xray-test"},
+	{"重启 Xray 服务", "xray-restart"},
+	{"查看 Xray 日志", "xray-logs"},
+	{"重新配置 Xray（重建运行环境）", "xray-reconfigure"},
+	{"返回主菜单", "back"},
 }
 
 var advancedMenu = []menuItem{
@@ -104,6 +114,8 @@ var zfsManagementMenu = []menuItem{
 
 func (m model) currentMenu() []menuItem {
 	switch m.menuGroup {
+	case "xray":
+		return xrayMenu
 	case "advanced":
 		return advancedMenu
 	case "zfs":
@@ -362,7 +374,17 @@ func (m model) selectMenu() (tea.Model, tea.Cmd) {
 		return m.zfsMenu(action)
 	}
 	switch action {
-	case "zfs", "advanced", "repair", "update":
+	case "xray-inspect", "xray-test", "xray-restart", "xray-reconfigure":
+		action = strings.TrimPrefix(action, "xray-")
+		m.page = "confirm"
+		m.message = "通过本机 Incus API 执行 Xray 操作：" + action
+		if action == "reconfigure" {
+			m.message = "重建本节点托管的 Xray 服务、命名空间、网卡与生成配置，保留控制端策略及流量阻断保护。会中断代理连接；失败后保持阻断，可重试。"
+		}
+		m.confirm = func(ctx context.Context) error { return m.backend.xray(ctx, action) }
+	case "xray-logs":
+		return m, tea.ExecProcess(exec.Command("journalctl", "-u", "incudal-xray.service", "-u", "incudal-egress-*.service", "-n", "100", "-f", "--no-pager"), func(err error) tea.Msg { return resultMsg{text: "Xray 日志查看已结束", err: err} })
+	case "xray", "zfs", "advanced", "repair", "update":
 		m.menuGroup = action
 		m.cursor = 0
 	case "back":
@@ -577,6 +599,8 @@ func (m model) render() string {
 		items := m.currentMenu()
 		if m.menuGroup == "advanced" {
 			out.WriteString("高级维护\n\n")
+		} else if m.menuGroup == "xray" {
+			out.WriteString("Xray 管理\n\n")
 		} else if m.menuGroup == "zfs" {
 			out.WriteString("ZFS 管理\n\n")
 		} else if m.menuGroup == "repair" {

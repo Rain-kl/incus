@@ -362,8 +362,8 @@ func instanceStart(s *state.State, inst instance.Instance) error {
 }
 
 func instancesStart(s *state.State, instances []instance.Instance) {
-	// PayIncus: do not queue boot/retry starts that could run after a later manual recovery.
-	if nodesecurity.Check() != nil {
+	// PayIncus: defer native boot scheduling until control-plane key recovery; retain alarm enforcement.
+	if nodesecurity.Check() != nil || (os.Getenv("INCUS_PAYINCUS") == "1" && nodesecurity.Default().StartupPending()) {
 		return
 	}
 

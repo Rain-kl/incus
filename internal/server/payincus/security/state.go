@@ -64,17 +64,20 @@ type ResumeInstance struct {
 
 // State persists policy and lock state separately from storage outcomes.
 type State struct {
-	ResumeCaptured   bool                   `json:"resumeCaptured"`
-	ResumeInstances  []ResumeInstance       `json:"resumeInstances"`
-	Enabled          bool                   `json:"enabled"`
-	Locked           bool                   `json:"locked"`
-	Revision         uint64                 `json:"revision"`
-	Reason           string                 `json:"reason"`
-	UpdatedAt        time.Time              `json:"updatedAt"`
-	Targets          []Target               `json:"targets"`
-	Results          []Result               `json:"results"`
-	StorageLocks     map[string]StorageLock `json:"storageLocks,omitempty"`
-	DestroyedStorage map[string]string      `json:"destroyedStorage,omitempty"`
+	StartupRecovering bool                   `json:"startupRecovering"`
+	ControlGeneration uint64                 `json:"controlGeneration"`
+	RecoveryPending   bool                   `json:"recoveryPending"`
+	ResumeCaptured    bool                   `json:"resumeCaptured"`
+	ResumeInstances   []ResumeInstance       `json:"resumeInstances"`
+	Enabled           bool                   `json:"enabled"`
+	Locked            bool                   `json:"locked"`
+	Revision          uint64                 `json:"revision"`
+	Reason            string                 `json:"reason"`
+	UpdatedAt         time.Time              `json:"updatedAt"`
+	Targets           []Target               `json:"targets"`
+	Results           []Result               `json:"results"`
+	StorageLocks      map[string]StorageLock `json:"storageLocks,omitempty"`
+	DestroyedStorage  map[string]string      `json:"destroyedStorage,omitempty"`
 }
 
 // Event contains sanitized CLI metadata without arguments or secrets.
@@ -90,15 +93,19 @@ type Event struct {
 
 // Manager coordinates cross-process state, delivery queues and containment.
 type Manager struct {
-	dir          string
-	mu           sync.Mutex
-	actions      sync.Mutex
-	starts       sync.RWMutex
-	storage      *Storage
-	stop         func(context.Context) error
-	snapshot     func(context.Context) ([]ResumeInstance, error)
-	poolSnapshot func(context.Context, string) ([]ResumeInstance, error)
-	poolStop     func(context.Context, string) error
+	dir             string
+	mu              sync.Mutex
+	actions         sync.Mutex
+	starts          sync.RWMutex
+	storage         *Storage
+	stop            func(context.Context) error
+	snapshot        func(context.Context) ([]ResumeInstance, error)
+	poolSnapshot    func(context.Context, string) ([]ResumeInstance, error)
+	poolStop        func(context.Context, string) error
+	startupSnapshot func(context.Context) ([]ResumeInstance, error)
+	restore         func(context.Context, ResumeInstance) error
+	startupMu       sync.Mutex
+	startupPrepared bool
 }
 
 // Directory returns the non-secret node state location.
@@ -268,19 +275,28 @@ func (m *Manager) beginStart() (func(), error) {
 		m.starts.RUnlock()
 		return nil, err
 	}
+	_, statErr := os.Stat(m.dir)
+	if os.IsNotExist(statErr) {
+		return m.starts.RUnlock, nil
+	}
+	state, err := m.Status()
+	if err != nil || state.RecoveryPending {
+		m.starts.RUnlock()
+		return nil, errors.New("instance startup temporarily unavailable")
+	}
 	return m.starts.RUnlock, nil
 }
 
-// Boot retains lockdown across daemon restarts.
+// Boot preserves alarms and fences normal restarts until the control plane authorizes recovery.
 func (m *Manager) Boot() error {
 	return m.transact(true, func(s *State) error {
-		if s.Enabled || s.Locked {
-			if !s.Locked {
-				s.ResumeCaptured = false
-			}
-			s.Locked = true
-			s.Reason = "daemon_restart"
+		if s.Locked {
+			// Retry verified containment after a crash, retaining the original recovery identities.
 			s.Results = nil
+			s.StartupRecovering = false
+		} else {
+			s.RecoveryPending = s.Enabled || len(s.Targets) > 0 || len(s.ResumeInstances) > 0
+			s.StartupRecovering = s.RecoveryPending
 		}
 		return nil
 	})
@@ -298,7 +314,10 @@ func (m *Manager) Configure(enabled bool, revision uint64) error {
 }
 
 // Recover requires the current revision and usable registered storage.
-func (m *Manager) Recover(revision uint64) error {
+func (m *Manager) Recover(revision uint64) error { return m.RecoverApproved(revision, 0) }
+
+// RecoverApproved fences delayed controller decisions already covered by this explicit approval.
+func (m *Manager) RecoverApproved(revision, generation uint64) error {
 	if !m.actions.TryLock() {
 		return errors.New("containment is still in progress")
 	}
@@ -333,7 +352,12 @@ func (m *Manager) Recover(revision uint64) error {
 		if s.Revision != revision {
 			return errors.New("security revision changed; refresh status")
 		}
+		if generation > s.ControlGeneration {
+			s.ControlGeneration = generation
+		}
 		s.Locked = false
+		s.RecoveryPending = false
+		s.StartupRecovering = false
 		s.Reason = ""
 		s.Results = nil
 		return nil
@@ -370,6 +394,7 @@ func (m *Manager) Trigger(reason string) error {
 			s.ResumeCaptured = false
 		}
 		s.Locked = true
+		s.StartupRecovering = false
 		s.Reason = reason
 		s.Results = nil
 		return nil
@@ -384,6 +409,7 @@ func (m *Manager) Audit(command string, critical bool, uid, pid int) (bool, erro
 		if critical && s.Enabled && !s.Locked {
 			s.ResumeCaptured = false
 			s.Locked = true
+			s.StartupRecovering = false
 			s.Reason = "cli:" + command
 			s.Results = nil
 		}
@@ -574,7 +600,11 @@ func (m *Manager) Run(ctx context.Context) {
 			return
 		case <-ticker.C:
 			actionCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
-			m.Lockdown(actionCtx)
+			// Complete crash cleanup even when the connector is offline or has not been configured.
+			prepareErr := m.PrepareStartup(actionCtx)
+			if prepareErr == nil {
+				m.Lockdown(actionCtx)
+			}
 			cancel()
 		}
 	}
@@ -591,4 +621,25 @@ func (m *Manager) Report() map[string]any {
 		return map[string]any{"state": State{Locked: true, Reason: "audit_unavailable"}, "events": []Event{}}
 	}
 	return map[string]any{"state": state, "events": events}
+}
+
+// TriggerControl is idempotent and ignores controller decisions superseded by an explicit recovery.
+func (m *Manager) TriggerControl(generation uint64) error {
+	if generation == 0 {
+		return errors.New("invalid controller decision")
+	}
+	return m.transact(true, func(s *State) error {
+		if generation <= s.ControlGeneration {
+			return nil
+		}
+		s.ControlGeneration = generation
+		if !s.Locked {
+			s.ResumeCaptured = false
+		}
+		s.Locked = true
+		s.StartupRecovering = false
+		s.Reason = "panel_request"
+		s.Results = nil
+		return nil
+	})
 }

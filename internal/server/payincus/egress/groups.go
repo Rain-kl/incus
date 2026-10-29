@@ -18,11 +18,11 @@ import (
 )
 
 var (
-	groupKeyPattern = regexp.MustCompile(`^v[1-9][0-9]{0,9}$`)
+	groupKeyPattern = regexp.MustCompile(`^p[1-9][0-9]{0,9}$`)
 	groupNICPattern = regexp.MustCompile(`^ipg[a-f0-9]{11}$`)
 )
 
-// EgressGroup describes an immutable package exit and its proxy nodes.
+// EgressGroup describes a shared mutable policy exit and its proxy nodes.
 type EgressGroup struct {
 	Key    string `json:"key"`
 	Egress Policy `json:"egress"`
@@ -56,6 +56,14 @@ type EgressGroupStatus struct {
 type EgressBindingStatus struct {
 	InstanceName string `json:"instanceName"`
 	Generation   int    `json:"generation"`
+}
+
+func groupTags(group EgressGroup) []string {
+	tags := make([]string, 0, len(group.Nodes))
+	for _, node := range group.Nodes {
+		tags = append(tags, nodeTag(node.ID))
+	}
+	return tags
 }
 
 func groupCoreConfig(group EgressGroup, g groupRuntime) ([]byte, error) {
@@ -110,14 +118,34 @@ func groupCoreConfig(group EgressGroup, g groupRuntime) ([]byte, error) {
 		}
 	}
 
-	outbounds = append(outbounds, map[string]any{"tag": "group-dns-out", "protocol": "dns", "settings": map[string]any{"network": "tcp", "address": "1.1.1.1", "port": 53, "nonIPQuery": "skip"}, "proxySettings": map[string]any{"tag": nodeTag(group.Nodes[0].ID)}})
+	dnsTarget := nodeTag(group.Nodes[0].ID)
+	if len(group.Nodes) > 1 {
+		dnsTarget = "group-dns-route"
+		outbounds = append(outbounds, map[string]any{"tag": dnsTarget, "protocol": "loopback", "settings": map[string]any{"inboundTag": dnsTarget}})
+	}
+	outbounds = append(outbounds, map[string]any{"tag": "group-dns-out", "protocol": "dns", "settings": map[string]any{"network": "tcp", "address": "1.1.1.1", "port": 53, "nonIPQuery": "skip"}, "proxySettings": map[string]any{"tag": dnsTarget}})
 	config["outbounds"] = outbounds
-	config["routing"] = map[string]any{"domainStrategy": "AsIs", "rules": []any{
+	rules := []any{
 		map[string]any{"type": "field", "inboundTag": []string{"api-in"}, "outboundTag": "api"},
 		map[string]any{"type": "field", "inboundTag": []string{"dns-forward"}, "outboundTag": "group-dns-out"},
-		map[string]any{"type": "field", "inboundTag": []string{"transparent", "probe-0", "group-dns-query"}, "outboundTag": nodeTag(group.Nodes[0].ID)},
-	}}
-	delete(config, "observatory")
+	}
+	for index, node := range group.Nodes {
+		rules = append(rules, map[string]any{"type": "field", "inboundTag": []string{fmt.Sprintf("probe-%d", index)}, "outboundTag": nodeTag(node.ID)})
+	}
+	route := map[string]any{"type": "field", "inboundTag": []string{"transparent", "group-dns-query", "group-dns-route"}}
+	routing, ok := config["routing"].(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("invalid group routing")
+	}
+	if len(group.Nodes) == 1 {
+		route["outboundTag"] = nodeTag(group.Nodes[0].ID)
+		delete(routing, "balancers")
+		delete(config, "observatory")
+	} else {
+		route["balancerTag"] = "egress"
+	}
+	routing["rules"] = append(rules, route)
+	config["routing"] = routing
 	return json.MarshalIndent(config, "", "  ")
 }
 
@@ -287,7 +315,7 @@ func ensureGroupCore(ctx context.Context, group EgressGroup, g groupRuntime, res
 	unit := groupUnit(g, binary)
 	oldUnit, _ := os.ReadFile(unitPath)
 	unchanged := string(previousResolver) == string(namespaceResolverConfig(resolvers)) && string(current) == string(body) && string(oldUnit) == unit
-	healthy := unchanged && networkCommand(ctx, "systemctl", "is-active", "--quiet", g.unit()).Run() == nil && coreReady(ctx, coreAPIPath(g.dir()), []string{nodeTag(group.Nodes[0].ID)}) == nil
+	healthy := unchanged && networkCommand(ctx, "systemctl", "is-active", "--quiet", g.unit()).Run() == nil && coreReady(ctx, coreAPIPath(g.dir()), groupTags(group)) == nil
 	changed, err := stageCoreFiles(ctx, binary, filepath.Join(g.dir(), "xray.json"), unitPath, body, unit, !healthy)
 	if err != nil {
 		return err
@@ -311,29 +339,87 @@ func ensureGroupCore(ctx context.Context, group EgressGroup, g groupRuntime, res
 	return run(ctx, "systemctl", "restart", g.unit())
 }
 
-func groupHealthy(ctx context.Context, group EgressGroup, g groupRuntime) bool {
+type groupHealthState struct {
+	active    int
+	successes map[int]int
+	failures  map[int]int
+}
+
+// selectGroupFailover shares the host selector, but immediately leaves a failed active node.
+func selectGroupFailover(nodes []Node, probes []ProbeResult, state *groupHealthState) int {
+	if state.successes == nil {
+		state.successes, state.failures = map[int]int{}, map[int]int{}
+	}
+	active := state.active
+	for index, node := range nodes {
+		if index < len(probes) && probes[index].Success {
+			state.successes[node.ID]++
+			state.failures[node.ID] = 0
+		} else {
+			state.successes[node.ID] = 0
+			state.failures[node.ID]++
+			if active == node.ID {
+				active = 0
+			}
+		}
+	}
+	state.active = chooseFailover(nodes, active, state.successes, state.failures)
+	return state.active
+}
+
+func groupHealthy(ctx context.Context, group EgressGroup, g groupRuntime, health *groupHealthState) bool {
 	exe, err := workerExecutable()
 	if err != nil {
-		log.Printf("[egress] group %s health worker unavailable: %v", group.Key, err)
 		return false
 	}
-
+	probes := make([]ProbeResult, len(group.Nodes))
+	var workers sync.WaitGroup
+	gate := make(chan struct{}, 4)
+	for index := range group.Nodes {
+		workers.Add(1)
+		go func(index int) {
+			defer workers.Done()
+			select {
+			case gate <- struct{}{}:
+				defer func() { <-gate }()
+			case <-ctx.Done():
+				return
+			}
+			probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+			output, callErr := networkCommand(probeCtx, "ip", "netns", "exec", g.ns(), exe, "-network-probe-port", fmt.Sprint(socksBasePort+index), "-network-probe-url", group.Egress.ProbeURL).Output()
+			if callErr == nil {
+				_ = json.Unmarshal(output, &probes[index])
+			}
+		}(index)
+	}
+	workers.Wait()
+	if ctx.Err() != nil {
+		return false
+	}
+	usable := false
+	for _, probe := range probes {
+		usable = usable || probe.Success
+	}
+	if group.Egress.Strategy == "failover" && len(group.Nodes) > 1 {
+		selected := selectGroupFailover(group.Nodes, probes, health)
+		target := "blocked"
+		if selected > 0 {
+			target = nodeTag(selected)
+		}
+		if overrideCore(ctx, coreAPIPath(g.dir()), target) != nil {
+			return false
+		}
+		usable = selected > 0
+	}
+	if !usable {
+		return false
+	}
+	// DNS follows the same balancer, including TCP conversion for UDP-only client queries.
 	return retryGroupHealth(ctx, func() bool {
-		out, err := networkCommand(ctx, "ip", "netns", "exec", g.ns(), exe, "-network-probe-port", "21000", "-network-probe-url", group.Egress.ProbeURL, "-network-dns-address", net.JoinHostPort(g.ip(), "53")).Output()
+		output, callErr := networkCommand(ctx, "ip", "netns", "exec", g.ns(), exe, "-network-probe-url", group.Egress.ProbeURL, "-network-dns-address", net.JoinHostPort(g.ip(), "53")).Output()
 		var result ProbeResult
-		if err != nil {
-			log.Printf("[egress] group %s health worker failed: %v", group.Key, err)
-			return false
-		}
-		err = json.Unmarshal(out, &result)
-		if err != nil {
-			log.Printf("[egress] group %s health worker response invalid: %v", group.Key, err)
-			return false
-		}
-		if !result.Success {
-			log.Printf("[egress] group %s health probe failed: %s", group.Key, result.Error)
-		}
-		return result.Success
+		return callErr == nil && json.Unmarshal(output, &result) == nil && result.Success
 	})
 }
 
@@ -472,7 +558,7 @@ func (m *Manager) reconcileGroups(ctx context.Context, in Instruction, inv inven
 		g := active[group.Key]
 		if m.groupReady[group.Key] && !restore && m.groupHashes[group.Key] == groupHash(group) {
 			reference, e := unitReference(ctx, g.unit())
-			ready[group.Key] = e == nil && reference == m.groupRefs[group.Key] && coreReady(ctx, coreAPIPath(g.dir()), []string{nodeTag(group.Nodes[0].ID)}) == nil
+			ready[group.Key] = e == nil && reference == m.groupRefs[group.Key] && coreReady(ctx, coreAPIPath(g.dir()), groupTags(group)) == nil
 		}
 	}
 
@@ -507,6 +593,14 @@ func (m *Manager) reconcileGroups(ctx context.Context, in Instruction, inv inven
 
 	results := make([]outcome, len(in.Groups))
 	var workers sync.WaitGroup
+	if m.groupHealth == nil {
+		m.groupHealth = map[string]*groupHealthState{}
+	}
+	for _, group := range in.Groups {
+		if m.groupHealth[group.Key] == nil {
+			m.groupHealth[group.Key] = &groupHealthState{}
+		}
+	}
 	gate := make(chan struct{}, 4)
 	for index, group := range in.Groups {
 		oldHash, lastCheck, wasReady := m.groupHashes[group.Key], m.groupChecks[group.Key], ready[group.Key]
@@ -522,7 +616,7 @@ func (m *Manager) reconcileGroups(ctx context.Context, in Instruction, inv inven
 				return
 			}
 
-			groupCtx, cancel := context.WithTimeout(ctx, 18*time.Second)
+			groupCtx, cancel := context.WithTimeout(ctx, 40*time.Second)
 			defer cancel()
 			g := active[group.Key]
 			if restore {
@@ -548,7 +642,7 @@ func (m *Manager) reconcileGroups(ctx context.Context, in Instruction, inv inven
 				if err != nil {
 					return "", err
 				}
-				err = coreReady(groupCtx, coreAPIPath(g.dir()), []string{nodeTag(group.Nodes[0].ID)})
+				err = coreReady(groupCtx, coreAPIPath(g.dir()), groupTags(group))
 				if err != nil {
 					return "", err
 				}
@@ -563,12 +657,14 @@ func (m *Manager) reconcileGroups(ctx context.Context, in Instruction, inv inven
 				return
 			}
 			result.reference = reference
-			if reference != m.groupRefs[group.Key] {
+			health := m.groupHealth[group.Key]
+			if reference != m.groupRefs[group.Key] || oldHash != result.hash {
 				wasReady = false
+				*health = groupHealthState{}
 			}
 			result.ready = wasReady
-			if oldHash != result.hash || time.Since(lastCheck) >= 30*time.Second || !wasReady {
-				result.ready = groupHealthy(groupCtx, group, g)
+			if oldHash != result.hash || time.Since(lastCheck) >= time.Duration(group.Egress.ProbeIntervalSeconds)*time.Second || !wasReady {
+				result.ready = groupHealthy(groupCtx, group, g, health)
 				result.checked = time.Now()
 			}
 
@@ -613,6 +709,7 @@ func (m *Manager) reconcileGroups(ctx context.Context, in Instruction, inv inven
 					delete(m.groupReady, key)
 					delete(m.groupHashes, key)
 					delete(m.groupRefs, key)
+					delete(m.groupHealth, key)
 				}
 			}
 		}

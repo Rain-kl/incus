@@ -1,6 +1,9 @@
-基于正式 Incus 7.0.2 LTS 的 PayIncus 定制构建，稳定/集成渠道以 release 的 prerelease 标记及随包 manifest 为准。
+Incus 集成软件包 2.0.0
 
-安装命令
-```bash
-curl -fsSL https://raw.githubusercontent.com/Rain-kl/incus/canary/scripts/payincus/install.sh | sudo bash -s -- canary
-```
+- 内部 Agent、TUI 与发行包统一为 2.0.0，开发版本附带提交 SHA；Incus 自身版本保持上游正式 LTS 基线。
+- 正常停机卸载托管 ZFS 密钥，正常启动在线验证并恢复；真正的安全模式锁定继续要求管理员批准。
+- 启动证明使用 AES-256-GCM、180 秒时间窗口、节点身份绑定和双层一次性 nonce。密钥只在内存和受保护通道中使用。
+- TUI 增加 Xray 节点、测试、重启、日志及重建配置菜单。
+- 出口组按共享策略身份更新，配合控制端可编辑出口策略实现已有实例的动态出口更新。
+
+完整行为、限制、接口及验证证据见 FEATURES.md。正常停止的密钥卸载需要内核与 ZFS 允许卸载；SIGKILL、系统断电无法运行用户态清理代码。下次启动会先清理残留工作负载与密钥再申请授权。
