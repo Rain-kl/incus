@@ -13,8 +13,8 @@ import (
 
 // Constants define protocol identifiers and timing limits.
 const (
-	DefaultHeartbeatIntervalSeconds = 10
-	MinHeartbeatIntervalSeconds     = 5
+	DefaultHeartbeatIntervalSeconds = 5
+	MinHeartbeatIntervalSeconds     = 1
 	MaxHeartbeatIntervalSeconds     = 3600
 )
 

@@ -291,3 +291,23 @@ func TestStorageEncryptionNamespaceHTTPContract(t *testing.T) {
 		t.Fatal("storage encryption capability is not discoverable", err)
 	}
 }
+
+func TestLockedHeartbeatKeepsOnlyRecoveryStorage(t *testing.T) {
+	service := newService(context.Background(), true, &fakeEngine{})
+	service.guard = nodesecurity.New(filepath.Join(t.TempDir(), "guard"))
+	if err := service.guard.Trigger("fixture"); err != nil {
+		t.Fatal(err)
+	}
+	service.collect = func(string, int) map[string]any { t.Fatal("locked report collected instance/host data"); return nil }
+	service.collectLocked = func() map[string]any {
+		return map[string]any{"storage": map[string]any{"available": true, "pools": []any{}}}
+	}
+	recorder := httptest.NewRecorder()
+	service.ServeHTTP(recorder, httptest.NewRequest("GET", Prefix+"/report?interval=10", nil))
+	var response struct {
+		Metadata map[string]any `json:"metadata"`
+	}
+	if json.Unmarshal(recorder.Body.Bytes(), &response) != nil || response.Metadata["storage"] == nil || response.Metadata["instances"] != nil || response.Metadata["resources"] != nil {
+		t.Fatal("locked recovery identities lost or private inventory exposed", recorder.Body.String())
+	}
+}

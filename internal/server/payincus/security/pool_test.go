@@ -24,6 +24,12 @@ func TestPoolInitializationResumesWithSameKey(t *testing.T) {
 		case "fallocate":
 			return nil, nil
 		case "zpool":
+			if args[0] == "list" {
+				if marker != "" {
+					return []byte("pool"), nil
+				}
+				return nil, nil
+			}
 
 			if args[0] == "create" {
 				if strings.Contains(" "+strings.Join(args, " ")+" ", " -f ") || !strings.Contains(strings.Join(args, " "), "payincus:key-fingerprint="+fp) {
@@ -98,6 +104,9 @@ func TestPoolNeverOverwritesExistingFile(t *testing.T) {
 		t.Fatal("fixture write failed")
 	}
 	s := &Storage{ImportDir: dir, Run: func(_ context.Context, name string, args []string, _ []byte) ([]byte, error) {
+		if name == "zpool" && args[0] == "list" {
+			return nil, nil
+		}
 		if name != "zfs" || args[0] != "get" {
 			t.Fatal("existing file reached a write command")
 		}
@@ -153,7 +162,10 @@ func TestPoolFileIsSparseByDefaultAndPreallocatedOnRequest(t *testing.T) {
 }
 
 func TestPoolRejectsBadDirectoryOrDeviceWithDirectory(t *testing.T) {
-	s := &Storage{Run: func(_ context.Context, _ string, _ []string, _ []byte) ([]byte, error) {
+	s := &Storage{Run: func(_ context.Context, name string, args []string, _ []byte) ([]byte, error) {
+		if name == "zpool" && args[0] == "list" {
+			return nil, nil
+		}
 		return nil, errors.New("pool absent")
 	}}
 	if s.CreatePool(context.Background(), "pool", "", 1, "/dev/shm", false, strings.Repeat("a", 64)) == nil {

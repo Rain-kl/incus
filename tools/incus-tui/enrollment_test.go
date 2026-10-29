@@ -103,6 +103,10 @@ func TestEnrollmentCompletesAllStepsAndPreservesTrust(t *testing.T) {
 		if b.loadConnection() != (connection{Panel: server.URL, ID: c.ID, Secret: c.Secret}) {
 			t.Fatal("saved credentials differ from the token exchange")
 		}
+		configBytes, err := os.ReadFile(b.path)
+		if err != nil || !strings.Contains(string(configBytes), "heartbeat_interval_seconds: 5\n") {
+			t.Fatal("new node must report every 5 seconds", err)
+		}
 		stat, err := os.Stat(b.path)
 		if err != nil || stat.Mode().Perm() != 0o600 {
 			t.Fatal("credentials file is not private")

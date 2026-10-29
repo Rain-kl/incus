@@ -5,6 +5,7 @@ package security
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -28,6 +29,14 @@ func (s *Storage) CreatePool(ctx context.Context, name, device string, sizeGiB u
 		}
 		return errors.New("pool name already exists with another identity; refusing overwrite")
 	}
+	present, inspectErr := s.poolPresent(ctx, name)
+	if inspectErr != nil {
+		return fmt.Errorf("pool identity unavailable: %w; %v", err, inspectErr)
+	}
+	if present {
+		return fmt.Errorf("pool identity unavailable: %w", err)
+	}
+
 	target := device
 	if device == "" {
 		dir := s.ImportDir
@@ -40,40 +49,46 @@ func (s *Storage) CreatePool(ctx context.Context, name, device string, sizeGiB u
 		if dir == "" {
 			return errors.New("pool file directory unavailable")
 		}
-		if os.MkdirAll(dir, 0o700) != nil {
-			return errors.New("cannot prepare pool file directory")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return fmt.Errorf("cannot prepare pool file directory: %w", err)
 		}
 		target = filepath.Join(dir, name+".img")
 		file, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if err != nil {
-			return errors.New("pool file already exists or cannot be created; refusing overwrite")
+			return fmt.Errorf("pool file already exists or cannot be created; refusing overwrite: %w", err)
 		}
-		if file.Close() != nil {
-			return errors.New("cannot close new pool file")
+		if err := file.Close(); err != nil {
+			return fmt.Errorf("cannot close new pool file: %w", err)
 		}
 		if preallocate {
 			if _, err = s.Run(ctx, "fallocate", []string{"-l", strconv.FormatUint(sizeGiB<<30, 10), target}, nil); err != nil {
-				return errors.New("pool file allocation failed; file retained for inspection")
+				return fmt.Errorf("pool file allocation failed; file retained for inspection: %w", err)
 			}
 		} else if err = os.Truncate(target, int64(sizeGiB<<30)); err != nil {
 			// Sparse file: reserves only the maximum size, disk blocks are allocated on demand.
-			return errors.New("pool file sizing failed; file retained for inspection")
+			return fmt.Errorf("pool file sizing failed; file retained for inspection: %w", err)
 		}
 	} else {
 		if !strings.HasPrefix(device, "/dev/") || strings.Contains(device, "..") {
 			return errors.New("expected a dedicated device under /dev")
 		}
 		info, err := os.Stat(device)
-		if err != nil || info.Mode()&os.ModeDevice == 0 || info.Mode()&os.ModeCharDevice != 0 {
+		if err != nil {
+			return fmt.Errorf("cannot inspect block device: %w", err)
+		}
+		if info.Mode()&os.ModeDevice == 0 || info.Mode()&os.ModeCharDevice != 0 {
 			return errors.New("not an available block device")
 		}
 		output, err := s.Run(ctx, "lsblk", []string{"-n", "-o", "MOUNTPOINTS,FSTYPE", device}, nil)
-		if err != nil || strings.TrimSpace(string(output)) != "" {
+		if err != nil {
+			return fmt.Errorf("cannot inspect device filesystem or mounts: %w", err)
+		}
+		if strings.TrimSpace(string(output)) != "" {
 			return errors.New("device contains a filesystem or mount; refusing overwrite")
 		}
 	}
 	if _, err := s.Run(ctx, "zpool", []string{"create", "-o", "ashift=12", "-O", "payincus:key-fingerprint=" + fingerprint, "-O", "mountpoint=none", "-O", "canmount=off", name, target}, nil); err != nil {
-		return errors.New("pool creation failed; no force overwrite was attempted")
+		return fmt.Errorf("pool creation failed; no force overwrite was attempted: %w", err)
 	}
 	return nil
 }

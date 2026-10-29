@@ -446,3 +446,27 @@ CI 接线修正：fork 初始没有官方 release tag，校验步骤从官方仓
 - storage_delete.go 与 driver_zfs.go 的必要原生接入：销毁前核对登记 GUID，只有原生 destroy 成功才持久化删除证明，支持整池清理及 DB 部分失败重试；重新注册同名存储时清除旧证明。导出/离线不构成证明。身份标记匹配且只剩空父池时才回收自建池；匹配真实文件 vdev 路径并核验 inode 后才删除文件，外部池与兄弟数据保留。导入子数据集不走同名原生 loop 文件删除，避免误删仍在使用的父池 vdev。各上游接入附近有 PayIncus 注释；LTS 同步须保留成功之后的证明顺序、source 归属及外部数据保护。
 - storage_http_test.go 新增锁定身份读边界、外部根及系统挂载点保护；storage_delete_test.go 新增原生整池证明、prepare 不能证明成功、GUID/幂等、外部/兄弟/不匹配文件保护；TUI 测试确认不绕过节点分配器。Linux race、真实 daemon 路由运行及 go vet 已通过；最终全量检查结果按控制仓库收尾记录标注。
 - 真机仅为已授权 bad（Debian 13/arm64，10.211.55.11），有 daemon/TUI 备份。Netcatty 原生 UI 一步创建，ego-browser 管理界面创建、导入、托管、单池锁盘/恢复及全局安全锁定/逐池解锁/恢复均已运行。LXC 核验原关机保持、其它池不因单池锁盘停止及数据标记完整。删除测试池后原生池/数据集/文件及控制端池/密钥均清理。节点无 /dev/kvm，未作 VM 真机验收；未发布或推送。
+
+
+### 未锁定错误真实性复核（2026-10-29）
+
+- 当前 canary 以 security.PublicErrorFor(err) 仅对 errors.Is(err, ErrLocked) 保留既有全局锁伪装；daemon、LXC/QEMU 启动、ZFS Mount/MountVolume 不把状态读取失败或手动锁盘伪装成数据库损坏。CLI 审计协议/权限/写入失败保留实际原因；审计异常后只有再次确认持久锁存在才使用伪装，仍拒绝执行。管理 HTTP 保留已有不含密钥的错误原因。LTS 同步须保留这些条件与 fail-closed 行为，不可重新用任意 err!=nil 代替已确认锁定。
+- 复核新增 storage_resize.go 发现同类原因误判：ResizePool 将 Check/Status/属性读取异常合并为节点不可用或身份改变。现透传实际原因，手动锁盘独立说明；错误时仍不执行磁盘扩容，无新增 API、配置或上游接入点。security/errors_test.go 新增损坏状态下零存储命令回归，其它错误/权限/状态码/密钥脱敏测试沿用已有覆盖。
+- GPT-6.1 Terra 在 owner 要求后恢复，完成多轮只读复审；发现的遗漏均已修正，最终针对性复审无新增必须修正问题。复审不等于自行运行测试或真机验证。
+- 本轮检查通过：定制模块 race、真实 daemon 路由测试、实例/存储驱动 go vet、daemon 编译、增量 golangci-lint 0 issues；控制仓库 node-security/storage-encryption/resize、类型检查及 make check 通过。测试节点 10.211.55.11 当前 Netcatty 不通，本轮新增分支未重新部署实测；无其它节点变更、无提交或推送。
+
+- 恢复复审后的补修：storage.go 将 GUID/加密根/托管格式/卸钥后属性读取错误与实际值不符分开；pool.go 与 storage_resize.go 保留系统/执行阶段错误，不猜测 busy、身份改变或文件系统已存在。属性失败后只有成功的 zpool list -H -o name 确认池未导入才进入创建/导入；池已存在或清单失败就停止，原失败原因保留。原有相同身份重试、已确认离线池的导入及无 force-overwrite 规则不变。无新配置/API/上游接入，LTS 同步须保留先读并确认再写的顺序。
+- errors_test.go 覆盖 Ready/Unlock/UnlockManaged/Lock/Resize 的读取异常、管理标记第二次查询失败、卸钥验证失败、缺少命令/缺失设备、池清单失败或池已存在时零写，以及确认缺池后的导入成功/失败；pool_test.go 的缺池 fixture 加入真实只读清单契约。控制端 wait/cancel/长镜像等待与旧解锁路由的错误状态/脱敏/取消测试详见控制仓库 docs/NODE_SECURITY.md。安全 Runner 仍丢弃 stderr，系统执行错误只含阶段和 exit/errno 等安全信息，不声称还原 ZFS 内部所有具体原因。
+
+- 恢复复审后的验证：security race（含新增全部用例）、定制模块 race、真实 daemon TestPayIncusAuthenticatedRoute、daemon/实例/存储/security go vet、daemon 构建及 security 增量 golangci-lint 0 issues 通过；控制端相关安全/存储/异步测试、类型检查和 make check 通过。未重新运行受既有容器限制的上游全仓检查，未将其写为通过；bad 节点未连接，本轮新增分支未重新部署实测。
+
+### 立即上报测试与锁定存储恢复身份（2026-10-29）
+
+- 新 heartbeat-confirm-v1 能力复用已有认证 WebSocket HEARTBEAT 帧，携带有界 UUID requestId；旧空 payload 通知仍兼容。连接器将测试请求排到下一次新采集之前，并把 heartbeatRequestId 放入正常 HMAC 上报，不添加监听端口。控制端只有对应请求完成持久化且采集完整后才确认测试，不按通知发送成功确认。协议/队列接入为 tunnel/tunnel.go、cmd/payincus-agent/main.go；接口测试 control_test.go/main_test.go 覆盖相关性和旧通知兼容。
+- service.go 的锁定 report 只调用 report.LockedStoragePayload，不采集实例与主机资源；沿用锁定下既有存储身份白名单。report/storage.go 保留加密身份，区分实际密钥状态与 nodeLocked，锁定的普通池也不访问受限 resources；collectionComplete 区分部分失败。service_test.go/storage_test.go 覆盖这些边界。无新配置、数据库或上游源码接入点；LTS 同步保留白名单、签名上下文和采集失败语义。控制端实现/配套升级要求及验证见控制仓库 docs/STORAGE_HEARTBEAT.md。
+
+- 已在授权 bad（Debian 13/arm64，10.211.55.11）以 SHA256 校验后备份替换本轮 daemon/connector；两服务 active/running，原 global lock 与存储登记保留。实际新签名心跳补齐 test/incus 加密身份，管理界面点击“测试”等待新报告落库后成功，真实存储页解密入口可见；未替用户解除 API 锁或加载数据集密钥。备份及完整控制端证据见 docs/STORAGE_HEARTBEAT.md。真实全局锁定下不采集实例/主机内容，普通池也不访问被锁定的资源 API。相关 race、真实 daemon 路由、go vet、构建、增量 lint 通过；Terra 最终只读复核无新增必改项，无发版或推送。
+
+### 默认心跳间隔（2026-10-29）
+
+连接器默认心跳由 10 秒改为 5 秒，新 TUI 连接配置写入 5 秒；既有显式配置与 5–3600 秒限制保留。采集与请求串行，采集耗时超过周期时不会并发执行。接口及状态报告沿用现有协议，无数据库变更；config_test.go 覆盖默认、显式及边界。

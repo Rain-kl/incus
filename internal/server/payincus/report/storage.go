@@ -29,6 +29,11 @@ func collectStorageReport() map[string]any {
 	return storageReport(ctx, client, result)
 }
 
+// LockedStoragePayload reports recovery identities without instance or host-resource inventory.
+func LockedStoragePayload() map[string]any {
+	return map[string]any{"storage": collectStorageReport()}
+}
+
 type reportedPool struct {
 	Name        string            `json:"name"`
 	Driver      string            `json:"driver"`
@@ -118,6 +123,25 @@ func storageReport(ctx context.Context, client *http.Client, result map[string]a
 				if source == "" {
 					source = pool.Config["source"]
 				}
+				for _, dataset := range inventory.Datasets {
+					if dataset.Dataset != source {
+						continue
+					}
+					encrypted := dataset.Algorithm != "off" && dataset.Algorithm != "-"
+					locked := inventory.Locked || inventory.Locks[dataset.EncryptionRoot].Locked || (encrypted && dataset.KeyStatus != "available")
+					lock := inventory.Locks[dataset.EncryptionRoot]
+					item["encryption"] = map[string]any{"encrypted": encrypted, "nodeLocked": inventory.Locked, "source": source, "encryptionRoot": dataset.EncryptionRoot, "algorithm": dataset.Algorithm, "keyFormat": dataset.KeyFormat, "state": "unlocked", "manualLocked": lock.Locked, "lockPending": lock.Locked && !lock.Complete, "pendingRecovery": len(lock.ResumeInstances)}
+					if locked {
+						item["status"] = "locked"
+						if encrypted && dataset.KeyStatus != "available" {
+							item["encryption"].(map[string]any)["state"] = "locked"
+						}
+						return
+					}
+				}
+				if !encryptionKnown || item["encryption"] == nil {
+					return
+				}
 				parent := strings.Split(source, "/")[0]
 				if nodesecurity.ValidEncryptionRoot(parent) {
 					backing, healthy := inspectZFSStorage(ctx, parent)
@@ -128,23 +152,10 @@ func storageReport(ctx context.Context, client *http.Client, result map[string]a
 						item["backing"] = backing
 					}
 				}
-				for _, dataset := range inventory.Datasets {
-					if dataset.Dataset != source {
-						continue
-					}
-					encrypted := dataset.Algorithm != "off" && dataset.Algorithm != "-"
-					locked := inventory.Locked || inventory.Locks[dataset.EncryptionRoot].Locked || (encrypted && dataset.KeyStatus != "available")
-					lock := inventory.Locks[dataset.EncryptionRoot]
-					item["encryption"] = map[string]any{"encrypted": encrypted, "source": source, "encryptionRoot": dataset.EncryptionRoot, "algorithm": dataset.Algorithm, "keyFormat": dataset.KeyFormat, "state": "unlocked", "manualLocked": lock.Locked, "lockPending": lock.Locked && !lock.Complete, "pendingRecovery": len(lock.ResumeInstances)}
-					if locked {
-						item["status"] = "locked"
-						item["encryption"].(map[string]any)["state"] = "locked"
-						return
-					}
-				}
-				if !encryptionKnown || item["encryption"] == nil {
-					return
-				}
+			}
+			if inventory.Locked {
+				item["status"] = "locked"
+				return
 			}
 			if pool.Status != "" && !strings.EqualFold(pool.Status, "Created") {
 				return
@@ -158,5 +169,13 @@ func storageReport(ctx context.Context, client *http.Client, result map[string]a
 	}
 	wg.Wait()
 	result["pools"] = items
+	complete, ok := result["complete"].(bool)
+	complete = ok && complete && encryptionKnown
+	for _, item := range items {
+		if item["status"] != "ready" && item["status"] != "locked" {
+			complete = false
+		}
+	}
+	result["collectionComplete"] = complete
 	return result
 }

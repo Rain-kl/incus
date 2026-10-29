@@ -36,17 +36,18 @@ type Engine interface {
 
 // Service serves authenticated node extension requests inside incusd.
 type Service struct {
-	ctx         context.Context
-	guard       *nodesecurity.Manager
-	engine      Engine
-	enabled     bool
-	caddyGate   chan struct{}
-	reportGate  chan struct{}
-	logs        chan struct{}
-	collect     func(string, int) map[string]any
-	caddyAction func(context.Context, string) error
-	diagnostics func(context.Context, string, func(string))
-	journal     func(context.Context, string, int, func(string))
+	ctx           context.Context
+	guard         *nodesecurity.Manager
+	engine        Engine
+	enabled       bool
+	caddyGate     chan struct{}
+	reportGate    chan struct{}
+	logs          chan struct{}
+	collect       func(string, int) map[string]any
+	collectLocked func() map[string]any
+	caddyAction   func(context.Context, string) error
+	diagnostics   func(context.Context, string, func(string))
+	journal       func(context.Context, string, int, func(string))
 }
 
 // New creates an API client using the supplied connection configuration.
@@ -60,7 +61,7 @@ func New(ctx context.Context, enabled bool) *Service {
 
 func newService(ctx context.Context, enabled bool, engine Engine) *Service {
 	return &Service{
-		ctx: ctx, enabled: enabled, engine: engine, guard: nodesecurity.Default(), caddyGate: make(chan struct{}, 1), reportGate: make(chan struct{}, 1), logs: make(chan struct{}, 32), collect: report.HeartbeatPayload, diagnostics: diagnostics.Stream, journal: diagnostics.Journal,
+		ctx: ctx, enabled: enabled, engine: engine, guard: nodesecurity.Default(), caddyGate: make(chan struct{}, 1), reportGate: make(chan struct{}, 1), logs: make(chan struct{}, 32), collect: report.HeartbeatPayload, collectLocked: report.LockedStoragePayload, diagnostics: diagnostics.Stream, journal: diagnostics.Journal,
 		caddyAction: func(ctx context.Context, action string) error {
 			if action == "install" {
 				return caddy.Install(ctx)
@@ -164,8 +165,11 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 
 		payload := map[string]any{}
-		if s.guard.Check() == nil {
+		guardErr := s.guard.Check()
+		if guardErr == nil {
 			payload = s.collect("payincus-node-v1", interval)
+		} else if errors.Is(guardErr, nodesecurity.ErrLocked) {
+			payload = s.collectLocked()
 		}
 		payload["nodeSecurity"] = s.guard.Report()
 		payload["networkStatus"] = s.engine.Report()

@@ -43,7 +43,15 @@ func main() {
 	local := nodeclient.New(*socket)
 	remote := panel.New(cfg)
 	refresh := make(chan struct{}, 1)
-	worker := tunnel.NewWorker(tunnel.WorkerConfig{PanelURL: cfg.PanelURL, AgentID: cfg.AgentID, AgentSecret: cfg.AgentSecret, NodeClient: local, RequestHeartbeat: func() {
+	tests := make(chan string, 1)
+	worker := tunnel.NewWorker(tunnel.WorkerConfig{PanelURL: cfg.PanelURL, AgentID: cfg.AgentID, AgentSecret: cfg.AgentSecret, NodeClient: local, RequestHeartbeat: func(requestID string) {
+		if requestID != "" {
+			select {
+			case tests <- requestID:
+			default:
+			}
+			return
+		}
 		select {
 		case refresh <- struct{}{}:
 		default:
@@ -54,8 +62,10 @@ func main() {
 	var caddyPending atomic.Bool
 	tick := time.NewTicker(cfg.HeartbeatInterval)
 	defer tick.Stop()
+	requestID := ""
 	for {
-		err = heartbeat(ctx, local, remote, cfg, worker, &caddyPending)
+		err = heartbeat(ctx, local, remote, cfg, worker, &caddyPending, requestID)
+		requestID = ""
 		if err != nil {
 			log.Printf("heartbeat: %v", err)
 		}
@@ -68,16 +78,23 @@ func main() {
 			return
 		}
 
+		// A requested test runs next, before a queued periodic collection.
+		select {
+		case requestID = <-tests:
+			continue
+		default:
+		}
 		select {
 		case <-ctx.Done():
 			return
+		case requestID = <-tests:
 		case <-tick.C:
 		case <-refresh:
 		}
 	}
 }
 
-func heartbeat(ctx context.Context, local *nodeclient.Client, remote *panel.Client, cfg config.Config, worker *tunnel.Worker, caddyPending *atomic.Bool) error {
+func heartbeat(ctx context.Context, local *nodeclient.Client, remote *panel.Client, cfg config.Config, worker *tunnel.Worker, caddyPending *atomic.Bool, requestID string) error {
 	requestCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 	var payload map[string]any
@@ -100,6 +117,9 @@ func heartbeat(ctx context.Context, local *nodeclient.Client, remote *panel.Clie
 		}
 	}
 
+	if requestID != "" {
+		payload["heartbeatRequestId"] = requestID
+	}
 	payload["version"] = version
 	payload["nodeApi"] = "payincus_node_v1"
 	capabilities, ok := payload["capabilities"].([]any)

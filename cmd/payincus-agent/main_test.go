@@ -39,6 +39,7 @@ func TestNativeHeartbeatContractIncludesLockedNodes(t *testing.T) {
 			var body struct {
 				NodeAPI      string   `json:"nodeApi"`
 				Capabilities []string `json:"capabilities"`
+				RequestID    string   `json:"heartbeatRequestId"`
 			}
 			if json.NewDecoder(r.Body).Decode(&body) != nil {
 				t.Error("invalid heartbeat body")
@@ -53,7 +54,7 @@ func TestNativeHeartbeatContractIncludesLockedNodes(t *testing.T) {
 					metrics = true
 				}
 			}
-			if body.NodeAPI != "payincus_node_v1" || !found || (!locked && !metrics) {
+			if body.RequestID != "1e862c0a-0316-4a53-9c5f-a6be04ba2534" || body.NodeAPI != "payincus_node_v1" || !found || (!locked && !metrics) {
 				t.Error("native identity or capabilities missing")
 			}
 			received = true
@@ -62,7 +63,7 @@ func TestNativeHeartbeatContractIncludesLockedNodes(t *testing.T) {
 		cfg := config.Config{PanelURL: control.URL, AgentID: "fixture-agent", AgentSecret: "fixture-secret", HeartbeatIntervalSeconds: 60}
 		worker := tunnel.NewWorker(tunnel.WorkerConfig{PanelURL: control.URL})
 		var pending atomic.Bool
-		err = heartbeat(context.Background(), nodeclient.New(socket), panel.New(cfg), cfg, worker, &pending)
+		err = heartbeat(context.Background(), nodeclient.New(socket), panel.New(cfg), cfg, worker, &pending, "1e862c0a-0316-4a53-9c5f-a6be04ba2534")
 		control.Close()
 		_ = localServer.Close()
 		if err != nil || !received {
@@ -97,7 +98,7 @@ func TestHeartbeatReportsDaemonFailureWithoutDroppingConnection(t *testing.T) {
 	cfg := config.Config{PanelURL: control.URL, AgentID: "fixture-agent", AgentSecret: "fixture-secret", HeartbeatIntervalSeconds: 10}
 	worker := tunnel.NewWorker(tunnel.WorkerConfig{PanelURL: control.URL})
 	var pending atomic.Bool
-	if heartbeat(context.Background(), nodeclient.New(socket), panel.New(cfg), cfg, worker, &pending) == nil || !received {
+	if heartbeat(context.Background(), nodeclient.New(socket), panel.New(cfg), cfg, worker, &pending, "") == nil || !received {
 		t.Fatal("daemon failure suppressed the node heartbeat")
 	}
 }

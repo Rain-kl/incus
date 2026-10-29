@@ -54,8 +54,8 @@ func TestNativeIncusStreamAndRejectedRPC(t *testing.T) {
 		t.Fatal("expected TCP listener")
 	}
 
-	triggered := make(chan struct{}, 1)
-	worker := NewWorker(WorkerConfig{PanelURL: server.URL, AgentID: "local-agent", AgentSecret: secret, TargetHost: "127.0.0.1", TargetPort: addr.Port, RequestHeartbeat: func() { triggered <- struct{}{} }})
+	triggered := make(chan string, 2)
+	worker := NewWorker(WorkerConfig{PanelURL: server.URL, AgentID: "local-agent", AgentSecret: secret, TargetHost: "127.0.0.1", TargetPort: addr.Port, RequestHeartbeat: func(id string) { triggered <- id }})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
@@ -103,7 +103,7 @@ func TestNativeIncusStreamAndRejectedRPC(t *testing.T) {
 		Capabilities []string `json:"capabilities"`
 	}
 	err = json.Unmarshal(receive(FrameTypeControlHello, 0), &hello)
-	if err != nil || len(hello.Capabilities) != 2 || hello.Capabilities[0] != "payincus_node_v1" || hello.Capabilities[1] != "heartbeat-trigger-v1" {
+	if err != nil || len(hello.Capabilities) != 3 || hello.Capabilities[0] != "payincus_node_v1" || hello.Capabilities[1] != "heartbeat-trigger-v1" {
 		t.Fatal("unexpected node capabilities", hello, err)
 	}
 	send(FrameTypeHeartbeat, 0, nil)
@@ -111,6 +111,22 @@ func TestNativeIncusStreamAndRejectedRPC(t *testing.T) {
 	case <-triggered:
 	case <-time.After(time.Second):
 		t.Fatal("heartbeat notification was not delivered")
+	}
+	requestID := "1e862c0a-0316-4a53-9c5f-a6be04ba2534"
+	send(FrameTypeHeartbeat, 0, map[string]string{"requestId": requestID})
+	select {
+	case id := <-triggered:
+		if id != requestID {
+			t.Fatal("correlation lost", id)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("confirmed heartbeat not delivered")
+	}
+	send(FrameTypeHeartbeat, 0, map[string]string{"requestId": "invalid"})
+	select {
+	case <-triggered:
+		t.Fatal("invalid heartbeat accepted")
+	case <-time.After(10 * time.Millisecond):
 	}
 	// Obsolete business RPC frames cannot execute operations or interfere with the byte relay.
 	send(0x08, 7, map[string]any{"method": "network.apply", "params": map[string]any{"revision": 1}})

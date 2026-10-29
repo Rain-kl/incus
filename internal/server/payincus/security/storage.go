@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -85,13 +86,27 @@ func Run(ctx context.Context, name string, args []string, input []byte) ([]byte,
 	return output.Bytes(), err
 }
 
+// poolPresent confirms absence with a successful inventory, never a failed property read.
+func (s *Storage) poolPresent(ctx context.Context, pool string) (bool, error) {
+	output, err := s.Run(ctx, "zpool", []string{"list", "-H", "-o", "name"}, nil)
+	if err != nil {
+		return false, fmt.Errorf("cannot list imported ZFS pools: %w", err)
+	}
+	for _, name := range strings.Fields(string(output)) {
+		if name == pool {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (s *Storage) property(ctx context.Context, dataset, property string) (string, error) {
 	if !ValidEncryptionRoot(dataset) {
 		return "", errors.New("invalid protected dataset; use a dedicated child dataset")
 	}
 	output, err := s.Run(ctx, "zfs", []string{"get", "-H", "-o", "value", property, dataset}, nil)
 	if err != nil {
-		return "", errors.New("ZFS property unavailable: " + property)
+		return "", fmt.Errorf("ZFS property unavailable: %s: %w", property, err)
 	}
 	return strings.TrimSpace(string(output)), nil
 }
@@ -103,7 +118,10 @@ func (s *Storage) Ready(ctx context.Context, target Target) error {
 	}
 	if target.GUID != "" {
 		guid, err := s.property(ctx, target.Dataset, "guid")
-		if err != nil || guid != target.GUID {
+		if err != nil {
+			return err
+		}
+		if guid != target.GUID {
 			return errors.New("ZFS identity changed")
 		}
 	}
@@ -172,6 +190,14 @@ func (s *Storage) unlock(ctx context.Context, target Target, key []byte, adopt b
 	status, err := s.property(ctx, target.Dataset, "keystatus")
 	if err != nil {
 		pool := strings.Split(target.Dataset, "/")[0]
+		propertyErr := err
+		present, inspectErr := s.poolPresent(ctx, pool)
+		if inspectErr != nil {
+			return fmt.Errorf("%w; %v", propertyErr, inspectErr)
+		}
+		if present {
+			return propertyErr
+		}
 		_, err = s.Run(ctx, "zpool", []string{"import", "-N", pool}, nil)
 		if err != nil && s.ImportDir != "" {
 			// File-backed pools created by the TUI are outside ZFS's default device search path.
@@ -184,7 +210,7 @@ func (s *Storage) unlock(ctx context.Context, target Target, key []byte, adopt b
 			}
 		}
 		if err != nil {
-			return errors.New("pool import failed")
+			return fmt.Errorf("%w; pool import failed: %v", propertyErr, err)
 		}
 		status, err = s.property(ctx, target.Dataset, "keystatus")
 		if err != nil {
@@ -193,7 +219,10 @@ func (s *Storage) unlock(ctx context.Context, target Target, key []byte, adopt b
 	}
 	if target.GUID != "" {
 		guid, err := s.property(ctx, target.Dataset, "guid")
-		if err != nil || guid != target.GUID {
+		if err != nil {
+			return err
+		}
+		if guid != target.GUID {
 			return errors.New("ZFS identity changed")
 		}
 	}
@@ -203,7 +232,10 @@ func (s *Storage) unlock(ctx context.Context, target Target, key []byte, adopt b
 		}
 		for property, expected := range map[string]string{"encryptionroot": target.Dataset, "keyformat": "hex", "encryption": "aes-256-gcm"} {
 			actual, err := s.property(ctx, target.Dataset, property)
-			if err != nil || actual != expected {
+			if err != nil {
+				return err
+			}
+			if actual != expected {
 				return errors.New("unsupported external encryption root")
 			}
 		}
@@ -214,7 +246,7 @@ func (s *Storage) unlock(ctx context.Context, target Target, key []byte, adopt b
 	}
 	_, err = s.Run(ctx, "zfs", args, append(bytes.TrimSpace(key), '\n'))
 	if err != nil {
-		return errors.New("ZFS key validation/loading failed")
+		return fmt.Errorf("ZFS key validation/loading failed: %w", err)
 	}
 	if adopt {
 		location, err := s.property(ctx, target.Dataset, "keylocation")
@@ -223,7 +255,7 @@ func (s *Storage) unlock(ctx context.Context, target Target, key []byte, adopt b
 		}
 		if location != "prompt" {
 			if _, err = s.Run(ctx, "zfs", []string{"set", "keylocation=prompt", target.Dataset}, nil); err != nil {
-				return errors.New("cannot configure prompt-only key loading")
+				return fmt.Errorf("cannot configure prompt-only key loading: %w", err)
 			}
 		}
 	}
@@ -241,7 +273,7 @@ func (s *Storage) Create(ctx context.Context, dataset string, key []byte) error 
 	}
 	_, err = s.Run(ctx, "zfs", []string{"create", "-o", "encryption=aes-256-gcm", "-o", "keyformat=hex", "-o", "keylocation=prompt", dataset}, append(bytes.TrimSpace(key), '\n'))
 	if err != nil {
-		return errors.New("ZFS dataset creation failed; no existing data is overwritten")
+		return fmt.Errorf("ZFS dataset creation failed; no existing data is overwritten: %w", err)
 	}
 	return nil
 }
@@ -253,17 +285,23 @@ func (s *Storage) Lock(ctx context.Context, target Target) error {
 	}
 	if target.GUID != "" {
 		guid, err := s.property(ctx, target.Dataset, "guid")
-		if err != nil || guid != target.GUID {
+		if err != nil {
+			return err
+		}
+		if guid != target.GUID {
 			return errors.New("ZFS identity changed")
 		}
 	}
 	root, err := s.property(ctx, target.Dataset, "encryptionroot")
-	if err != nil || root != target.Dataset {
+	if err != nil {
+		return err
+	}
+	if root != target.Dataset {
 		return errors.New("encryption root mismatch")
 	}
 	output, err := s.Run(ctx, "zfs", []string{"list", "-H", "-t", "filesystem", "-o", "name", "-r", target.Dataset}, nil)
 	if err != nil {
-		return errors.New("cannot enumerate protected filesystems")
+		return fmt.Errorf("cannot enumerate protected filesystems: %w", err)
 	}
 	names := strings.Fields(string(output))
 	if len(names) == 0 {
@@ -281,7 +319,7 @@ func (s *Storage) Lock(ctx context.Context, target Target) error {
 		if mounted == "yes" {
 			_, err = s.Run(ctx, "zfs", []string{"unmount", name}, nil)
 			if err != nil {
-				return errors.New("protected filesystem remains busy")
+				return fmt.Errorf("protected filesystem unmount failed: %w", err)
 			}
 		}
 	}
@@ -292,11 +330,14 @@ func (s *Storage) Lock(ctx context.Context, target Target) error {
 	if status != "unavailable" {
 		_, err = s.Run(ctx, "zfs", []string{"unload-key", "-r", target.Dataset}, nil)
 		if err != nil {
-			return errors.New("ZFS key remains in use")
+			return fmt.Errorf("ZFS key unload failed: %w", err)
 		}
 	}
 	status, err = s.property(ctx, target.Dataset, "keystatus")
-	if err != nil || status != "unavailable" {
+	if err != nil {
+		return err
+	}
+	if status != "unavailable" {
 		return errors.New("ZFS key unload verification failed")
 	}
 	return nil
@@ -315,7 +356,7 @@ type EncryptedDataset struct {
 func (s *Storage) Inventory(ctx context.Context) ([]EncryptedDataset, error) {
 	output, err := s.Run(ctx, "zfs", []string{"list", "-H", "-t", "filesystem,volume", "-o", "name,encryption,encryptionroot,keystatus,keyformat"}, nil)
 	if err != nil {
-		return nil, errors.New("cannot inspect ZFS encryption state")
+		return nil, fmt.Errorf("cannot inspect ZFS encryption state: %w", err)
 	}
 	items := []EncryptedDataset{}
 	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {

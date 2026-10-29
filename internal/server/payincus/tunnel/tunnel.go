@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -28,7 +29,7 @@ type WorkerConfig struct {
 	TargetPort       int
 	InsecureTLS      bool
 	NodeClient       *nodeclient.Client
-	RequestHeartbeat func()
+	RequestHeartbeat func(string)
 }
 
 // Worker maintains the authenticated reverse connection.
@@ -309,13 +310,16 @@ func (w *Worker) connectAndServe(ctx context.Context) error {
 
 		switch frameType {
 		case FrameTypeHeartbeat:
-			if streamID == 0 && len(payload) == 0 && w.cfg.RequestHeartbeat != nil {
-				w.cfg.RequestHeartbeat()
+			if streamID == 0 && w.cfg.RequestHeartbeat != nil {
+				requestID, valid := heartbeatRequestID(payload)
+				if valid {
+					w.cfg.RequestHeartbeat(requestID)
+				}
 			}
 		case FrameTypeControlHello:
 			if streamID == 0 && len(payload) <= 4096 {
 				select {
-				case writeChan <- EncodeFrame(FrameTypeControlHello, 0, []byte(`{"capabilities":["payincus_node_v1","heartbeat-trigger-v1"]}`)):
+				case writeChan <- EncodeFrame(FrameTypeControlHello, 0, []byte(`{"capabilities":["payincus_node_v1","heartbeat-trigger-v1","heartbeat-confirm-v1"]}`)):
 				case <-connCtx.Done():
 					return connCtx.Err()
 				}
@@ -576,4 +580,22 @@ func streamJournalLogs(ctx context.Context, writeChan chan<- []byte, unit string
 	if err != nil && ctx.Err() == nil {
 		emit("节点 journal API 连接失败，请检查 incusd 状态与接口权限")
 	}
+}
+
+var heartbeatIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+func heartbeatRequestID(payload []byte) (string, bool) {
+	if len(payload) == 0 {
+		return "", true
+	}
+	if len(payload) > 128 {
+		return "", false
+	}
+	var request struct {
+		RequestID string `json:"requestId"`
+	}
+	if json.Unmarshal(payload, &request) != nil || !heartbeatIDPattern.MatchString(request.RequestID) {
+		return "", false
+	}
+	return request.RequestID, true
 }

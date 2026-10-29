@@ -12,12 +12,14 @@ import (
 )
 
 func TestStorageHeartbeatNativeContracts(t *testing.T) {
+	healthy := true
 	before := inspectZFSStorage
 	inspectZFSStorage = func(context.Context, string) (map[string]any, bool) {
-		return map[string]any{"sizeBytes": int64(2 << 30), "id": "backing", "availableBytes": int64(1 << 30)}, true
+		return map[string]any{"sizeBytes": int64(2 << 30), "id": "backing", "availableBytes": int64(1 << 30)}, healthy
 	}
 	t.Cleanup(func() { inspectZFSStorage = before })
 	locked, unavailable, brokenList := false, false, false
+	globalLocked := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var metadata any
 		switch r.URL.Path {
@@ -35,7 +37,7 @@ func TestStorageHeartbeatNativeContracts(t *testing.T) {
 			if locked {
 				status = "unavailable"
 			}
-			metadata = map[string]any{"datasets": []encryptionDataset{{Dataset: "tank/incus", EncryptionRoot: "tank/incus", Algorithm: "aes-256-gcm", KeyStatus: status, KeyFormat: "hex"}}}
+			metadata = map[string]any{"locked": globalLocked, "datasets": []encryptionDataset{{Dataset: "tank/incus", EncryptionRoot: "tank/incus", Algorithm: "aes-256-gcm", KeyStatus: status, KeyFormat: "hex"}}}
 		case "/1.0/storage-pools/data/resources", "/1.0/storage-pools/plain/resources":
 			if unavailable {
 				http.Error(w, "failed", 503)
@@ -58,6 +60,32 @@ func TestStorageHeartbeatNativeContracts(t *testing.T) {
 	if result["available"] != true || result["complete"] != true || items[0]["status"] != "ready" || items[1]["status"] != "ready" || items[0]["backing"] == nil {
 		t.Fatal("ready pool report invalid", result)
 	}
+	globalLocked = true
+	globalItems, validItems := read()["pools"].([]map[string]any)
+	if !validItems {
+		t.Fatal("invalid pool collection")
+	}
+	if globalItems[1]["status"] != "locked" {
+		t.Fatal("global lock queried forbidden plain-pool resources", globalItems[1])
+	}
+	global := globalItems[0]
+	encryption, ok := global["encryption"].(map[string]any)
+	if !ok {
+		t.Fatal("missing encryption identity", global)
+	}
+	nodeLocked, valid := encryption["nodeLocked"].(bool)
+	if !valid {
+		t.Fatal("missing node lock flag", encryption)
+	}
+	if global["status"] != "locked" || encryption["state"] != "unlocked" || !nodeLocked {
+		t.Fatal("node lock hid actual key state", global)
+	}
+	globalLocked = false
+	healthy = false
+	if read()["pools"].([]map[string]any)[0]["encryption"] == nil {
+		t.Fatal("health failure hid recovery identity")
+	}
+	healthy = true
 	locked = true
 	if read()["pools"].([]map[string]any)[0]["status"] != "locked" {
 		t.Fatal("unloaded keys were allocatable")
