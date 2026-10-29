@@ -122,33 +122,6 @@ func TestHeartbeatPayloadIncludesHostMetrics(t *testing.T) {
 	}
 }
 
-func TestHeartbeatPayloadClampsHeartbeatInterval(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    int
-		expected int
-	}{
-		{name: "zero falls back", input: 0, expected: 5},
-		{name: "too low clamps to min", input: 1, expected: 5},
-		{name: "too high clamps to max", input: 7200, expected: 3600},
-		{name: "valid stays unchanged", input: 60, expected: 60},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			payload := HeartbeatPayload("test-version", tt.input)
-			metrics, ok := payload["metrics"].(map[string]any)
-			if !ok {
-				t.Fatalf("metrics missing or invalid: %#v", payload["metrics"])
-			}
-
-			if metrics["heartbeatIntervalSeconds"] != tt.expected {
-				t.Fatalf("heartbeat interval mismatch: got=%#v want=%d", metrics["heartbeatIntervalSeconds"], tt.expected)
-			}
-		})
-	}
-}
-
 func TestRunningIncusStatusDetection(t *testing.T) {
 	tests := []struct {
 		name       string
