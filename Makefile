@@ -405,3 +405,19 @@ dist: doc
 help:
 	@echo The following targets are supported:
 	@sed -En 's/^#\s*section\(([^)]*)\):\s*(.*)$$/\n\x1b[1m\1:\x1b[0m \2/p;/^\.PHONY:/{N;N;s/^\.PHONY:\s*([^[:space:]]+)\n#\s*doc(:\s*(.*)\n\1:\s*$$|!\s*(.*)\n\1:[^\n]*)/  \1!\3\4/p;s/^\.PHONY:\s*([^[:space:]]+)\s*\n#\s*doc:\s*(.*)\n\1:\s*(.+)$$/  \1!\2 (runs \3)/p}' Makefile | awk -F! '{if(NF<2)print$$1;else{s=$$1;if(length(s)%2)s=s" ";while(length(s)<28)s=s" .";print s" "$$2}}'
+
+# PayIncus: tools/incus-tui is a standalone Go module (Bubble Tea), kept out of the upstream module.
+.PHONY: tui
+# doc: Build the node setup TUI and start it with sudo (needs root)
+tui:
+	cd tools/incus-tui && CGO_ENABLED=0 $(GO) build -trimpath -o "$(CURDIR)/scripts/payincus/dist/incus-tui" .
+	sudo "$(CURDIR)/scripts/payincus/dist/incus-tui"
+
+# PayIncus: cross-build the standalone TUI module into a Linux binary; override the target with TUI_ARCH=amd64|arm64.
+TUI_ARCH ?= $(shell $(GO) env GOARCH)
+
+.PHONY: tui-build
+# doc: Cross-build the node setup TUI as a Linux binary (TUI_ARCH=amd64|arm64)
+tui-build:
+	cd tools/incus-tui && CGO_ENABLED=0 GOOS=linux GOARCH=$(TUI_ARCH) $(GO) build -trimpath -o "$(CURDIR)/scripts/payincus/dist/incus-tui-linux-$(TUI_ARCH)" .
+	@echo "Linux TUI binary built: $(CURDIR)/scripts/payincus/dist/incus-tui-linux-$(TUI_ARCH)"

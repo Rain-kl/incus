@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -41,6 +42,36 @@ func TestUIRequiresConfirmationAndMasksSecrets(t *testing.T) {
 	m = asModel(t, updated)
 	if cmd != nil || m.page != "confirm" {
 		t.Fatal("initialization bypassed confirmation")
+	}
+}
+
+// PayIncus: the reviewed token form is the confirmation; Enter starts enrollment with no second y/n prompt.
+func TestTokenSubmissionStartsEnrollmentWithoutSecondConfirmation(t *testing.T) {
+	b := &backend{path: filepath.Join(t.TempDir(), "config.yaml"), runner: &fakeRunner{}}
+	m := model{backend: b, page: "token", fields: []field{{value: "https://panel.example.com"}, {value: "ait_" + strings.Repeat("x", 43)}}}
+	updated, cmd := m.submit()
+	m = asModel(t, updated)
+	if cmd == nil || !m.busy || m.page == "confirm" || m.confirm != nil {
+		t.Fatal("token enrollment still required a second confirmation")
+	}
+	if m.cancel == nil {
+		t.Fatal("token enrollment did not schedule a cancellable operation")
+	}
+	m.cancel()
+}
+
+func TestTokenSubmissionRejectsInvalidInput(t *testing.T) {
+	for _, values := range [][]string{
+		{"ftp://panel.example.com", "ait_" + strings.Repeat("x", 43)},
+		{"https://panel.example.com", "ait_short"},
+	} {
+		m := model{backend: &backend{path: filepath.Join(t.TempDir(), "config.yaml"), runner: &fakeRunner{}}, page: "token",
+			fields: []field{{value: values[0]}, {value: values[1]}}}
+		updated, cmd := m.submit()
+		m = asModel(t, updated)
+		if cmd != nil || m.busy || m.confirm != nil || m.message == "" {
+			t.Fatal("invalid token input was not rejected")
+		}
 	}
 }
 

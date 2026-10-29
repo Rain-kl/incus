@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -375,6 +376,10 @@ func (s *Service) control(w http.ResponseWriter, r *http.Request, method string,
 		if code != 500 {
 			message = http.StatusText(code)
 		}
+
+		// PayIncus: the response body stays generic, so the real reason must reach the journal.
+		// Host-side egress errors never embed command output (see egress/network.go), so no credentials are logged.
+		log.Printf("[payincus] %s failed: %v", method, err)
 
 		respond(w, code, message)
 		return

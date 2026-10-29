@@ -18,6 +18,9 @@ import (
 
 var version = "v2.0.0"
 
+// PayIncus: the reviewed token form is the confirmation; enrollment starts on submit with no second y/n prompt.
+const tokenEnrollNote = "使用一次性 token 接入所填面板：启用 Incus 并等待 API，兑换凭据、导入面板公钥证书、配置本地监听 127.0.0.1:8443，保存配置并启动连接器。token 将被消费，已有其他监听地址将拒绝覆盖。按 Enter 开始接入。"
+
 type field struct {
 	label, value string
 	secret       bool
@@ -28,6 +31,7 @@ type resultMsg struct {
 	err        error
 	restartTUI bool
 	pool       *encryptedPoolReceipt
+	report     []string
 }
 type (
 	statusMsg string
@@ -50,6 +54,8 @@ type (
 		logOffset             int
 		poolRequest           *encryptedPoolRequest
 		poolReceipt           *encryptedPoolReceipt
+		report                []string
+		quiet                 bool
 	}
 )
 
@@ -143,6 +149,8 @@ func (m *model) backToMenu() {
 	m.page = ""
 	m.poolRequest = nil
 	m.poolReceipt = nil
+	m.report = nil
+	m.quiet = false
 	m.message = ""
 	m.fields = nil
 	m.confirm = nil
@@ -200,11 +208,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.confirm = nil
 		m.fields = nil
 		m.page = ""
+		m.report = nil
+		m.quiet = false
 		m.showLogs = true
 		m.logOffset = 0
 		m.message = msg.text
 		if msg.err != nil {
 			m.message = "操作失败：" + m.backend.logs.redact(msg.err.Error())
+		}
+		// PayIncus: Xray maintenance shows a friendly report instead of the raw operation log.
+		if msg.report != nil {
+			m.report = msg.report
+			m.message = ""
+			m.page = "report"
+			m.showLogs = false
 		}
 		if msg.pool != nil {
 			m.poolReceipt = msg.pool
@@ -238,6 +255,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.page == "pool-receipt" {
 			if msg.String() == "enter" || msg.String() == "esc" {
+				m.backToMenu()
+			}
+			return m, nil
+		}
+		if m.page == "report" {
+			if msg.String() == "enter" || msg.String() == "esc" || msg.String() == "q" {
 				m.backToMenu()
 			}
 			return m, nil
@@ -375,13 +398,15 @@ func (m model) selectMenu() (tea.Model, tea.Cmd) {
 	}
 	switch action {
 	case "xray-inspect", "xray-test", "xray-restart", "xray-reconfigure":
+		// PayIncus: Xray actions run directly and report a friendly summary; no per-action confirmation.
 		action = strings.TrimPrefix(action, "xray-")
-		m.page = "confirm"
-		m.message = "通过本机 Incus API 执行 Xray 操作：" + action
-		if action == "reconfigure" {
-			m.message = "重建本节点托管的 Xray 服务、命名空间、网卡与生成配置，保留控制端策略及流量阻断保护。会中断代理连接；失败后保持阻断，可重试。"
-		}
-		m.confirm = func(ctx context.Context) error { return m.backend.xray(ctx, action) }
+		m.busy = true
+		m.quiet = true
+		m.logOffset = 0
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		ctx = context.WithValue(ctx, operationLogKey{}, m.backend.logs)
+		m.cancel = cancel
+		return m, xrayOperation(ctx, cancel, m.backend, action)
 	case "xray-logs":
 		return m, tea.ExecProcess(exec.Command("journalctl", "-u", "incudal-xray.service", "-u", "incudal-egress-*.service", "-n", "100", "-f", "--no-pager"), func(err error) tea.Msg { return resultMsg{text: "Xray 日志查看已结束", err: err} })
 	case "xray", "zfs", "advanced", "repair", "update":
@@ -411,6 +436,7 @@ func (m model) selectMenu() (tea.Model, tea.Cmd) {
 		m.fields = []field{{label: "Panel 根地址", value: c.Panel}, {label: "Agent ID", value: c.ID}, {label: "Agent 密钥（保留原值可直接确认）", value: c.Secret, secret: true}}
 	case "token":
 		m.page = "token"
+		m.message = tokenEnrollNote
 		m.fields = []field{{label: "Panel 根地址", value: m.backend.loadConnection().Panel}, {label: "一次性安装 token（ait_，只使用一次）", secret: true}}
 	case "certificate":
 		m.page = "certificate"
@@ -479,8 +505,15 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 			m.message = "无效的 ait_ 安装 token"
 			return m, nil
 		}
-		m.confirm = func(ctx context.Context) error { return m.backend.enroll(ctx, values[0], values[1]) }
-		m.message = "使用一次性 token 接入所填面板：启用 Incus 并等待 API，兑换凭据、导入面板公钥证书、配置本地监听 127.0.0.1:8443，保存配置并启动连接器。token 将被消费，已有其他监听地址将拒绝覆盖。"
+		// PayIncus: submitting the reviewed token form is the confirmation; enrollment starts immediately.
+		panel, token := values[0], values[1]
+		m.fields = nil
+		m.busy = true
+		m.logOffset = 0
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+		ctx = context.WithValue(ctx, operationLogKey{}, m.backend.logs)
+		m.cancel = cancel
+		return m, operation(ctx, cancel, func(ctx context.Context) error { return m.backend.enroll(ctx, panel, token) })
 	case "certificate":
 		if !strings.HasPrefix(values[0], "/") {
 			m.message = "请输入绝对路径"
@@ -545,10 +578,39 @@ func (m model) View() string {
 	if m.page == "pool-receipt" && m.poolReceipt != nil {
 		return ansi.Hardwrap(m.poolReceipt.view(), width, false)
 	}
+	// PayIncus: Xray results render as a friendly report page, not the operation log.
+	if m.page == "report" {
+		return ansi.Hardwrap(m.reportView(), width, false)
+	}
 	if m.busy || m.showLogs {
+		// PayIncus: Xray maintenance keeps the operation log off screen while it runs.
+		if m.busy && m.quiet {
+			return ansi.Hardwrap(m.progressView(), width, false)
+		}
 		return m.operationView(width)
 	}
 	return ansi.Hardwrap(m.render(), width, false)
+}
+
+func (m model) progressView() string {
+	var out strings.Builder
+	out.WriteString("Incus 节点管理 · " + version + "\n\n")
+	out.WriteString(cleanText(m.status) + "\n\n")
+	if m.message != "" {
+		out.WriteString(cleanText(m.message) + "\n\n")
+	}
+	out.WriteString("正在执行 Xray 操作，请稍候… Esc 取消等待\n")
+	return out.String()
+}
+
+func (m model) reportView() string {
+	var out strings.Builder
+	out.WriteString("Incus 节点管理 · " + version + "\n\n")
+	for _, line := range m.report {
+		out.WriteString(cleanText(line) + "\n")
+	}
+	out.WriteString("\nEnter / Esc / q 返回菜单\n")
+	return out.String()
 }
 
 func (m model) render() string {
@@ -633,7 +695,7 @@ func initialModel(b *backend) model {
 	if panel != "" && token != "" {
 		_ = os.Unsetenv("INCUDAL_PANEL_URL")
 		m.page = "token"
-		m.message = "请确认面板地址和一次性 token。确认后检查并补建 NAT 网桥，配置凭据、证书信任、本地监听并启动连接器；节点存储初始化可在主菜单完成。"
+		m.message = tokenEnrollNote + "节点存储初始化可在主菜单完成。"
 		m.fields = []field{{label: "Panel 根地址", value: panel}, {label: "一次性安装 token（ait_，只使用一次）", value: token, secret: true}}
 	}
 	return m

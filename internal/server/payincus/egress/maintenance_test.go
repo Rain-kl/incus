@@ -85,6 +85,55 @@ func TestXrayMaintenanceRejectsUnsafeStatesWithoutHostCommands(t *testing.T) {
 	}
 }
 
+// PayIncus: rebuilding the prepared environment must not require a proxy policy.
+func TestMaintainReconfigureWithoutPolicyPreparesEnvironment(t *testing.T) {
+	dir := t.TempDir()
+	fakeBin := filepath.Join(dir, "bin")
+	err := os.Mkdir(fakeBin, 0o700)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(dir, "commands.log")
+	// Host tooling is faked so no unit, namespace or nft state is touched. Absolute
+	// managed paths (/etc/systemd/system, /etc/netns) are absent in the sandbox.
+	for _, name := range []string{"systemctl", "ip", "sysctl", "nsenter", "mount", "nft"} {
+		body := "#!/bin/sh\nprintf '%s %s\\n' \"$(basename \"$0\")\" \"$*\" >> \"$MAINTENANCE_LOG\"\nexit 0\n"
+		err = os.WriteFile(filepath.Join(fakeBin, name), []byte(body), 0o700)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("MAINTENANCE_LOG", logPath)
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	m := newManager(dir)
+	_, err = m.Maintain(context.Background(), true)
+	if err != nil && strings.Contains(err.Error(), "no network policy") {
+		t.Fatalf("reconfigure was blocked without a proxy policy: %v", err)
+	}
+	commands, readErr := os.ReadFile(logPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	text := string(commands)
+	for _, want := range []string{
+		"systemctl show --property=LoadState --value incudal-xray.service",
+		"ip link show igw-host",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("prepared environment was not rebuilt (missing %q): %s", want, text)
+		}
+	}
+}
+
+// PayIncus: restarting a core that does not exist stays an explicit error.
+func TestMaintainRestartWithoutPolicyStillRejects(t *testing.T) {
+	m := newManager(t.TempDir())
+	_, err := m.Maintain(context.Background(), false)
+	if err == nil || !strings.Contains(err.Error(), "no network policy") {
+		t.Fatalf("restart without a policy was accepted: %v", err)
+	}
+}
+
 func TestMaintenanceChecksAndStopsLegacyUnitEvenWhenPolicyIsOff(t *testing.T) {
 	for _, tc := range []struct {
 		name      string

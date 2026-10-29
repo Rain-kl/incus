@@ -513,3 +513,91 @@ CI 接线修正：fork 初始没有官方 release tag，校验步骤从官方仓
 **本次已验证（2026-10-29，GPT Luna）**：前后端类型、相关安全/出口 API 与隔离 PostgreSQL 集成、界面守卫通过；Debian 13 原生集成二进制完成编译；隔离 QEMU 的真实 ZFS 测试通过正常 Shutdown 卸 key → Boot 保持未锁待授权 → Startup 加载 key 后恢复工作负载回调、验证原加密数据可读，并通过既有扩容验证。完整上游 `make check` 含宿主系统集成测试，未在共享工作机执行；后续集成矩阵与发布结果另行记录，不将本地契约测试当作完整上游套件。
 
 **部署约束**：Incus 数据库、控制连接配置及守护进程启动必须读取的系统目录/系统卷需位于可独立启动的非托管存储。托管加密根用于实例数据；把 Incus 自身元数据放进必须通过 Incus API 才能解锁的根会造成启动依赖环，不能据此承诺自恢复。
+
+## 一次性 token 接入取消二次确认（2026-10-29）
+
+### 目的
+
+- 消除一次性 token 接入的重复确认。此前在 `token` 表单页填写 Panel 地址与一次性 token 后按 Enter，会先进入 confirm 页再要求按 `y`，同一意图需要两次按键确认；由安装脚本经环境变量预填的路径尤其多余。
+
+### 行为与限制
+
+- `tools/incus-tui/main.go` 的 `submit()` 在地址与 token 校验通过后直接进入 busy 状态并调度 `backend.enroll`，不再进入 confirm 页。表单页按 Enter 即为确认。
+- `selectMenu` 的 `token` 分支与 `initialModel` 的预填路径把原先只在 confirm 页展示的说明（启用 Incus 并等待 API、兑换凭据、导入面板公钥证书、配置 127.0.0.1:8443 本地监听、保存配置并启动连接器；token 将被消费；已有其它监听地址拒绝覆盖）移到表单页 `m.message`，用户在按 Enter 前即可看到，不再有单独确认页承载该说明。
+- 校验失败（非法 Panel 地址、非法 token 格式）仍留在表单页显示错误，不执行任何操作，不消费 token。
+- 其余需确认的操作保留原有 confirm 页：初始化、网桥修复、本地监听、Xray 操作、Incus/连接器服务生命周期、更新与已安装更新、ZFS 各操作。手动 Panel 凭据与手动证书导入的确认页同样保留（证书页需展示 SHA256 指纹供核对，属于必要复核而非重复确认）。
+- 接入语义不变：token 单次消费、预检查失败不消费、兑换请求不自动重试、失败保留已完成步骤。
+
+### 配置与兼容性
+
+- 无新增或修改配置键、环境变量、软件包资产或控制端契约；不改动 `enrollment.go` 的接入步骤顺序、`payincus_node_v1` 接口或错误语义。
+
+### 代码接入点
+
+- `tools/incus-tui/main.go`：`tokenEnrollNote` 常量、`selectMenu` 的 `token` 分支、`submit()` 的 `token` 分支、`initialModel` 预填消息。不涉及上游 Incus 源码或上游 API 变更。
+
+### 测试与验证
+
+- `tools/incus-tui/main_test.go` 新增 `TestTokenSubmissionStartsEnrollmentWithoutSecondConfirmation`（提交即 busy 并调度可取消操作，且不进入 confirm 页）与 `TestTokenSubmissionRejectsInvalidInput`（非法地址/过短 token 仍被拒绝且不执行）。
+- 既有 `TestUIRequiresConfirmationAndMasksSecrets`、`TestUIServiceActionsAndFailure`、`TestInstallerTokenPrefillIsMaskedAndRemovedFromEnvironment`、`TestTerminalColorReplyCannotPollutePanelAddress` 及 `enrollment_test.go` 全部保持通过。
+- 验证命令：独立 TUI module 的 `go vet ./...`、`go test -race ./...` 通过（本机 macOS 需使用短 `TMPDIR`，否则 unix socket 路径过长会让 xray 测试 bind 失败，与本次改动无关）。本次为本地契约测试结果，未在节点真机 PTY 复验。
+
+## Xray 菜单直接执行与友好报告（2026-10-29）
+
+### 目的
+
+- 消除 Xray 菜单每项操作都要先过 confirm 页（“通过本机 Incus API 执行 Xray 操作：inspect … 按 y 确认”）的重复确认；并把原先把接口原始 JSON 全量打进操作日志页的展示，改为面向人的摘要报告。
+
+### 行为与限制
+
+- `tools/incus-tui/main.go` 的 `selectMenu` 中 `xray-inspect` / `xray-test` / `xray-restart` / `xray-reconfigure` 选中后直接进入 busy 并调用本机 API，不再进入 confirm 页；四个动作统一 10 分钟超时、可 Esc 取消。
+- 新增 `quiet` 状态：Xray 操作执行期间不显示操作日志页，只显示节点状态摘要与“正在执行 Xray 操作”。操作失败时仍回落到操作日志页便于诊断；完整命令/API 日志照常写入 `/var/log/incus-tui/session-*.log`。
+- `tools/incus-tui/xray.go` 的 `backend.xray` 由“只返回错误”改为返回本机 API 的原始 metadata；新增 `xrayReport` 渲染为报告页（`main.go` 的 `page == "report"`，Enter / Esc / q 返回 Xray 菜单）：
+  - `inspect`：运行状态（已应用 / 应用中 / 空闲 / 异常）、策略版本、Xray 核心可用性、活动节点、健康节点、托管网络、回退路由，以及节点列表 `#ID  协议  地址:端口`。
+  - `test`：成功/失败计数与逐节点结果（成功显示延迟 ms，失败显示脱敏后的错误原因）。
+  - `restart` / `reconfigure`：返回运行状态摘要（含错误码、阶段与明细）。
+- 报告只使用接口已脱敏的 `NodeSummary`（不含代理口令）与 `ProbeResult` 字段，不显示接口原始 JSON。
+- `查看 Xray 日志` 仍打开 `journalctl -u incudal-xray.service -u incudal-egress-*.service -n 100 -f`，保持不变。
+- 语义变化提示：`restart` / `reconfigure` 会中断代理连接且不再二次确认（菜单项文案已说明会重建运行环境）；失败保持既有阻断语义与可重试性，服务端未改动。
+
+### 配置与兼容性
+
+- 不改控制端契约、`payincus_node_v1`、API 路由或返回结构，仅改 TUI 展示层；`/1.0/payincus/xray` 的 GET/POST 契约与 `xray.inspect` / `xray.test` / `xray.restart` / `xray.reconfigure` 方法名不变。无新增配置键或环境变量。
+
+### 代码接入点
+
+- `tools/incus-tui/xray.go`：`xray` 返回值、`xrayOperation`、`xrayReport` 及格式化辅助函数（`xrayStatusLines` / `xrayStateName` / `xrayNodeIDs` / `xrayProtocol` / `xrayEndpoint` / `xrayProbeLine`）。
+- `tools/incus-tui/main.go`：`report` / `quiet` 模型状态、`resultMsg.report`、report 页与按键处理、`progressView` / `reportView`、`selectMenu` 的 Xray 分支。不涉及上游 Incus 源码或上游 API。
+
+### 测试与验证
+
+- `tools/incus-tui/xray_test.go`：`TestXrayMenuRunsDirectlyWithoutConfirmation`（四个动作均直接执行、无 confirm 页、可取消）、`TestXrayOperationKeepsTheLogOffScreen`（运行期不显示操作日志）、`TestXrayReportRendersFriendlySummary`（inspect / test / reconfigure 摘要字段与脱敏、未知动作拒绝）、`TestXrayResultShowsReportInsteadOfLogs`（结果页渲染并返回 Xray 菜单）。
+- `TestXrayBackendUsesLocalIncusAPIAndRedactsResponse` 与 `TestXrayBackendPreservesAPIErrorCancellationAndDecodeFailure` 已按新签名更新，仍断言 API 调用序列、口令不进入日志、错误/取消/坏响应被拒绝。
+- 验证命令：独立 TUI module 的 `gofmt -l`、`go vet ./...`、`go test -race ./...` 通过（macOS 需短 `TMPDIR`）。本次为本地契约测试结果，未在节点真机 PTY 复验。
+
+## 节点维护错误可见性与无策略重建环境（2026-10-29）
+
+### 目的
+
+- 现场排查发现：在没有下发任何出口策略的节点上执行「重新配置 Xray」返回 `HTTP 500 node operation failed; inspect incusd journal`，但 incusd journal 里没有任何对应记录。原因是 `Maintain` 在 `desired == nil` 时立即返回 `no network policy configured`，而 `Service.control` 丢弃真实错误只回固定文案且不落日志；同时「重建准备环境」被错误地与「是否已配置代理」绑在一起。
+
+### 行为与限制
+
+- `internal/server/payincus/service.go` 的 `control()` 在响应前把真实错误写入 incusd journal（`log.Printf("[payincus] %s failed: %v", method, err)`）。响应体与状态码映射保持不变，避免改动控制端已有的 `controlFailure` 契约。宿主侧 egress 错误按设计从不包含命令输出（见 `egress/network.go` 的 `run`/`nft`），因此不会把凭据写进日志。
+- `internal/server/payincus/egress/maintenance.go`：`Maintain(ctx, true)`（即 TUI 的「重新配置 Xray」）在 `desired == nil` 时改为调用新增的 `rebuildPreparedEnvironment`，重建与策略无关的准备环境：停止并清理托管的 `incudal-xray.service`、`xray.json`、核心 API socket 与 `/etc/netns/<ns>`，`daemon-reload`，重新解压 xray 核心，并重建网关命名空间与 veth。不启动代理核心、不接管流量，返回 `Report()`（此时 `state=idle`、`appliedRevision=0`）。`Maintain(ctx, false)`（重启）在无策略时仍返回 `no network policy configured`，因为不存在可重启的核心。
+- 组（`incudal-eg-*`）资源属于策略驱动的 reconcile，本路径不触碰，避免在注册表含历史条目时误删他人资源。
+- TUI 在 `restart`/`reconfigure` 报告页追加一行提示：`appliedRevision == 0` 时显示「本节点尚未下发代理策略：已重建运行环境，暂不接管流量」。
+
+### 配置与兼容性
+
+- 不改 `/1.0/payincus/xray` 的 GET/POST 契约、`xray.inspect/test/restart/reconfigure` 方法名与返回结构；不新增配置键、环境变量或软件包资产。仅改变无策略时 `reconfigure` 的成功/失败结果，以及失败时 journal 里多一条真实原因。
+
+### 代码接入点
+
+- `internal/server/payincus/service.go`（`control` 日志）、`internal/server/payincus/egress/maintenance.go`（`Maintain` 无策略分支、`rebuildPreparedEnvironment`）、`tools/incus-tui/xray.go`（无策略提示）。不涉及上游 Incus 源码或上游 API。
+
+### 测试与验证
+
+- `internal/server/payincus/egress/maintenance_test.go` 新增 `TestMaintainReconfigureWithoutPolicyPreparesEnvironment`（用假 `systemctl`/`ip` 记录调用，断言无策略时 reconfigure 不再返回 `no network policy` 且确实执行了 `systemctl show --property=LoadState` 与 `ip link show igw-host`）与 `TestMaintainRestartWithoutPolicyStillRejects`（无策略时 restart 仍拒绝）。既有 `TestXrayMaintenanceRejectsUnsafeStatesWithoutHostCommands`、`TestMaintenanceChecksAndStopsLegacyUnitEvenWhenPolicyIsOff` 保持通过。
+- `tools/incus-tui/xray_test.go` 的 `TestXrayReportRendersFriendlySummary` 增加 `appliedRevision == 0` 的重建提示断言。
+- 验证命令：linux 容器内 `go test ./internal/server/payincus/...` 全部通过（egress 等包为 linux-only，macOS 上无法执行）；独立 TUI module 的 `gofmt -l`、`go vet ./...`、`go test -race ./...` 通过。未在节点真机复验无策略重建，也未发布新包。

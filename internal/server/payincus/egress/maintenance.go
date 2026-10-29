@@ -135,7 +135,11 @@ func (m *Manager) Maintain(ctx context.Context, reinstall bool) (any, error) {
 	desired := m.desired
 	m.mu.Unlock()
 	if desired == nil {
-		return nil, fmt.Errorf("no network policy configured")
+		if !reinstall {
+			return nil, fmt.Errorf("no network policy configured")
+		}
+		// PayIncus: rebuilding the prepared environment does not depend on a proxy policy.
+		return m.rebuildPreparedEnvironment(ctx)
 	}
 	owner, err := os.ReadFile(filepath.Join(m.dir, "owner"))
 	if err != nil || string(owner) != "incudal-network-v1\n" {
@@ -231,6 +235,53 @@ func (m *Manager) Maintain(ctx context.Context, reinstall bool) (any, error) {
 		return nil, errors.New("network configuration incomplete; inspect Incus journal")
 	}
 	return status, nil
+}
+
+// PayIncus: reconfiguring the prepared environment must work without a proxy policy.
+// With no policy no core runs and no instance traffic is taken over, so only stale
+// managed artifacts are removed and the gateway scaffolding is recreated. Group
+// resources stay untouched because they are owned by the policy-driven reconcile.
+func (m *Manager) rebuildPreparedEnvironment(ctx context.Context) (any, error) {
+	loadState, err := networkCommand(ctx, "systemctl", "show", "--property=LoadState", "--value", "incudal-xray.service").Output()
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(string(loadState)) != "not-found" {
+		err = run(ctx, "systemctl", "stop", "incudal-xray.service")
+		if err != nil {
+			return nil, err
+		}
+	}
+	closeCoreAPI(coreAPIPath(m.dir))
+	err = resetNamespace(ctx, namespace, "igw-host")
+	if err != nil {
+		return nil, err
+	}
+	for _, path := range []string{filepath.Join(m.dir, "xray.json"), coreAPIPath(m.dir), "/etc/systemd/system/incudal-xray.service"} {
+		err = removeManagedFile(path)
+		if err != nil {
+			return nil, err
+		}
+	}
+	err = os.RemoveAll(filepath.Join("/etc/netns", namespace))
+	if err != nil {
+		return nil, err
+	}
+	err = run(ctx, "systemctl", "daemon-reload")
+	if err != nil {
+		return nil, err
+	}
+	_, err = extractBinary(m.dir)
+	if err != nil {
+		return nil, err
+	}
+	err = prepareNamespace(ctx)
+	if err != nil {
+		return nil, err
+	}
+	m.lastHash, m.legacyRef = "", ""
+	m.coreRestartRequired = true
+	return m.Report(), nil
 }
 
 func resetNamespace(ctx context.Context, name, iface string) error {
