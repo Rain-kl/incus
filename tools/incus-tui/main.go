@@ -77,23 +77,23 @@ var menu = []menuItem{
 }
 
 var xrayMenu = []menuItem{
-	{"查看节点与运行状态", "xray-inspect"},
-	{"测试代理节点", "xray-test"},
-	{"重启 Xray 服务", "xray-restart"},
-	{"查看 Xray 日志", "xray-logs"},
-	{"重新配置 Xray（重建运行环境）", "xray-reconfigure"},
+	{"查看节点", "xray-inspect"},
+	{"测试节点", "xray-test"},
+	{"重启服务", "xray-restart"},
+	{"查看日志", "xray-logs"},
+	{"恢复设置", "xray-reconfigure"},
 	{"返回主菜单", "back"},
 }
 
 var advancedMenu = []menuItem{
-	{"手动配置 Panel 连接（Agent ID / 密钥）", "credentials"},
-	{"手动导入 Panel 客户端证书（mTLS）", "certificate"},
-	{"检查 / 修复反向隧道监听 127.0.0.1:8443", "listener"},
-	{"清空数据（重装控制端前重置本节点）", "reset"},
 	{"Incus 服务管理", "incus"},
-	{"连接器服务管理", "incudal-agent"},
-	{"查看 Incus 实时日志", "incus-journal"},
-	{"查看连接器实时日志", "connector-journal"},
+	{"Agent 服务管理", "incudal-agent"},
+	{"查看 Incus 日志", "incus-journal"},
+	{"查看 Agent 日志", "connector-journal"},
+	{"配置 Panel 连接", "credentials"},
+	{"导入 mTLS 证书", "certificate"},
+	{"检查隧道监听", "listener"},
+	{"清空数据", "reset"},
 	{"返回主菜单", "back"},
 }
 
@@ -103,20 +103,20 @@ var repairMenu = []menuItem{
 }
 
 var updateMenu = []menuItem{
-	{"开发版（canary）", "update-canary"},
-	{"稳定版（正式 Release）", "update-latest"},
+	{"稳定版", "update-latest"},
+	{"开发版", "update-canary"},
 	{"应用已安装更新（无需下载）", "apply-installed"},
 	{"返回主菜单", "back"},
 }
 
 var zfsManagementMenu = []menuItem{
-	{"安装并检查 ZFS 依赖", "zfs-prepare"},
+	{"初始化 ZFS", "zfs-prepare"},
 	{"创建加密 ZFS 存储池", "zpool"},
-	{"输入密钥解锁 ZFS", "zfs-unlock"},
-	{"将 ZFS 数据集绑定到 Incus", "zfs-bind"},
-	{"查看 ZFS 池状态", "zfs-list"},
-	{"注册已有加密数据集", "zfs-register"},
-	{"返回主菜单", "back"},
+	{"解锁 ZFS", "zfs-unlock"},
+	{"绑定 Incus", "zfs-bind"},
+	{"查看状态", "zfs-list"},
+	{"注册数据集", "zfs-register"},
+	{"返回", "back"},
 }
 
 func (m model) currentMenu() []menuItem {
@@ -434,7 +434,7 @@ func (m model) selectMenu() (tea.Model, tea.Cmd) {
 	case "apply-installed":
 		m.updateChannel = "installed"
 		m.page = "confirm"
-		m.message = "应用已安装的软件包：只读检查 root UID/GID 映射，重启原本运行的 Incus 和连接器，使新版二进制及映射生效；保持开机启用状态，不下载、不安装、不改映射。Incus shutdown 可能停止实例，后续启动按已有策略及安全锁决定。请安排维护窗口。"
+		m.message = "应用已安装的软件包：只读检查 root UID/GID 映射，重启原本运行的 Incus 和连接器，使新版二进制及映射生效。Incus shutdown 可能停止实例，后续启动按已有策略及安全锁决定。请安排维护窗口。"
 	case "credentials":
 		c := m.backend.loadConnection()
 		m.page = "credentials"

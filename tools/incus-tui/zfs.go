@@ -78,8 +78,8 @@ func (b *backend) prepareZFS(ctx context.Context) error {
 			release[k] = strings.Trim(v, `"`)
 		}
 	}
-	debian := release["ID"] == "debian" && release["VERSION_ID"] == "13"
-	ubuntu := release["ID"] == "ubuntu" && release["VERSION_ID"] == "24.04"
+	debian := release["ID"] == "debian"
+	ubuntu := release["ID"] == "ubuntu"
 	if !debian && !ubuntu {
 		return errors.New("仅支持 Debian 和 Ubuntu")
 	}
