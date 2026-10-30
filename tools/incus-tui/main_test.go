@@ -21,7 +21,20 @@ func TestUIRequiresConfirmationAndMasksSecrets(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	m := model{backend: b, menuGroup: "advanced", cursor: 0}
+	// Locate menu entries by action: order and labels are presentation detail.
+	cursorWhere := func(group, action string) int {
+		for i, item := range (model{menuGroup: group}).currentMenu() {
+			if item.action == action {
+				return i
+			}
+		}
+		return -1
+	}
+	credentials := cursorWhere("advanced", "credentials")
+	if credentials < 0 {
+		t.Fatal("advanced menu is missing the credentials action")
+	}
+	m := model{backend: b, menuGroup: "advanced", cursor: credentials}
 	updated, cmd := m.selectMenu()
 	m = asModel(t, updated)
 	if cmd != nil || strings.Contains(m.View(), c.Secret) {
@@ -37,7 +50,11 @@ func TestUIRequiresConfirmationAndMasksSecrets(t *testing.T) {
 	if cmd != nil || m.confirm != nil {
 		t.Fatal("cancel executed action")
 	}
-	m = model{backend: b, cursor: 0}
+	initialize := cursorWhere("", "initialize")
+	if initialize < 0 {
+		t.Fatal("main menu is missing the initialize action")
+	}
+	m = model{backend: b, cursor: initialize}
 	updated, cmd = m.selectMenu()
 	m = asModel(t, updated)
 	if cmd != nil || m.page != "confirm" {

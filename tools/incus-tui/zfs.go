@@ -19,6 +19,20 @@ import (
 
 var poolPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{0,39}$`)
 
+// supportedVersionAtLeast reports whether VERSION_ID is at or above the minimum
+// validated release. Non-numeric ids fail closed.
+func supportedVersionAtLeast(value string, minimum float64) bool {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return false
+	}
+	parsed, err := strconv.ParseFloat(trimmed, 64)
+	if err != nil {
+		return false
+	}
+	return parsed >= minimum
+}
+
 // PayIncus: DKMS needs headers for the running kernel, which may not be a distro kernel.
 func (b *backend) zfsKernelPrerequisites(ctx context.Context, kernel string) (bool, bool, error) {
 	modules := b.modulesPath
@@ -82,6 +96,19 @@ func (b *backend) prepareZFS(ctx context.Context) error {
 	ubuntu := release["ID"] == "ubuntu"
 	if !debian && !ubuntu {
 		return errors.New("仅支持 Debian 和 Ubuntu")
+	}
+	// Only Debian 13+ and Ubuntu 24.04+ are validated targets. Older releases use
+	// the legacy one-line sources.list layout, which this path would corrupt.
+	releaseID := release["ID"] + " " + release["VERSION_ID"]
+	switch {
+	case debian:
+		if !supportedVersionAtLeast(release["VERSION_ID"], 13) {
+			return fmt.Errorf("仅支持 Debian 13 及以上（当前 %s）", releaseID)
+		}
+	case ubuntu:
+		if !supportedVersionAtLeast(release["VERSION_ID"], 24.04) {
+			return fmt.Errorf("仅支持 Ubuntu 24.04 及以上（当前 %s）", releaseID)
+		}
 	}
 	kernelOutput, err := b.run(ctx, "uname", "-r")
 	if err != nil {

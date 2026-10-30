@@ -287,7 +287,14 @@ func TestZFSDependencyInstallationContracts(t *testing.T) {
 		t.Fatal("fixture write failed")
 	}
 	f.calls = nil
-	if b.prepareZFS(context.Background()) == nil || len(f.calls) > 0 {
-		t.Fatal("unsupported target changed host")
+	if b.prepareZFS(context.Background()) == nil {
+		t.Fatal("unsupported release accepted")
+	}
+	// The release check may probe the kernel read-only; it must never mutate the host.
+	for _, c := range f.calls {
+		if c.name == "uname" {
+			continue
+		}
+		t.Fatalf("unsupported target changed host: %s %s", c.name, strings.Join(c.args, " "))
 	}
 }

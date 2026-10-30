@@ -369,4 +369,3 @@ func TestReconcileGroupsWithoutGroupsSkipsOwnershipChecks(t *testing.T) {
 		t.Fatalf("reconciling without groups must not claim package egress ownership")
 	}
 }
-

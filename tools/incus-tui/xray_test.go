@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -16,7 +17,13 @@ import (
 
 func xrayAPIServer(t *testing.T, handler http.Handler) {
 	t.Helper()
-	root := t.TempDir()
+	// Unix sockets cap out near 104 bytes on macOS, and t.TempDir() paths are
+	// long enough to exceed it under a nested test name.
+	root, err := os.MkdirTemp("", "ix")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
 	t.Setenv("INCUS_DIR", root)
 	listener, err := net.Listen("unix", filepath.Join(root, "unix.socket"))
 	if err != nil {
@@ -105,29 +112,40 @@ func TestXrayBackendPreservesAPIErrorCancellationAndDecodeFailure(t *testing.T) 
 	}
 }
 
+// Xray maintenance actions run immediately with no y/n prompt. The menu order and
+// labels are presentation details, so the test locates entries by action.
 func TestXrayMenuRunsDirectlyWithoutConfirmation(t *testing.T) {
-	m := model{backend: &backend{}, menuGroup: "xray", width: 100, height: 40}
-	items := m.currentMenu()
-	if len(items) != 6 || items[0].action != "xray-inspect" || items[1].action != "xray-test" || items[2].action != "xray-restart" || items[3].action != "xray-logs" || items[4].action != "xray-reconfigure" {
-		t.Fatalf("unexpected Xray menu: %#v", items)
+	entries := func() map[string]int {
+		m := model{backend: &backend{}, menuGroup: "xray", width: 100, height: 40}
+		found := map[string]int{}
+		for i, item := range m.currentMenu() {
+			found[item.action] = i
+		}
+		return found
 	}
-	if !strings.Contains(m.View(), "Xray 管理") || !strings.Contains(m.View(), "查看 Xray 日志") {
-		t.Fatal("Xray actions are not visible in the TUI")
-	}
-	for _, cursor := range []int{0, 1, 2, 4} {
-		m.cursor = cursor
+	cursorOf := entries()
+	for _, action := range []string{"xray-inspect", "xray-test", "xray-restart", "xray-reconfigure"} {
+		cursor, ok := cursorOf[action]
+		if !ok {
+			t.Fatalf("Xray menu is missing %s", action)
+		}
+		m := model{backend: &backend{}, menuGroup: "xray", width: 100, height: 40, cursor: cursor}
 		updated, cmd := m.selectMenu()
 		m = asModel(t, updated)
 		if cmd == nil || !m.busy || m.page == "confirm" || m.confirm != nil {
-			t.Fatalf("Xray menu item %d asked for a confirmation instead of running", cursor)
+			t.Fatalf("%s asked for a confirmation instead of running", action)
 		}
 		if m.cancel == nil {
-			t.Fatalf("Xray menu item %d did not schedule a cancellable operation", cursor)
+			t.Fatalf("%s did not schedule a cancellable operation", action)
 		}
 		m.cancel()
-		m.busy, m.cancel = false, nil
 	}
-	m.menuGroup, m.cursor = "xray", 3
+
+	cursor, ok := cursorOf["xray-logs"]
+	if !ok {
+		t.Fatal("Xray menu is missing the journal action")
+	}
+	m := model{backend: &backend{}, menuGroup: "xray", width: 100, height: 40, cursor: cursor}
 	updated, cmd := m.selectMenu()
 	if cmd == nil || asModel(t, updated).page != "" {
 		t.Fatal("journal action did not open the managed Xray log view")

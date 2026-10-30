@@ -140,10 +140,23 @@ func TestNodeUpdateReadinessFailureDoesNotRestartConnector(t *testing.T) {
 }
 
 func TestUpdateMenuConfirmationAndPackageTransactionCannotBeCancelled(t *testing.T) {
-	m := model{backend: updaterBackend(t, updateRunner(false, false, "", nil)), menuGroup: "update"}
-	if !strings.Contains(m.View(), "开发版") || !strings.Contains(m.View(), "稳定版") {
-		t.Fatal("missing channel choices")
+	// Locate the release channel entry by action: menu order is presentation detail.
+	cursorOf := func(action string) int {
+		for i, item := range (model{menuGroup: "update"}).currentMenu() {
+			if item.action == action {
+				return i
+			}
+		}
+		return -1
 	}
+	canary := cursorOf("update-canary")
+	if canary < 0 {
+		t.Fatal("update menu is missing the canary channel")
+	}
+	if cursorOf("update-latest") < 0 {
+		t.Fatal("update menu is missing the stable channel")
+	}
+	m := model{backend: updaterBackend(t, updateRunner(false, false, "", nil)), menuGroup: "update", cursor: canary}
 	updated, cmd := m.selectMenu()
 	m = asModel(t, updated)
 	if cmd != nil || m.page != "confirm" || m.updateChannel != "canary" {

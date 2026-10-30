@@ -268,7 +268,7 @@ func resetNodeState(ctx context.Context, client resetLocalClient) (ResetSummary,
 				continue
 			}
 			var detail struct {
-				Managed bool `json:"managed"`
+				Managed bool   `json:"managed"`
 				Type    string `json:"type"`
 			}
 			body, getErr := client.call(ctx, http.MethodGet, "/1.0/networks/"+name, nil)
