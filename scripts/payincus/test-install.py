@@ -104,7 +104,7 @@ if '--allow-downgrades' in sys.argv and os.environ.get('NEEDRESTART_MODE') != 'l
 
     def test_platform_and_channel_matrix(self):
         for channel in ('latest', 'canary'):
-            for target in ('debian-13', 'ubuntu-24.04'):
+            for target in ('debian-13', 'ubuntu-24.04', 'ubuntu-26.04'):
                 for arch in ('amd64', 'arm64'):
                     with self.subTest(channel=channel, target=target, arch=arch):
                         result, log = self.run_installer(channel, target, arch)
@@ -121,7 +121,7 @@ if '--allow-downgrades' in sys.argv and os.environ.get('NEEDRESTART_MODE') != 'l
                 self.assertEqual(log, '', result.stdout + result.stderr)
 
     def test_update_channel_switch_and_reinstall(self):
-        for channel, target, arch in itertools.product(('latest', 'canary'), ('debian-13', 'ubuntu-24.04'), ('amd64', 'arm64')):
+        for channel, target, arch in itertools.product(('latest', 'canary'), ('debian-13', 'ubuntu-24.04', 'ubuntu-26.04'), ('amd64', 'arm64')):
             with self.subTest(channel=channel, target=target, arch=arch):
                 result, log = self.run_installer(channel, target, arch, mode='--update')
                 self.assertEqual(result.returncode, 0, result.stderr)

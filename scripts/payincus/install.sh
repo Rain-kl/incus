@@ -15,8 +15,8 @@ fi
 . /etc/os-release
 case " ${ID:-} ${ID_LIKE:-} " in *debian*|*ubuntu*) ;; *) echo 'Only Debian-family systems are supported.' >&2; exit 1 ;; esac
 case "${ID:-}:${VERSION_ID:-}" in
-  ubuntu:24.04|debian:13) target="${ID}-${VERSION_ID}" ;;
-  *) echo "No validated package target for ${ID:-unknown} ${VERSION_ID:-unknown}; supported: Ubuntu 24.04, Debian 13." >&2; exit 1 ;;
+  ubuntu:24.04|ubuntu:26.04|debian:13) target="${ID}-${VERSION_ID}" ;;
+  *) echo "No validated package target for ${ID:-unknown} ${VERSION_ID:-unknown}; supported: Ubuntu 24.04, Ubuntu 26.04, Debian 13." >&2; exit 1 ;;
 esac
 arch="$(dpkg --print-architecture)"
 case "$arch" in amd64|arm64) ;; *) echo "Unsupported architecture: $arch" >&2; exit 1 ;; esac

@@ -237,6 +237,36 @@ func groupInternal(inv inventory) []string {
 	return compactNetworks(result)
 }
 
+// groupPoolRouteConflict reports whether a host route claims part of the group
+// gateway pool without belonging to one of our own group interfaces.
+//
+// Only routes whose own destination lies inside the pool conflict. Wider
+// routes that merely contain the pool are ordinary host state: DHCP clients
+// install 169.254.0.0/16 on the uplink, and cloud DHCP setups (OCI and most
+// other providers) refresh it on every boot. Treating those as a conflict made
+// every DHCP node fail reconciliation, which then blocked incus.service
+// through its incudal-network.service dependency.
+func groupPoolRouteConflict(dst string, device string, owned map[string]bool, pool *net.IPNet) bool {
+	if dst == "default" || dst == "" {
+		return false
+	}
+
+	ip, _, err := net.ParseCIDR(dst)
+	if err != nil {
+		ip = net.ParseIP(dst)
+		if ip == nil {
+			return false
+		}
+	}
+
+	ip4 := ip.To4()
+	if ip4 == nil || !pool.Contains(ip4) {
+		return false
+	}
+
+	return !owned[device]
+}
+
 func protectGroupPool(ctx context.Context, all map[string]groupRuntime) error {
 	body, err := networkCommand(ctx, "ip", "-j", "route", "show", "table", "all").Output()
 	if err != nil {
@@ -253,33 +283,13 @@ func protectGroupPool(ctx context.Context, all map[string]groupRuntime) error {
 	}
 
 	_, pool, _ := net.ParseCIDR("169.254.244.0/24")
+	owned := map[string]bool{}
+	for _, g := range all {
+		owned[g.iface()] = true
+	}
+
 	for _, route := range routes {
-		if route.Dst == "default" || route.Dst == "" {
-			continue
-		}
-
-		ip, network, e := net.ParseCIDR(route.Dst)
-		if e != nil {
-			ip = net.ParseIP(route.Dst)
-			if ip == nil {
-				continue
-			}
-
-			network = &net.IPNet{IP: ip, Mask: net.CIDRMask(32, 32)}
-		}
-
-		if ip.To4() == nil || (!pool.Contains(ip) && !network.Contains(pool.IP)) {
-			continue
-		}
-
-		owned := false
-		for _, g := range all {
-			if route.Dev == g.iface() {
-				owned = true
-			}
-		}
-
-		if !owned {
+		if groupPoolRouteConflict(route.Dst, route.Dev, owned, pool) {
 			return fmt.Errorf("package gateway address pool already in use")
 		}
 	}
@@ -460,6 +470,37 @@ func groupHash(group EgressGroup) string {
 }
 
 // Caller holds applyGate. Only the common nft transaction is shared; each core has its own readiness bit.
+// teardownGroups removes every group a previous revision created. It never
+// inspects unrelated host routes, so disabling egress cannot fail because of
+// pre-existing network state.
+func (m *Manager) teardownGroups(ctx context.Context) error {
+	all := readGroupRegistry()
+	if len(all) == 0 {
+		return nil
+	}
+
+	for key, g := range all {
+		cleanupGroup(ctx, g)
+		routes, _ := networkCommand(ctx, "ip", "route", "show", "table", g.table()).Output()
+		rules, rulesErr := networkCommand(ctx, "ip", "rule", "show").Output()
+		if len(bytes.TrimSpace(routes)) == 0 && rulesErr == nil && !strings.Contains(string(rules), "lookup "+g.table()) && networkCommand(ctx, "ip", "link", "show", g.iface()).Run() != nil && networkCommand(ctx, "ip", "netns", "exec", g.ns(), "true").Run() != nil {
+			delete(all, key)
+			delete(m.groupChecks, key)
+			delete(m.groupReady, key)
+			delete(m.groupHashes, key)
+			delete(m.groupRefs, key)
+			delete(m.groupHealth, key)
+		}
+	}
+
+	m.mu.Lock()
+	m.status.Groups = []EgressGroupStatus{}
+	m.status.Bindings = []EgressBindingStatus{}
+	m.mu.Unlock()
+
+	return saveGroupRegistry(all)
+}
+
 func (m *Manager) reconcileGroups(ctx context.Context, in Instruction, inv inventory, restore bool) error {
 	{
 		err := validateGroups(in)
@@ -467,6 +508,15 @@ func (m *Manager) reconcileGroups(ctx context.Context, in Instruction, inv inven
 			return err
 		}
 	}
+
+	// No package owns a group: tear down anything a previous revision left and
+	// stop. Claiming ownership and probing the gateway address pool would make an
+	// untouched node pay for package egress, and unrelated host state could then
+	// fail an apply that only wanted to disable egress.
+	if len(in.Groups) == 0 && len(in.Bindings) == 0 {
+		return m.teardownGroups(ctx)
+	}
+
 	{
 		err := ensureGroupOwnership(ctx)
 		if err != nil {

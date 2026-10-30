@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -316,3 +317,56 @@ func anyStrings(t *testing.T, value any) []string {
 	}
 	return result
 }
+
+// DHCP uplinks install a link-local supernet that contains the group gateway
+// pool. Treating that as an occupied pool made every cloud node fail restore,
+// which blocked incus.service through its incudal-network.service dependency.
+func TestGroupPoolIgnoresBroaderLinkLocalRoutes(t *testing.T) {
+	_, pool, err := net.ParseCIDR("169.254.244.0/24")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	owned := map[string]bool{"ipgh1": true}
+	for _, tc := range []struct {
+		name     string
+		dst      string
+		dev      string
+		conflict bool
+	}{
+		{"dhcp link-local supernet on uplink", "169.254.0.0/16", "enp0s6", false},
+		{"dhcp metadata host route on uplink", "169.254.169.254", "enp0s6", false},
+		{"pool address on foreign device", "169.254.244.6", "enp0s6", true},
+		{"pool subnet on foreign device", "169.254.244.0/24", "eth9", true},
+		{"pool address on our own group interface", "169.254.244.6", "ipgh1", false},
+		{"unrelated subnet", "10.10.0.0/22", "incusbr0", false},
+		{"default route", "default", "enp0s6", false},
+		{"ipv6 link-local", "fe80::/64", "enp0s6", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := groupPoolRouteConflict(tc.dst, tc.dev, owned, pool)
+			if got != tc.conflict {
+				t.Fatalf("groupPoolRouteConflict(%q, %q) = %v, want %v", tc.dst, tc.dev, got, tc.conflict)
+			}
+		})
+	}
+}
+
+// Disabling package egress must not depend on unrelated host routing state, and
+// must not leave a stale claim that blocks the next enable.
+func TestReconcileGroupsWithoutGroupsSkipsOwnershipChecks(t *testing.T) {
+	ctx := context.Background()
+	in := Instruction{SchemaVersion: 2, Revision: 1, Egress: Policy{Mode: "off", Strategy: "failover", ProbeURL: "https://1.1.1.1/cdn-cgi/trace", ProbeIntervalSeconds: 30}}
+
+	m := NewManager()
+	err := m.reconcileGroups(ctx, in, inventory{}, false)
+	if err != nil {
+		t.Fatalf("empty group set must reconcile without touching host state: %v", err)
+	}
+
+	owner := filepath.Join(stateDir, "groups", "owner")
+	if _, statErr := os.Stat(owner); statErr == nil {
+		t.Fatalf("reconciling without groups must not claim package egress ownership")
+	}
+}
+

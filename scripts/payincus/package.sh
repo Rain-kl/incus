@@ -10,7 +10,7 @@ source_sha="${SOURCE_SHA:-$(git rev-parse HEAD)}"
 # shellcheck source=/dev/null
 . /etc/os-release
 target="${ID}-${VERSION_ID}"
-case "$target" in ubuntu-24.04|debian-13) ;; *) echo "Unsupported build distribution: $target" >&2; exit 1 ;; esac
+case "$target" in ubuntu-24.04|ubuntu-26.04|debian-13) ;; *) echo "Unsupported build distribution: $target" >&2; exit 1 ;; esac
 internal_version="$(cat scripts/payincus/VERSION)"
 [[ "$internal_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Invalid internal version' >&2; exit 1; }
 channel=canary

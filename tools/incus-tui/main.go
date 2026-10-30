@@ -89,6 +89,7 @@ var advancedMenu = []menuItem{
 	{"手动配置 Panel 连接（Agent ID / 密钥）", "credentials"},
 	{"手动导入 Panel 客户端证书（mTLS）", "certificate"},
 	{"检查 / 修复反向隧道监听 127.0.0.1:8443", "listener"},
+	{"清空数据（重装控制端前重置本节点）", "reset"},
 	{"Incus 服务管理", "incus"},
 	{"连接器服务管理", "incudal-agent"},
 	{"查看 Incus 实时日志", "incus-journal"},
@@ -422,6 +423,10 @@ func (m model) selectMenu() (tea.Model, tea.Cmd) {
 		m.page = "confirm"
 		m.message = "请先在面板开启节点维护，暂停创建实例。修复 incusbr0：备份配置，停止受影响的持久 LXC，删除旧网桥并重建 10.10.0.1/22 NAT 网络，恢复网卡及原运行状态。保留有效 IP，仅重新分配缺失/冲突地址；会中断网络。集群、VM 占用或运行中的临时容器将拒绝自动修复。"
 		m.confirm = m.backend.repairBridge
+	case "reset":
+		m.page = "confirm"
+		m.message = "清空本节点全部托管数据，用于控制端重装前的彻底重置：停止并删除所有实例、自定义数据卷、存储池、托管网桥、非 default profile 与项目，连带清理防火墙与出口配置、密钥托管文件及面板接入凭据。系统镜像缓存会保留。此操作不可撤销，且会中断本节点全部业务。请确认控制端已不再依赖此节点的任何实例。"
+		m.confirm = m.backend.reset
 	case "update-canary", "update-latest":
 		m.updateChannel = strings.TrimPrefix(action, "update-")
 		m.page = "confirm"

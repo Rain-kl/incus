@@ -29,12 +29,20 @@ jobs:
           - arch: arm64
             runner: ubuntu-24.04-arm
             target: ubuntu-24.04
+
           - arch: amd64
             runner: ubuntu-24.04
             target: debian-13
           - arch: arm64
             runner: ubuntu-24.04-arm
             target: debian-13
+
+          - arch: amd64
+            runner: ubuntu-24.04
+            target: ubuntu-26.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            target: ubuntu-26.04
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -115,6 +123,19 @@ jobs:
           restore-keys: |
             gobuild-debian-13-${{ matrix.arch }}-${{ hashFiles('go.sum') }}-
             gobuild-debian-13-${{ matrix.arch }}-
+      - name: Build and package on Ubuntu 26.04
+        if: matrix.target == 'ubuntu-26.04'
+        env:
+          RELEASE_REF: ${{ github.ref_name }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          mkdir -p "$HOME/.cache/payincus-gobuild"
+          docker run --rm -v "$PWD:/source" -w /source \
+            -v "$(go env GOROOT):/opt/go:ro" \
+            -v "$(go env GOMODCACHE):/gomod" -e GOMODCACHE=/gomod \
+            -v "$HOME/.cache/payincus-gobuild:/gobuild" -e GOCACHE=/gobuild \
+            -e RELEASE_REF -e SOURCE_SHA -e GOARCH=${{ matrix.arch }} \
+            ubuntu:26.04 bash scripts/payincus/build-debian.sh
       - name: Build and package on Debian 13
         if: matrix.target == 'debian-13'
         env:
@@ -160,7 +181,7 @@ jobs:
         run: |
           set -euo pipefail
           find release -type f -name SHA256SUMS -execdir sha256sum --check SHA256SUMS \;
-          for target in ubuntu-24.04 debian-13; do
+          for target in ubuntu-24.04 ubuntu-26.04 debian-13; do
             for arch in amd64 arm64; do
               mv "release/payincus-linux-$target-$arch/SHA256SUMS" "release/payincus-linux-$target-$arch/SHA256SUMS-$target-$arch"
             done

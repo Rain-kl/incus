@@ -145,7 +145,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 
-		respond(w, 200, map[string]any{"api_extensions": []string{Extension, XrayMaintenanceExtension, nodesecurity.StartupExtension, nodesecurity.Extension, nodesecurity.ResumeExtension, nodesecurity.StorageExtension, nodesecurity.StoragePoolDirExtension, nodesecurity.StoragePoolAllocExtension, nodesecurity.StoragePoolResizeExtension}, "api_version": "1.0", "transport_only_agent": true})
+		respond(w, 200, map[string]any{"api_extensions": []string{Extension, XrayMaintenanceExtension, ResetExtension, nodesecurity.StartupExtension, nodesecurity.Extension, nodesecurity.ResumeExtension, nodesecurity.StorageExtension, nodesecurity.StoragePoolDirExtension, nodesecurity.StoragePoolAllocExtension, nodesecurity.StoragePoolResizeExtension}, "api_version": "1.0", "transport_only_agent": true})
 		return
 	case Prefix + "/report":
 		if r.Method != http.MethodGet {
@@ -177,6 +177,10 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		payload["networkStatus"] = s.engine.Report()
 		payload["nodeApi"] = Extension
 		respond(w, 200, payload)
+		return
+	case Prefix + "/reset":
+		// Local terminal only: a wiped node must never be triggered remotely.
+		s.HandleReset(w, r, unixSocketClient{})
 		return
 	case Prefix + "/xray":
 		if r.TLS != nil {
