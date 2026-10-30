@@ -40,7 +40,7 @@ jobs:
           EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
-          for target in ubuntu-24.04 debian-13; do
+          for target in ubuntu-24.04 ubuntu-26.04 debian-13; do
             for arch in amd64 arm64; do
               (cd "release/payincus-linux-$target-$arch" && sha256sum --check SHA256SUMS)
             done
@@ -50,7 +50,7 @@ jobs:
           import os
           from pathlib import Path
           import itertools
-          for target, arch in itertools.product(("ubuntu-24.04", "debian-13"), ("amd64", "arm64")):
+          for target, arch in itertools.product(("ubuntu-24.04", "ubuntu-26.04", "debian-13"), ("amd64", "arm64")):
               folder = Path("release") / f"payincus-linux-{target}-{arch}"
               manifests = list(folder.glob("*.manifest.json"))
               assert len(manifests) == 1, "expected one source manifest"
@@ -69,10 +69,12 @@ jobs:
         run: |
           set -euo pipefail
           tag="canary-$(cat scripts/payincus/VERSION)-${SOURCE_SHA:0:12}"
-          for target in ubuntu-24.04 debian-13; do
-            for arch in amd64 arm64; do
-              mv "release/payincus-linux-$target-$arch/SHA256SUMS" "release/payincus-linux-$target-$arch/SHA256SUMS-$target-$arch"
-            done
+          # Derive the matrix from the downloaded artifacts instead of repeating a
+          # hard-coded list: every build job publishes one SHA256SUMS per folder,
+          # and any target this step forgets would upload a duplicate asset name.
+          for folder in release/payincus-linux-*; do
+            target="$(basename "$folder")"
+            mv "$folder/SHA256SUMS" "$folder/SHA256SUMS-${target#payincus-linux-}"
           done
           cp scripts/payincus/RELEASE-NOTES.md release-notes.md
           printf '\nSource: %s\nValidated CI: %s\n' "$SOURCE_SHA" "$CI_URL" >> release-notes.md

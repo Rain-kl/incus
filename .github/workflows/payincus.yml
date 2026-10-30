@@ -181,10 +181,12 @@ jobs:
         run: |
           set -euo pipefail
           find release -type f -name SHA256SUMS -execdir sha256sum --check SHA256SUMS \;
-          for target in ubuntu-24.04 ubuntu-26.04 debian-13; do
-            for arch in amd64 arm64; do
-              mv "release/payincus-linux-$target-$arch/SHA256SUMS" "release/payincus-linux-$target-$arch/SHA256SUMS-$target-$arch"
-            done
+          # Derive the matrix from the downloaded artifacts instead of repeating a
+          # hard-coded list: every build job emits one SHA256SUMS per folder, and a
+          # target this step forgets would upload a duplicate asset name.
+          for folder in release/payincus-linux-*; do
+            target="$(basename "$folder")"
+            mv "$folder/SHA256SUMS" "$folder/SHA256SUMS-${target#payincus-linux-}"
           done
           flags=(--latest)
           gh release create "$GITHUB_REF_NAME" --verify-tag "${flags[@]}" \
