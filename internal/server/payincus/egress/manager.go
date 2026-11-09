@@ -560,6 +560,14 @@ func (m *Manager) reconcileLocked(parent context.Context, withHealth bool) {
 	}
 
 	if in.Egress.Mode != "off" {
+		for _, family := range []string{"-4", "-6"} {
+			if err := verifyPolicyRoute(ctx, family, mark, "igw-host"); err != nil {
+				blockLegacyGateway(ctx)
+				m.lastHash = ""
+				m.setError("network")
+				return
+			}
+		}
 		expected := []string{}
 		for _, node := range in.Nodes {
 			expected = append(expected, nodeTag(node.ID))

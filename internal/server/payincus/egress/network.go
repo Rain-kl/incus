@@ -53,7 +53,7 @@ func ensureOwnership(ctx context.Context) error {
 		}
 
 		rules, _ := networkCommand(ctx, "ip", family, "rule", "show").Output()
-		if strings.Contains(string(rules), "17420:") {
+		if strings.Contains(string(rules), "17420:") || strings.Contains(string(rules), fmt.Sprint(hostRulePriority)+":") {
 			return fmt.Errorf("reserved routing priority already in use")
 		}
 	}
@@ -529,15 +529,11 @@ func prepareNamespace(ctx context.Context, resolvers ...string) error {
 				return err
 			}
 		}
-		// Adding only if absent avoids accumulating duplicate rules on every sync.
-		out, _ := networkCommand(ctx, "ip", family, "rule", "show").Output()
-		if !strings.Contains(string(out), "fwmark "+mark+"/"+mask+" lookup 7420") {
-			{
-				err := run(ctx, "ip", family, "rule", "add", "pref", "17420", "fwmark", mark+"/"+mask, "lookup", "7420")
-				if err != nil {
-					return err
-				}
-			}
+		if err := ensurePolicyRule(ctx, family, mark+"/"+mask, "7420", hostRulePriority, 17420); err != nil {
+			return err
+		}
+		if err := verifyPolicyRoute(ctx, family, mark, "igw-host"); err != nil {
+			return err
 		}
 		{
 			err := run(ctx, "ip", "netns", "exec", namespace, "ip", family, "route", "replace", "local", "default", "dev", "lo", "table", "7421")
@@ -546,7 +542,7 @@ func prepareNamespace(ctx context.Context, resolvers ...string) error {
 			}
 		}
 
-		out, _ = networkCommand(ctx, "ip", "netns", "exec", namespace, "ip", family, "rule", "show").Output()
+		out, _ := networkCommand(ctx, "ip", "netns", "exec", namespace, "ip", family, "rule", "show").Output()
 		if !strings.Contains(string(out), "lookup 7421") {
 			{
 				err := run(ctx, "ip", "netns", "exec", namespace, "ip", family, "rule", "add", "pref", "17421", "fwmark", "0x430000/0xff0000", "lookup", "7421")
@@ -625,14 +621,8 @@ func cleanGateway(ctx context.Context) error {
 	// ordinary route; no unrelated conntrack entries or firewall tables are reset.
 	_ = run(ctx, "systemctl", "disable", "--now", "incudal-xray.service")
 	for _, family := range []string{"-4", "-6"} {
-		out, _ := networkCommand(ctx, "ip", family, "rule", "show").Output()
-		if strings.Contains(string(out), "fwmark "+mark+"/"+mask+" lookup 7420") {
-			{
-				err := run(ctx, "ip", family, "rule", "del", "pref", "17420", "fwmark", mark+"/"+mask, "lookup", "7420")
-				if err != nil {
-					return err
-				}
-			}
+		if err := removePolicyRules(ctx, family, mark+"/"+mask, "7420", hostRulePriority, 17420); err != nil {
+			return err
 		}
 	}
 

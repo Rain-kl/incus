@@ -356,18 +356,14 @@ func prepareGroupNamespace(ctx context.Context, g groupRuntime, resolvers []stri
 		}
 	}
 
-	out, _ := networkCommand(ctx, "ip", "rule", "show").Output()
-	rule := g.mark() + "/" + groupMask + " lookup " + g.table()
-	if !strings.Contains(string(out), rule) {
-		{
-			err := run(ctx, "ip", "rule", "add", "pref", fmt.Sprint(17000+g.Slot), "fwmark", g.mark()+"/"+groupMask, "lookup", g.table())
-			if err != nil {
-				return err
-			}
-		}
+	if err := ensurePolicyRule(ctx, "-4", g.mark()+"/"+groupMask, g.table(), groupRuleBase+g.Slot, 17000+g.Slot); err != nil {
+		return err
+	}
+	if err := verifyPolicyRoute(ctx, "-4", g.mark(), g.iface()); err != nil {
+		return err
 	}
 
-	out, _ = networkCommand(ctx, "ip", "-n", g.ns(), "rule", "show").Output()
+	out, _ := networkCommand(ctx, "ip", "-n", g.ns(), "rule", "show").Output()
 	if !strings.Contains(string(out), "lookup 7421") {
 		{
 			err := run(ctx, "ip", "-n", g.ns(), "rule", "add", "pref", "17421", "fwmark", "0x430000/0xff0000", "lookup", "7421")
@@ -403,7 +399,7 @@ func prepareGroupNamespace(ctx context.Context, g groupRuntime, resolvers []stri
 func cleanupGroup(ctx context.Context, g groupRuntime) {
 	closeCoreAPI(coreAPIPath(g.dir()))
 	_ = run(ctx, "systemctl", "disable", "--now", g.unit())
-	_ = run(ctx, "ip", "rule", "del", "pref", fmt.Sprint(17000+g.Slot), "fwmark", g.mark()+"/"+groupMask, "lookup", g.table())
+	_ = removePolicyRules(ctx, "-4", g.mark()+"/"+groupMask, g.table(), groupRuleBase+g.Slot, 17000+g.Slot)
 	_ = run(ctx, "ip", "route", "flush", "table", g.table())
 	_ = run(ctx, "ip", "link", "del", g.iface())
 	_ = run(ctx, "ip", "netns", "del", g.ns())

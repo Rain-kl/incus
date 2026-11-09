@@ -149,6 +149,11 @@ func TestPackageEgressDatapath(t *testing.T) {
 	}
 
 	in.Groups[1].Nodes[0].Outbound = json.RawMessage(`{"protocol":"socks","settings":{"servers":[{"address":"198.18.0.2","port":1081}]}}`)
+	// Reproduce wg-quick: the non-WireGuard marked traffic takes a full-tunnel table.
+	command("ip", "route", "add", "default", "via", "198.18.0.2", "table", "51820")
+	command("ip", "rule", "add", "pref", "5208", "lookup", "main", "suppress_prefixlength", "0")
+	command("ip", "rule", "add", "pref", "5209", "not", "fwmark", "0xca6c", "lookup", "51820")
+	command("ip", "rule", "add", "pref", "17001", "fwmark", runtime["p1"].mark()+"/"+groupMask, "lookup", runtime["p1"].table())
 	for _, group := range in.Groups {
 		{
 			err := prepareGroupNamespace(ctx, runtime[group.Key], []string{"1.1.1.1"})
@@ -158,7 +163,7 @@ func TestPackageEgressDatapath(t *testing.T) {
 		}
 	}
 	// Repeated reconciliation must not accumulate routing rules. Group rules
-	// must win over the legacy 17420 mask, which also matches group marks.
+	// must win over full-tunnel routing and the host mask, which also matches group marks.
 	{
 		err := prepareGroupNamespace(ctx, runtime["p1"], []string{"1.1.1.1"})
 		if err != nil {
@@ -170,6 +175,20 @@ func TestPackageEgressDatapath(t *testing.T) {
 	if strings.Count(hostRulesText, "fwmark "+runtime["p1"].mark()+"/"+groupMask+" lookup "+runtime["p1"].table()) != 1 {
 		t.Fatalf("duplicate or missing group route rule: %s", hostRulesText)
 	}
+	if strings.Contains(hostRulesText, "17001:") {
+		t.Fatalf("legacy routing rule survived migration: %s", hostRulesText)
+	}
+	for _, g := range runtime {
+		route := command("ip", "route", "get", "198.19.0.2", "mark", g.mark())
+		if !strings.Contains(route, "dev "+g.iface()) {
+			t.Fatalf("full tunnel captured group traffic: %s", route)
+		}
+	}
+	command("ip", "rule", "add", "pref", "500", "lookup", "51820")
+	if err := verifyPolicyRoute(ctx, "-4", runtime["p1"].mark(), runtime["p1"].iface()); err == nil {
+		t.Fatal("an earlier foreign routing rule was accepted as a healthy datapath")
+	}
+	command("ip", "rule", "del", "pref", "500", "lookup", "51820")
 	{
 		err := protectGroupPool(ctx, runtime)
 		if err != nil {
@@ -198,12 +217,19 @@ func TestPackageEgressDatapath(t *testing.T) {
 	legacy.Egress.ProxyNodeIDs = []int{1}
 	legacy.Nodes = legacy.Nodes[:1]
 	legacy.Nodes[0].Outbound = json.RawMessage(`{"protocol":"socks","settings":{"servers":[{"address":"198.18.0.2","port":1082}]}}`)
+	command("ip", "rule", "add", "pref", "17420", "fwmark", mark+"/"+mask, "lookup", "7420")
 	inv := inventory{Bridges: []string{"incusbr0"}, Internal: []string{"10.10.0.0/24"}}
 	{
 		err := prepareNamespace(ctx, "1.1.1.1")
 		if err != nil {
 			t.Fatal(err)
 		}
+	}
+	if route := command("ip", "route", "get", "198.19.0.2", "mark", mark); !strings.Contains(route, "dev igw-host") {
+		t.Fatalf("full tunnel captured host egress traffic: %s", route)
+	}
+	if route := command("ip", "route", "get", "198.19.0.2"); !strings.Contains(route, "table 51820") {
+		t.Fatalf("unmarked traffic lost the host full tunnel: %s", route)
 	}
 
 	rules, err := hostRules(legacy, inv)

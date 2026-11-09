@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -555,7 +556,7 @@ func (m *Manager) reconcileGroups(ctx context.Context, in Instruction, inv inven
 				}
 
 				rules, _ := networkCommand(ctx, "ip", "rule", "show").Output()
-				if strings.Contains(string(rules), "lookup "+g.table()) || strings.Contains(string(rules), fmt.Sprint(17000+g.Slot)+":") {
+				if strings.Contains(string(rules), "lookup "+g.table()) || strings.Contains(string(rules), fmt.Sprint(17000+g.Slot)+":") || strings.Contains(string(rules), fmt.Sprint(groupRuleBase+g.Slot)+":") {
 					return fmt.Errorf("reserved group routing rule already in use")
 				}
 			}
@@ -683,6 +684,9 @@ func (m *Manager) reconcileGroups(ctx context.Context, in Instruction, inv inven
 					log.Printf("[egress] group %s core setup failed: %v", group.Key, e)
 					result.state.State = "error"
 					result.state.Error = "xray"
+					if errors.Is(e, errPolicyRouting) {
+						result.state.Error = "network"
+					}
 					return
 				}
 			}
@@ -726,7 +730,20 @@ func (m *Manager) reconcileGroups(ctx context.Context, in Instruction, inv inven
 	}
 
 	workers.Wait()
+	m.mu.Lock()
+	previousStatus := append([]EgressGroupStatus(nil), m.status.Groups...)
+	m.mu.Unlock()
 	for _, result := range results {
+		unchanged := false
+		for _, previous := range previousStatus {
+			if previous == result.state {
+				unchanged = true
+				break
+			}
+		}
+		if !unchanged {
+			log.Printf("[egress] group %s revision=%d state=%s error=%s", result.group.Key, in.Revision, result.state.State, result.state.Error)
+		}
 		ready[result.group.Key] = result.ready
 		m.groupHashes[result.group.Key] = result.hash
 		m.groupReady[result.group.Key] = result.ready
