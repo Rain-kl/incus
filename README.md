@@ -3,7 +3,7 @@
 Canary Script
 
 ```
-curl -fsSL https://raw.githubusercontent.com/Rain-kl/incus/canary/scripts/payincus/install.sh | sudo bash -s -- canary
+curl -fsSL https://raw.githubusercontent.com/Rain-kl/incus/canary/scripts/node/install.sh | sudo bash -s -- canary
 ```
 
 Incus is a modern, secure and powerful system container and virtual machine manager.

@@ -23,7 +23,7 @@ import (
 	"github.com/lxc/incus/v7/internal/server/instance"
 	instanceDrivers "github.com/lxc/incus/v7/internal/server/instance/drivers"
 	"github.com/lxc/incus/v7/internal/server/instance/instancetype"
-	nodesecurity "github.com/lxc/incus/v7/internal/server/payincus/security"
+	nodesecurity "github.com/lxc/incus/v7/internal/server/agent/security"
 	"github.com/lxc/incus/v7/internal/server/project"
 	"github.com/lxc/incus/v7/internal/server/state"
 	"github.com/lxc/incus/v7/internal/server/warnings"
@@ -363,7 +363,7 @@ func instanceStart(s *state.State, inst instance.Instance) error {
 
 func instancesStart(s *state.State, instances []instance.Instance) {
 	// PayIncus: defer native boot scheduling until control-plane key recovery; retain alarm enforcement.
-	if nodesecurity.Check() != nil || (os.Getenv("INCUS_PAYINCUS") == "1" && nodesecurity.Default().StartupPending()) {
+	if nodesecurity.Check() != nil || (os.Getenv("INCUS_AGENT") == "1" && nodesecurity.Default().StartupPending()) {
 		return
 	}
 

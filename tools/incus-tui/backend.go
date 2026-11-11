@@ -21,7 +21,7 @@ import (
 	"time"
 )
 
-const configPath = "/etc/incudal-agent/config.yaml"
+const configPath = "/etc/incus/agent/config.yaml"
 
 // Runner centralizes node API and system command adapters.
 type Runner interface {
@@ -31,7 +31,7 @@ type Runner interface {
 type commandRunner struct{}
 
 func (commandRunner) Run(ctx context.Context, name string, args []string, input string) ([]byte, error) {
-	// PayIncus: package frontends must not open a second terminal UI inside operation logs.
+	// Incus: package frontends must not open a second terminal UI inside operation logs.
 	packageCommand := filepath.Base(name) == "apt-get"
 	if packageCommand {
 		args = append([]string{"-o", "Dpkg::Use-Pty=0", "-o", "Dpkg::Progress-Fancy=0"}, args...)
@@ -89,7 +89,7 @@ func (b *backend) run(ctx context.Context, name string, args ...string) ([]byte,
 }
 
 func (b *backend) service(ctx context.Context, unit, action string) error {
-	if unit != "incus" && unit != "incudal-agent" {
+	if unit != "incus" && unit != "incus-agent" {
 		return errors.New("unknown service")
 	}
 	switch action {
@@ -105,7 +105,7 @@ func (b *backend) service(ctx context.Context, unit, action string) error {
 	return err
 }
 
-// PayIncus: Type=simple becoming active does not mean that the Unix API is ready.
+// Incus: Type=simple becoming active does not mean that the Unix API is ready.
 func (b *backend) manageService(ctx context.Context, unit, action string) error {
 	err := b.service(ctx, unit, action)
 	if err != nil {
@@ -119,11 +119,11 @@ func (b *backend) manageService(ctx context.Context, unit, action string) error 
 }
 
 func (b *backend) connectorReady(ctx context.Context) error {
-	output, err := b.run(ctx, "systemctl", "show", "incudal-agent", "--property=ExecStart", "--value")
+	output, err := b.run(ctx, "systemctl", "show", "incus-agent", "--property=ExecStart", "--value")
 	if err != nil {
 		return err
 	}
-	if !strings.Contains(string(output), "/usr/libexec/incus/payincus-agent") {
+	if !strings.Contains(string(output), "/usr/libexec/incus/agent/incus-agent") {
 		return errors.New("节点连接服务配置不匹配，请检查 Incus 软件包与 systemd 配置")
 	}
 	return nil
@@ -140,16 +140,16 @@ func (b *backend) connect(ctx context.Context, c connection) error {
 	if err != nil {
 		return err
 	}
-	err = b.service(ctx, "incudal-agent", "enable")
+	err = b.service(ctx, "incus-agent", "enable")
 	if err != nil {
 		return err
 	}
-	return b.service(ctx, "incudal-agent", "restart")
+	return b.service(ctx, "incus-agent", "restart")
 }
 
 func (b *backend) status(ctx context.Context) string {
 	var lines []string
-	for _, unit := range []string{"incus", "incudal-agent"} {
+	for _, unit := range []string{"incus", "incus-agent"} {
 		data, err := b.run(ctx, "systemctl", "show", unit, "--property=ActiveState,SubState,UnitFileState", "--no-pager")
 		if err != nil {
 			lines = append(lines, unit+": 状态读取失败: "+err.Error())
@@ -157,7 +157,7 @@ func (b *backend) status(ctx context.Context) string {
 		}
 		lines = append(lines, unit+": "+strings.ReplaceAll(strings.TrimSpace(string(data)), "\n", "  "))
 	}
-	data, err := b.run(ctx, "/usr/bin/incus", "query", "/1.0/payincus")
+	data, err := b.run(ctx, "/usr/bin/incus", "query", "/1.0/agent")
 	var capabilities struct {
 		Extensions []string `json:"api_extensions"`
 	}
@@ -166,7 +166,7 @@ func (b *backend) status(ctx context.Context) string {
 	}
 	supported := false
 	for _, extension := range capabilities.Extensions {
-		if extension == "payincus_node_v1" {
+		if extension == "incus_node_v1" {
 			supported = true
 		}
 	}

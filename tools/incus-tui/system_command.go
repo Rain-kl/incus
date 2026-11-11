@@ -11,7 +11,7 @@ import (
 
 var systemCommandDirs = []string{"/usr/sbin", "/usr/bin", "/sbin", "/bin"}
 
-// PayIncus: non-login root shells may omit sbin, including after installing kmod/ZFS.
+// Incus: non-login root shells may omit sbin, including after installing kmod/ZFS.
 func systemCommand(ctx context.Context, name string, args ...string) *exec.Cmd {
 	if !strings.ContainsRune(name, filepath.Separator) {
 		resolved, err := exec.LookPath(name)

@@ -24,7 +24,7 @@ func (l *operationLog) tail() ([]string, error) {
 	return append([]string(nil), l.recent...), l.err
 }
 
-// PayIncus: status and command output have separate bounded regions, even during package updates.
+// Incus: status and command output have separate bounded regions, even during package updates.
 func (m model) operationView(width int) string {
 	height := m.height
 	if height <= 0 {

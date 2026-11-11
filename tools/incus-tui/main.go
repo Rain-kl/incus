@@ -18,7 +18,7 @@ import (
 
 var version = "v2.0.0"
 
-// PayIncus: the reviewed token form is the confirmation; enrollment starts on submit with no second y/n prompt.
+// Incus: the reviewed token form is the confirmation; enrollment starts on submit with no second y/n prompt.
 const tokenEnrollNote = "使用一次性 token 接入所填面板：启用 Incus 并等待 API，兑换凭据、导入面板公钥证书、配置本地监听 127.0.0.1:8443，保存配置并启动连接器。token 将被消费，已有其他监听地址将拒绝覆盖。按 Enter 开始接入。"
 
 type field struct {
@@ -87,7 +87,7 @@ var xrayMenu = []menuItem{
 
 var advancedMenu = []menuItem{
 	{"Incus 服务管理", "incus"},
-	{"Agent 服务管理", "incudal-agent"},
+	{"Agent 服务管理", "incus-agent"},
 	{"查看 Incus 日志", "incus-journal"},
 	{"查看 Agent 日志", "connector-journal"},
 	{"配置 Panel 连接", "credentials"},
@@ -163,7 +163,7 @@ func (m model) refresh(showLogs bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 		defer cancel()
-		// PayIncus: automatic status checks update the summary without operation output.
+		// Incus: automatic status checks update the summary without operation output.
 		if showLogs {
 			ctx = context.WithValue(ctx, operationLogKey{}, m.backend.logs)
 		}
@@ -217,7 +217,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.message = "操作失败：" + m.backend.logs.redact(msg.err.Error())
 		}
-		// PayIncus: Xray maintenance shows a friendly report instead of the raw operation log.
+		// Incus: Xray maintenance shows a friendly report instead of the raw operation log.
 		if msg.report != nil {
 			m.report = msg.report
 			m.message = ""
@@ -231,7 +231,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.refresh(false)
 	case tea.KeyMsg:
-		// PayIncus: delayed terminal color reports are protocol replies, never form input.
+		// Incus: delayed terminal color reports are protocol replies, never form input.
 		if msg.Type == tea.KeyRunes && msg.Alt && string(msg.Runes) == "]" {
 			m.readingOSC = true
 			return m, nil
@@ -356,7 +356,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		if m.page == "incus" || m.page == "incudal-agent" {
+		if m.page == "incus" || m.page == "incus-agent" {
 			actions := map[string]string{"1": "enable", "2": "start", "3": "stop", "4": "restart", "5": "disable"}
 			action, ok := actions[msg.String()]
 			if ok {
@@ -399,7 +399,7 @@ func (m model) selectMenu() (tea.Model, tea.Cmd) {
 	}
 	switch action {
 	case "xray-inspect", "xray-test", "xray-restart", "xray-reconfigure":
-		// PayIncus: Xray actions run directly and report a friendly summary; no per-action confirmation.
+		// Incus: Xray actions run directly and report a friendly summary; no per-action confirmation.
 		action = strings.TrimPrefix(action, "xray-")
 		m.busy = true
 		m.quiet = true
@@ -409,7 +409,7 @@ func (m model) selectMenu() (tea.Model, tea.Cmd) {
 		m.cancel = cancel
 		return m, xrayOperation(ctx, cancel, m.backend, action)
 	case "xray-logs":
-		return m, tea.ExecProcess(exec.Command("journalctl", "-u", "incudal-xray.service", "-u", "incudal-egress-*.service", "-n", "100", "-f", "--no-pager"), func(err error) tea.Msg { return resultMsg{text: "Xray 日志查看已结束", err: err} })
+		return m, tea.ExecProcess(exec.Command("journalctl", "-u", "incus-xray.service", "-u", "incus-egress-*.service", "-n", "100", "-f", "--no-pager"), func(err error) tea.Msg { return resultMsg{text: "Xray 日志查看已结束", err: err} })
 	case "xray", "zfs", "advanced", "repair", "update":
 		m.menuGroup = action
 		m.cursor = 0
@@ -452,12 +452,12 @@ func (m model) selectMenu() (tea.Model, tea.Cmd) {
 		m.confirm = m.backend.listener
 	case "incus":
 		m.page = "incus"
-	case "incudal-agent":
-		m.page = "incudal-agent"
+	case "incus-agent":
+		m.page = "incus-agent"
 	case "incus-journal", "connector-journal":
 		unit := "incus"
 		if action == "connector-journal" {
-			unit = "incudal-agent"
+			unit = "incus-agent"
 		}
 		cmd, err := journalCommand(unit)
 		if err != nil {
@@ -474,7 +474,7 @@ func (m model) selectMenu() (tea.Model, tea.Cmd) {
 }
 
 func journalCommand(unit string) (*exec.Cmd, error) {
-	if unit != "incus" && unit != "incudal-agent" {
+	if unit != "incus" && unit != "incus-agent" {
 		return nil, fmt.Errorf("unknown journal service")
 	}
 	return exec.Command("journalctl", "-u", unit, "-n", "100", "-f", "--no-pager"), nil
@@ -510,7 +510,7 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 			m.message = "无效的 ait_ 安装 token"
 			return m, nil
 		}
-		// PayIncus: submitting the reviewed token form is the confirmation; enrollment starts immediately.
+		// Incus: submitting the reviewed token form is the confirmation; enrollment starts immediately.
 		panel, token := values[0], values[1]
 		m.fields = nil
 		m.busy = true
@@ -555,7 +555,7 @@ func finalCarriageReturnSegment(line string) string {
 }
 
 func cleanText(value string) string {
-	// PayIncus: strip the whole terminal sequence before removing individual control characters.
+	// Incus: strip the whole terminal sequence before removing individual control characters.
 	value = ansi.Strip(value)
 	value = strings.ReplaceAll(value, "\r\n", "\n")
 	if strings.ContainsRune(value, '\r') {
@@ -583,12 +583,12 @@ func (m model) View() string {
 	if m.page == "pool-receipt" && m.poolReceipt != nil {
 		return ansi.Hardwrap(m.poolReceipt.view(), width, false)
 	}
-	// PayIncus: Xray results render as a friendly report page, not the operation log.
+	// Incus: Xray results render as a friendly report page, not the operation log.
 	if m.page == "report" {
 		return ansi.Hardwrap(m.reportView(), width, false)
 	}
 	if m.busy || m.showLogs {
-		// PayIncus: Xray maintenance keeps the operation log off screen while it runs.
+		// Incus: Xray maintenance keeps the operation log off screen while it runs.
 		if m.busy && m.quiet {
 			return ansi.Hardwrap(m.progressView(), width, false)
 		}
@@ -652,7 +652,7 @@ func (m model) render() string {
 			out.WriteString(prefix + f.label + "：" + cleanText(value) + "\n")
 		}
 		out.WriteString("\nTab 切换 · Ctrl+U 清空 · Enter 提交 · Esc 返回\n")
-	case m.page == "incus" || m.page == "incudal-agent":
+	case m.page == "incus" || m.page == "incus-agent":
 		out.WriteString(m.page + " 服务：\n1. 启用并启动\n2. 启动\n3. 停止\n4. 重启\n5. 取消开机启动\n\nEsc 返回\n")
 	default:
 		visible := m.height - 12
@@ -695,10 +695,10 @@ func (m model) render() string {
 
 func initialModel(b *backend) model {
 	m := model{backend: b, status: "正在读取服务状态…"}
-	panel, token := os.Getenv("INCUDAL_PANEL_URL"), os.Getenv("INCUDAL_AGENT_INSTALL_TOKEN")
-	_ = os.Unsetenv("INCUDAL_AGENT_INSTALL_TOKEN")
+	panel, token := os.Getenv("INCUS_PANEL_URL"), os.Getenv("INCUS_AGENT_INSTALL_TOKEN")
+	_ = os.Unsetenv("INCUS_AGENT_INSTALL_TOKEN")
 	if panel != "" && token != "" {
-		_ = os.Unsetenv("INCUDAL_PANEL_URL")
+		_ = os.Unsetenv("INCUS_PANEL_URL")
 		m.page = "token"
 		m.message = tokenEnrollNote + "节点存储初始化可在主菜单完成。"
 		m.fields = []field{{label: "Panel 根地址", value: panel}, {label: "一次性安装 token（ait_，只使用一次）", value: token, secret: true}}
@@ -740,7 +740,7 @@ func main() {
 	}()
 	b := newBackend()
 	b.logs = &operationLog{writer: logFile, path: filepath.Clean(logFile.Name())}
-	// PayIncus: render diagnostics inside the alternate screen, never above the menu.
+	// Incus: render diagnostics inside the alternate screen, never above the menu.
 	program := tea.NewProgram(initialModel(b), tea.WithAltScreen())
 	finalModel, err := program.Run()
 	if err != nil {

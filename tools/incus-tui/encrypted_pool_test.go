@@ -20,15 +20,15 @@ func TestEncryptedPoolWithoutControlPanel(t *testing.T) {
 			key := ""
 			client := apiFixture(t, func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
-				case "/1.0/payincus":
-					extensions := []string{"payincus_storage_encryption_v1"}
+				case "/1.0/agent":
+					extensions := []string{"incus_storage_encryption_v1"}
 					if mode == "unsupported" {
 						extensions = nil
 					}
 					syncJSON(w, map[string]any{"api_extensions": extensions})
-				case "/1.0/payincus/security":
+				case "/1.0/agent/security":
 					syncJSON(w, map[string]bool{"locked": mode == "locked"})
-				case "/1.0/payincus/storage/pool":
+				case "/1.0/agent/storage/pool":
 					var input struct {
 						Name    string `json:"name"`
 						Device  string `json:"device"`

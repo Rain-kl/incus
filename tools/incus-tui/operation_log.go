@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-// PayIncus: keep complete diagnostics on disk and a bounded, redacted tail for the UI.
+// Incus: keep complete diagnostics on disk and a bounded, redacted tail for the UI.
 type operationLog struct {
 	mu          sync.Mutex
 	writer      io.Writer

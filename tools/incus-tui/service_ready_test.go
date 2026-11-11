@@ -41,7 +41,7 @@ func TestServiceManagementWaitsForAPIInsteadOfSystemctlExit(t *testing.T) {
 			queries := 0
 			f := &fakeRunner{reply: func(c call) ([]byte, error) {
 				if c.name == "/usr/bin/incus" {
-					if !reflect.DeepEqual(c.args, []string{"query", "/1.0/payincus"}) {
+					if !reflect.DeepEqual(c.args, []string{"query", "/1.0/agent"}) {
 						t.Fatal(c)
 					}
 					queries++
@@ -81,7 +81,7 @@ func TestServiceReadinessCancellationPreservesSocketFailure(t *testing.T) {
 }
 
 func TestServiceManagementDoesNotPollStoppedNodesOrConnector(t *testing.T) {
-	for _, service := range [][2]string{{"incus", "stop"}, {"incus", "disable"}, {"incudal-agent", "restart"}} {
+	for _, service := range [][2]string{{"incus", "stop"}, {"incus", "disable"}, {"incus-agent", "restart"}} {
 		f := &fakeRunner{}
 		err := (&backend{runner: f}).manageService(context.Background(), service[0], service[1])
 		if err != nil || len(f.calls) != 1 || f.calls[0].name != "systemctl" {

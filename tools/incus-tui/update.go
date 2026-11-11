@@ -12,6 +12,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+const nodeUpgradePath = "/usr/libexec/incus/node-upgrade.sh"
+
 const nodeInstallerPath = "/usr/libexec/incus/node-install.sh"
 
 func updateChannelName(channel string) string {
@@ -65,7 +67,7 @@ func (b *backend) lockNodeUpdate() (*os.File, error) {
 	return lock, nil
 }
 
-// PayIncus: package selection and SHA256 checks share the installer shipped with this package.
+// Incus: package selection and SHA256 checks share the installer shipped with this package.
 func (b *backend) updateNode(ctx context.Context, channel string) (err error) {
 	name := updateChannelName(channel)
 	if name == "" {
@@ -77,16 +79,17 @@ func (b *backend) updateNode(ctx context.Context, channel string) (err error) {
 	}
 	defer func() { err = errors.Join(err, lock.Close()) }()
 	states := map[string]updateServiceState{}
-	for _, unit := range []string{"incus", "incudal-agent"} {
+	for _, unit := range []string{"incus", "incus-agent"} {
 		state, err := b.updateServiceState(ctx, unit)
 		if err != nil {
 			return err
 		}
 		states[unit] = state
 	}
-	if states["incudal-agent"].active && !states["incus"].active {
-		return fmt.Errorf("连接器正在运行但 Incus 未运行；重启连接器会连带启动 Incus，请先处理服务状态后再更新")
+	if states["incus-agent"].active && !states["incus"].active {
+		return fmt.Errorf("连接器运行但 Incus 未运行，请先处理服务状态")
 	}
+
 	err = b.connectorReady(ctx)
 	if err != nil {
 		return err
@@ -94,44 +97,31 @@ func (b *backend) updateNode(ctx context.Context, channel string) (err error) {
 	logOperation(ctx, "更新渠道：%s (%s)，从 Rain-kl/incus Release 下载并校验软件包", name, channel)
 	_, err = b.run(ctx, "/bin/bash", nodeInstallerPath, channel, "--update")
 	if err != nil {
-		return fmt.Errorf("节点软件包更新失败，未执行后续服务重启：%w", err)
+		return fmt.Errorf("节点升级失败：%w", err)
 	}
 	installed, err := b.run(ctx, "/usr/bin/incus-tui", "--version")
 	if err != nil {
 		return fmt.Errorf("软件包安装后读取 TUI 版本失败：%w", err)
 	}
 	logOperation(ctx, "已安装：%s", strings.TrimSpace(string(installed)))
-	return b.restartUpdatedServices(ctx, states)
+	return b.checkUpdatedServices(ctx, states)
 }
 
-func (b *backend) restartUpdatedServices(ctx context.Context, states map[string]updateServiceState) error {
-	for _, unit := range []string{"incus", "incudal-agent"} {
-		if !states[unit].active {
-			logOperation(ctx, "%s 原本未运行，保持停止状态", unit)
-			continue
-		}
-		logOperation(ctx, "重启原本运行的服务：%s", unit)
-		err := b.service(ctx, unit, "restart")
+func (b *backend) checkUpdatedServices(ctx context.Context, states map[string]updateServiceState) error {
+	for unit, before := range states {
+		after, err := b.updateServiceState(ctx, unit)
 		if err != nil {
-			return fmt.Errorf("软件包已安装，但 %s 重启失败：%w", unit, err)
+			return err
 		}
-		if unit == "incus" {
-			err = b.waitUpdatedNode(ctx)
-			if err != nil {
-				return fmt.Errorf("软件包已安装，等待新版节点 API 失败：%w", err)
+		if before != after {
+			return fmt.Errorf("%s 更新后服务状态不一致", unit)
+		}
+		if after.active && unit == "incus" {
+			if err = b.waitUpdatedNode(ctx); err != nil {
+				return err
 			}
 		}
 	}
-	for _, unit := range []string{"incus", "incudal-agent"} {
-		state, checkErr := b.updateServiceState(ctx, unit)
-		if checkErr != nil {
-			return fmt.Errorf("更新后检查 %s 状态失败：%w", unit, checkErr)
-		}
-		if state.active != states[unit].active || state.enabled != states[unit].enabled {
-			return fmt.Errorf("更新后 %s 服务状态与更新前不一致（运行=%t，启用=%s），请检查 systemd 日志", unit, state.active, state.enabled)
-		}
-	}
-	logOperation(ctx, "节点更新已应用，服务启用状态保持不变，正在重新打开新版 TUI")
 	return nil
 }
 
@@ -139,7 +129,7 @@ func (b *backend) waitUpdatedNode(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
 	for {
-		_, err := b.run(ctx, "/usr/bin/incus", "query", "/1.0/payincus")
+		_, err := b.run(ctx, "/usr/bin/incus", "query", "/1.0/agent")
 		if err == nil {
 			return nil
 		}

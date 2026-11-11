@@ -18,9 +18,16 @@
 
 ## 内部版本与发行身份
 
-- 内部发行版本唯一来源为 `scripts/payincus/VERSION`，当前为 2.0.0；不得改动上游 Incus 自身版本。
+- 内部发行版本唯一来源为 `scripts/node/VERSION`，当前为 2.0.0；不得改动上游 Incus 自身版本。
 - 每次修改 Incus 定制代码必须同步更新 Agent 构建版本：正式版为 `v<内部版本>`，开发版为 `v<内部版本>-<本次提交 SHA 前 12 位>`；Agent、TUI 和软件包由同一构建输入生成，不得使用独立硬编码旧版本。
 - 软件包资产为 `incus-<版本>[-canary.<SHA>]-linux-<系统>-<系统版本>-<架构>.deb`；默认 canary 推送集成，main 仅正式 tag 集成。正式 tag 必须匹配 VERSION 且提交属于 main。
+
+## 节点发行布局
+
+- 节点包名为 `incus`，连接器为 `incus-agent`，与上游来宾代理分别安装在 `/usr/libexec/incus/agent/incus-agent` 与 `/usr/libexec/incus/incus-agent`。
+- 节点路径、服务、协议、内核对象及发行物内容不使用平台品牌前缀；`/usr/share/doc/incus` 仅放必要许可证/版权，不放项目开发文档。
+- 本机管理状态使用中性路径和认证加密，禁止明文持久化；损坏或丢失密钥时拒绝操作。
+- 应用只处理当前配置和状态格式。版本迁移通过 `scripts/node/migrations/*.sh` 离线完成；先 dry-run，再停止 Incus、迁移、安装及启动。
 
 ## 功能文档
 

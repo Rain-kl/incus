@@ -66,7 +66,7 @@ func TestXrayBackendUsesLocalIncusAPIAndRedactsResponse(t *testing.T) {
 			t.Fatalf("Xray %s returned no metadata", action)
 		}
 	}
-	want := []request{{method: http.MethodGet, path: "/1.0/payincus/xray"}, {method: http.MethodPost, path: "/1.0/payincus/xray", action: "test"}, {method: http.MethodPost, path: "/1.0/payincus/xray", action: "restart"}, {method: http.MethodPost, path: "/1.0/payincus/xray", action: "reconfigure"}}
+	want := []request{{method: http.MethodGet, path: "/1.0/agent/xray"}, {method: http.MethodPost, path: "/1.0/agent/xray", action: "test"}, {method: http.MethodPost, path: "/1.0/agent/xray", action: "restart"}, {method: http.MethodPost, path: "/1.0/agent/xray", action: "reconfigure"}}
 	if !reflect.DeepEqual(calls, want) {
 		t.Fatalf("unexpected Xray API calls %#v", calls)
 	}

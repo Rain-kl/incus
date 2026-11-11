@@ -140,7 +140,7 @@ func restServer(d *Daemon) *http.Server {
 	}
 
 	// PayIncus: register isolated node extensions through upstream authentication and authorization.
-	registerPayIncus(d, router)
+	registerIncus(d, router)
 
 	for _, c := range api10 {
 		d.createCmd(router, "1.0", c)

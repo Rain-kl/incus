@@ -67,53 +67,56 @@ jobs:
       - name: Verify internal release provenance
         if: startsWith(github.ref, 'refs/tags/')
         run: |
-          test "$GITHUB_REF_NAME" = "v$(cat scripts/payincus/VERSION)"
+          test "$GITHUB_REF_NAME" = "v$(cat scripts/node/VERSION)"
           git fetch origin main
           git merge-base --is-ancestor HEAD origin/main
       - name: Prepare pinned Xray
-        run: python3 scripts/payincus/prepare-xray.py "${{ matrix.arch }}"
+        run: python3 scripts/node/prepare-xray.py "${{ matrix.arch }}"
       - name: Xray control contracts (race detector)
         # 纯 Go 逻辑与发行版无关，仅在 Ubuntu 目标上运行，避免 Debian 任务重复执行。
         if: matrix.target == 'ubuntu-24.04'
-        run: go test -race ./internal/server/payincus/egress ./cmd/payincus-network-worker
+        run: go test -race ./internal/server/agent/egress ./cmd/network-worker
       - name: Storage telemetry and native node contracts
         if: matrix.target == 'ubuntu-24.04'
-        run: go test -race -tags libsqlite3 ./internal/server/payincus ./internal/server/payincus/report ./internal/server/payincus/security ./internal/server/payincus/panel ./internal/server/payincus/tunnel ./cmd/payincus-agent ./internal/server/storage/drivers
+        run: go test -race -tags libsqlite3 ./internal/server/agent ./internal/server/agent/report ./internal/server/agent/security ./internal/server/agent/panel ./internal/server/agent/tunnel ./internal/server/agent/connector ./internal/server/storage/drivers
       - name: TUI and installer contracts
         if: matrix.target == 'ubuntu-24.04'
         run: |
           (cd tools/incus-tui && go test -race ./...)
-          python3 scripts/payincus/test-install.py
+          python3 scripts/node/test-install.py
+          python3 scripts/node/test-upgrade.py
       - name: Real systemd and native proxy API recovery
         if: matrix.arch == 'amd64' && matrix.target == 'debian-13'
         timeout-minutes: 10
-        run: bash scripts/payincus/test-egress-systemd.sh
+        run: bash scripts/node/test-egress-systemd.sh
       - name: Native proxy data paths in an isolated VM
         if: matrix.arch == 'amd64' && matrix.target == 'debian-13'
         timeout-minutes: 10
         run: |
-          CGO_ENABLED=0 go test -c -o "$RUNNER_TEMP/egress.test" ./internal/server/payincus/egress
-          CGO_ENABLED=0 go build -o "$RUNNER_TEMP/payincus-network-worker" ./cmd/payincus-network-worker
-          docker run --rm -v "$PWD:/source:ro" -v "$RUNNER_TEMP/egress.test:/tests/egress.test:ro" -v "$RUNNER_TEMP/payincus-network-worker:/tests/payincus-network-worker:ro" debian:13 sh -ec '
+          CGO_ENABLED=0 go test -c -o "$RUNNER_TEMP/egress.test" ./internal/server/agent/egress
+          CGO_ENABLED=0 go build -o "$RUNNER_TEMP/network-worker" ./cmd/network-worker
+          docker run --rm -v "$PWD:/source:ro" -v "$RUNNER_TEMP/egress.test:/tests/egress.test:ro" -v "$RUNNER_TEMP/network-worker:/tests/network-worker:ro" debian:13 sh -ec '
             apt-get update -qq
             DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
               qemu-system-x86 linux-image-amd64 busybox-static cpio kmod iproute2 nftables util-linux procps python3
-            bash /source/scripts/payincus/test-egress-vm.sh /tests/egress.test /tests/payincus-network-worker
+            bash /source/scripts/node/test-egress-vm.sh /tests/egress.test /tests/network-worker
           '
       - name: Proxy test script syntax
-        run: bash -n scripts/payincus/{test-egress-systemd,test-egress-vm,test-zfs-vm}.sh
+        run: bash -n scripts/node/{test-egress-systemd,test-egress-vm,test-zfs-vm}.sh
       - name: Build integrated binaries
         env:
           RELEASE_REF: ${{ github.ref_name }}
           SOURCE_SHA: ${{ github.sha }}
         if: matrix.target == 'ubuntu-24.04'
-        run: bash scripts/payincus/build.sh
+        run: bash scripts/node/build.sh
       - name: Assemble native integration packages
         if: matrix.target == 'ubuntu-24.04'
         env:
           RELEASE_REF: ${{ github.ref_name }}
           SOURCE_SHA: ${{ github.sha }}
-        run: bash scripts/payincus/package.sh
+        run: |
+          bash scripts/node/package.sh
+          for package in scripts/node/dist/release/*.deb; do python3 scripts/node/test-package.py "$package"; done
       - name: Cache Go build cache (Debian container)
         if: matrix.target == 'debian-13'
         uses: actions/cache@v4
@@ -135,7 +138,7 @@ jobs:
             -v "$(go env GOMODCACHE):/gomod" -e GOMODCACHE=/gomod \
             -v "$HOME/.cache/payincus-gobuild:/gobuild" -e GOCACHE=/gobuild \
             -e RELEASE_REF -e SOURCE_SHA -e GOARCH=${{ matrix.arch }} \
-            ubuntu:26.04 bash scripts/payincus/build-debian.sh
+            ubuntu:26.04 bash scripts/node/build-debian.sh
       - name: Build and package on Debian 13
         if: matrix.target == 'debian-13'
         env:
@@ -148,17 +151,17 @@ jobs:
             -v "$(go env GOMODCACHE):/gomod" -e GOMODCACHE=/gomod \
             -v "$HOME/.cache/payincus-gobuild:/gobuild" -e GOCACHE=/gobuild \
             -e RELEASE_REF -e SOURCE_SHA -e GOARCH=${{ matrix.arch }} \
-            debian:13 bash scripts/payincus/build-debian.sh
+            debian:13 bash scripts/node/build-debian.sh
       - name: Inspect package and checksums
         run: |
-          cd scripts/payincus/dist/release
+          cd scripts/node/dist/release
           sha256sum --check SHA256SUMS
           dpkg-deb --info ./*.deb
           dpkg-deb --contents ./*.deb
       - uses: actions/upload-artifact@v4
         with:
           name: payincus-linux-${{ matrix.target }}-${{ matrix.arch }}
-          path: scripts/payincus/dist/release/*
+          path: scripts/node/dist/release/*
           if-no-files-found: error
 
   publish:
@@ -190,6 +193,6 @@ jobs:
           done
           flags=(--latest)
           gh release create "$GITHUB_REF_NAME" --verify-tag "${flags[@]}" \
-            --title "PayIncus Incus ${GITHUB_REF_NAME#v}" \
-            --notes-file scripts/payincus/RELEASE-NOTES.md \
+            --title "Incus ${GITHUB_REF_NAME#v}" \
+            --notes-file scripts/node/RELEASE-NOTES.md \
             release/payincus-linux-*/*

@@ -61,7 +61,7 @@ func TestEnrollmentCompletesAllStepsAndPreservesTrust(t *testing.T) {
 			args := strings.Join(call.args, " ")
 			switch {
 			case call.name == "systemctl" && strings.Contains(args, "ExecStart"):
-				return []byte("/usr/libexec/incus/payincus-agent"), nil
+				return []byte("/usr/libexec/incus/agent/incus-agent"), nil
 			case args == "query /1.0/certificates?recursion=1":
 				stages = append(stages, "trust-list")
 				if alreadyTrusted {
@@ -76,9 +76,9 @@ func TestEnrollmentCompletesAllStepsAndPreservesTrust(t *testing.T) {
 				stages = append(stages, "trust-import")
 			case strings.HasPrefix(args, "config set "):
 				stages = append(stages, "listener")
-			case call.name == "systemctl" && args == "enable incudal-agent":
+			case call.name == "systemctl" && args == "enable incus-agent":
 				stages = append(stages, "enable")
-			case call.name == "systemctl" && args == "restart incudal-agent":
+			case call.name == "systemctl" && args == "restart incus-agent":
 				stages = append(stages, "restart")
 			case strings.Contains(args, "delete"):
 				t.Error("existing trust was removed")
@@ -123,7 +123,7 @@ func TestEnrollmentPreflightAndStageFailures(t *testing.T) {
 		f := &fakeRunner{reply: func(call call) ([]byte, error) {
 			args := strings.Join(call.args, " ")
 			if strings.Contains(args, "ExecStart") {
-				return []byte("/usr/libexec/incus/payincus-agent"), nil
+				return []byte("/usr/libexec/incus/agent/incus-agent"), nil
 			}
 			if failure == "preflight" && strings.HasPrefix(args, "config get") {
 				return []byte("[::]:8443"), nil
@@ -137,7 +137,7 @@ func TestEnrollmentPreflightAndStageFailures(t *testing.T) {
 				}
 				return []byte("[]"), nil
 			}
-			if (failure == "listener" && strings.HasPrefix(args, "config set")) || (failure == "enable" && args == "enable incudal-agent") || (failure == "restart" && args == "restart incudal-agent") {
+			if (failure == "listener" && strings.HasPrefix(args, "config set")) || (failure == "enable" && args == "enable incus-agent") || (failure == "restart" && args == "restart incus-agent") {
 				return nil, failureCause
 			}
 			return nil, nil
@@ -201,7 +201,7 @@ func TestEnrollmentWithLivePanel(t *testing.T) {
 	b.runner = &fakeRunner{reply: func(c call) ([]byte, error) {
 		args := strings.Join(c.args, " ")
 		if strings.Contains(args, "ExecStart") {
-			return []byte("/usr/libexec/incus/payincus-agent"), nil
+			return []byte("/usr/libexec/incus/agent/incus-agent"), nil
 		}
 		if args == "query /1.0/certificates?recursion=1" {
 			return []byte("[]"), nil
@@ -216,7 +216,7 @@ func TestEnrollmentWithLivePanel(t *testing.T) {
 		if strings.HasPrefix(args, "config set ") {
 			stages = append(stages, "listener")
 		}
-		if c.name == "systemctl" && args == "restart incudal-agent" {
+		if c.name == "systemctl" && args == "restart incus-agent" {
 			stages = append(stages, "restart")
 		}
 		return nil, nil

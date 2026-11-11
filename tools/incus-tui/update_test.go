@@ -26,11 +26,11 @@ func updateRunner(incusActive, connectorActive bool, fail string, cause error) *
 			return nil, cause
 		}
 		if c.name == "systemctl" && strings.Contains(args, "--property=ExecStart") {
-			return []byte("/usr/libexec/incus/payincus-agent"), nil
+			return []byte("/usr/libexec/incus/agent/incus-agent"), nil
 		}
 		if c.name == "systemctl" && len(c.args) > 1 && c.args[0] == "show" {
 			active := incusActive
-			if c.args[1] == "incudal-agent" {
+			if c.args[1] == "incus-agent" {
 				active = connectorActive
 			}
 			state := "inactive"
@@ -46,41 +46,28 @@ func updateRunner(incusActive, connectorActive bool, fail string, cause error) *
 	}}
 }
 
-func TestNodeUpdateUsesPackagedInstallerAndRestartsOnlyActiveServices(t *testing.T) {
+func TestNodeUpdateUsesOfflineInstallerAndDoesNotRestartOutsideTransaction(t *testing.T) {
 	for _, channel := range []string{"canary", "latest"} {
 		for _, states := range [][2]bool{{true, true}, {true, false}, {false, false}} {
 			t.Run(fmt.Sprintf("%s-%v", channel, states), func(t *testing.T) {
 				f := updateRunner(states[0], states[1], "", nil)
-				b := updaterBackend(t, f)
-				err := b.updateNode(context.Background(), channel)
-				if err != nil {
+				if err := updaterBackend(t, f).updateNode(context.Background(), channel); err != nil {
 					t.Fatal(err)
 				}
-				installer := -1
-				restarts := []string{}
-				for index, call := range f.calls {
-					if call.name == "/bin/bash" {
-						installer = index
-						if !reflect.DeepEqual(call.args, []string{nodeInstallerPath, channel, "--update"}) {
-							t.Fatal("wrong installer or channel", call)
+				installs := 0
+				for _, c := range f.calls {
+					if c.name == "/bin/bash" {
+						installs++
+						if !reflect.DeepEqual(c.args, []string{nodeInstallerPath, channel, "--update"}) {
+							t.Fatal(c)
 						}
 					}
-					if call.name == "systemctl" && call.args[0] != "show" {
-						if installer < 0 || call.args[0] != "restart" {
-							t.Fatal("service modified before installation, or enablement changed", call)
-						}
-						restarts = append(restarts, call.args[1])
+					if c.name == "systemctl" && c.args[0] != "show" {
+						t.Fatal("service change escaped offline upgrade script", c)
 					}
 				}
-				want := []string{}
-				if states[0] {
-					want = append(want, "incus")
-				}
-				if states[1] {
-					want = append(want, "incudal-agent")
-				}
-				if installer < 0 || !reflect.DeepEqual(restarts, want) {
-					t.Fatal("wrong service restart set", restarts, want)
+				if installs != 1 {
+					t.Fatal("installer call count", installs)
 				}
 			})
 		}
@@ -91,7 +78,7 @@ func TestNodeUpdatePreservesFailureCauseAndStopsAtFailedStage(t *testing.T) {
 	for _, fail := range []string{
 		"systemctl show incus --property=ActiveState,UnitFileState --no-pager",
 		"/bin/bash " + nodeInstallerPath + " canary --update",
-		"/usr/bin/incus-tui --version", "systemctl restart incus", "systemctl restart incudal-agent",
+		"/usr/bin/incus-tui --version",
 	} {
 		cause := errors.New("fixture apt/dpkg or systemd error: exit status 100")
 		f := updateRunner(true, true, fail, cause)
@@ -133,7 +120,7 @@ func TestNodeUpdateReadinessFailureDoesNotRestartConnector(t *testing.T) {
 		t.Fatal("readiness failure cause lost", err)
 	}
 	for _, c := range f.calls {
-		if c.name == "systemctl" && strings.Join(c.args, " ") == "restart incudal-agent" {
+		if c.name == "systemctl" && strings.Join(c.args, " ") == "restart incus-agent" {
 			t.Fatal("restarted connector while Incus was not ready")
 		}
 	}

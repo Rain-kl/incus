@@ -178,7 +178,7 @@ func TestCarriageReturnProgressUpdatesLiveTailWithoutFloodingDisk(t *testing.T) 
 	l := &operationLog{writer: &disk}
 	ctx := context.WithValue(context.Background(), operationLogKey{}, l)
 	w := commandLogWriter{ctx: ctx}
-	_, err := w.Write([]byte("Installing integration-7.0.2-d61a07997f98 for ubuntu-24.04/amd64\nDownloading payincus-incus.deb (82.4 MiB)\n"))
+	_, err := w.Write([]byte("Installing integration-7.0.2-d61a07997f98 for ubuntu-24.04/amd64\nDownloading incus.deb (82.4 MiB)\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,13 +200,13 @@ func TestCarriageReturnProgressUpdatesLiveTailWithoutFloodingDisk(t *testing.T) 
 	if strings.Contains(disk.String(), "40.0%") || strings.Contains(disk.String(), "60.0%") {
 		t.Fatalf("intermediate carriage-return frames flooded disk log: %s", disk.String())
 	}
-	_, err = w.Write([]byte("\r######################################### 100.0%\nVerified SHA256 checksum for payincus-incus.deb\n"))
+	_, err = w.Write([]byte("\r######################################### 100.0%\nVerified SHA256 checksum for incus.deb\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	w.flush()
 	entries, _ = l.tail()
-	if len(entries) != 4 || !strings.HasSuffix(entries[2], "######################################### 100.0%") || !strings.HasSuffix(entries[3], "Verified SHA256 checksum for payincus-incus.deb") {
+	if len(entries) != 4 || !strings.HasSuffix(entries[2], "######################################### 100.0%") || !strings.HasSuffix(entries[3], "Verified SHA256 checksum for incus.deb") {
 		t.Fatalf("completed progress bar was not finalized in place: %#v", entries)
 	}
 	if !strings.Contains(disk.String(), "######################################### 100.0%") || strings.Contains(disk.String(), "60.0%") {

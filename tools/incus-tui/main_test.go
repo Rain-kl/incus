@@ -62,7 +62,7 @@ func TestUIRequiresConfirmationAndMasksSecrets(t *testing.T) {
 	}
 }
 
-// PayIncus: the reviewed token form is the confirmation; Enter starts enrollment with no second y/n prompt.
+// Incus: the reviewed token form is the confirmation; Enter starts enrollment with no second y/n prompt.
 func TestTokenSubmissionStartsEnrollmentWithoutSecondConfirmation(t *testing.T) {
 	b := &backend{path: filepath.Join(t.TempDir(), "config.yaml"), runner: &fakeRunner{}}
 	m := model{backend: b, page: "token", fields: []field{{value: "https://panel.example.com"}, {value: "ait_" + strings.Repeat("x", 43)}}}
@@ -124,7 +124,7 @@ func asModel(t *testing.T, value tea.Model) model {
 }
 
 func TestJournalAndOperationCancellation(t *testing.T) {
-	for _, unit := range []string{"incus", "incudal-agent"} {
+	for _, unit := range []string{"incus", "incus-agent"} {
 		cmd, err := journalCommand(unit)
 		if err != nil || !reflect.DeepEqual(cmd.Args, []string{"journalctl", "-u", unit, "-n", "100", "-f", "--no-pager"}) {
 			t.Fatal(cmd, err)
@@ -148,13 +148,13 @@ func TestJournalAndOperationCancellation(t *testing.T) {
 }
 
 func TestInstallerTokenPrefillIsMaskedAndRemovedFromEnvironment(t *testing.T) {
-	t.Setenv("INCUDAL_PANEL_URL", "https://panel.example.com")
-	t.Setenv("INCUDAL_AGENT_INSTALL_TOKEN", "ait_fixture_not_a_real_secret")
+	t.Setenv("INCUS_PANEL_URL", "https://panel.example.com")
+	t.Setenv("INCUS_AGENT_INSTALL_TOKEN", "ait_fixture_not_a_real_secret")
 	m := initialModel(&backend{runner: &fakeRunner{}})
 	if m.page != "token" || len(m.fields) != 2 || m.fields[0].value != "https://panel.example.com" || !m.fields[1].secret {
 		t.Fatal("missing installer handoff")
 	}
-	if strings.Contains(m.View(), "ait_fixture_not_a_real_secret") || os.Getenv("INCUDAL_AGENT_INSTALL_TOKEN") != "" {
+	if strings.Contains(m.View(), "ait_fixture_not_a_real_secret") || os.Getenv("INCUS_AGENT_INSTALL_TOKEN") != "" {
 		t.Fatal("token was exposed or inherited")
 	}
 }

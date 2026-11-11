@@ -33,7 +33,7 @@ func supportedVersionAtLeast(value string, minimum float64) bool {
 	return parsed >= minimum
 }
 
-// PayIncus: DKMS needs headers for the running kernel, which may not be a distro kernel.
+// Incus: DKMS needs headers for the running kernel, which may not be a distro kernel.
 func (b *backend) zfsKernelPrerequisites(ctx context.Context, kernel string) (bool, bool, error) {
 	modules := b.modulesPath
 	if modules == "" {
@@ -314,7 +314,7 @@ func (m model) submitZFS(values []string) (tea.Model, tea.Cmd) {
 		m.confirm = func(ctx context.Context) error {
 			c := newLocalClient()
 			defer c.http.CloseIdleConnections()
-			_, err := c.call(ctx, "POST", "/1.0/payincus/storage/register", map[string]string{"dataset": values[0], "key": values[1]})
+			_, err := c.call(ctx, "POST", "/1.0/agent/storage/register", map[string]string{"dataset": values[0], "key": values[1]})
 			return err
 		}
 	case "zfs-unlock":
@@ -322,7 +322,7 @@ func (m model) submitZFS(values []string) (tea.Model, tea.Cmd) {
 		m.confirm = func(ctx context.Context) error {
 			c := newLocalClient()
 			defer c.http.CloseIdleConnections()
-			_, err := c.call(ctx, "POST", "/1.0/payincus/storage/unlock", map[string]string{"dataset": values[0], "key": values[1]})
+			_, err := c.call(ctx, "POST", "/1.0/agent/storage/unlock", map[string]string{"dataset": values[0], "key": values[1]})
 			return err
 		}
 	case "zfs-bind":
@@ -334,7 +334,7 @@ func (m model) submitZFS(values []string) (tea.Model, tea.Cmd) {
 		m.confirm = func(ctx context.Context) error {
 			c := newLocalClient()
 			defer c.http.CloseIdleConnections()
-			data, err := c.call(ctx, "GET", "/1.0/payincus/security", nil)
+			data, err := c.call(ctx, "GET", "/1.0/agent/security", nil)
 			if err != nil {
 				return err
 			}

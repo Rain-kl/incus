@@ -68,7 +68,7 @@ jobs:
           CI_URL: ${{ github.event.workflow_run.html_url }}
         run: |
           set -euo pipefail
-          tag="canary-$(cat scripts/payincus/VERSION)-${SOURCE_SHA:0:12}"
+          tag="canary-$(cat scripts/node/VERSION)-${SOURCE_SHA:0:12}"
           # Derive the matrix from the downloaded artifacts instead of repeating a
           # hard-coded list: every build job publishes one SHA256SUMS per folder,
           # and any target this step forgets would upload a duplicate asset name.
@@ -76,8 +76,8 @@ jobs:
             target="$(basename "$folder")"
             mv "$folder/SHA256SUMS" "$folder/SHA256SUMS-${target#payincus-linux-}"
           done
-          cp scripts/payincus/RELEASE-NOTES.md release-notes.md
+          cp scripts/node/RELEASE-NOTES.md release-notes.md
           printf '\nSource: %s\nValidated CI: %s\n' "$SOURCE_SHA" "$CI_URL" >> release-notes.md
           gh release create "$tag" --target "$SOURCE_SHA" --prerelease \
-            --title "Incus $(cat scripts/payincus/VERSION) canary ${SOURCE_SHA:0:12}" \
+            --title "Incus $(cat scripts/node/VERSION) canary ${SOURCE_SHA:0:12}" \
             --notes-file release-notes.md release/payincus-linux-*/*

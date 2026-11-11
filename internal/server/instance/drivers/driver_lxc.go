@@ -66,7 +66,7 @@ import (
 	localMigration "github.com/lxc/incus/v7/internal/server/migration"
 	"github.com/lxc/incus/v7/internal/server/network"
 	"github.com/lxc/incus/v7/internal/server/operations"
-	nodesecurity "github.com/lxc/incus/v7/internal/server/payincus/security"
+	nodesecurity "github.com/lxc/incus/v7/internal/server/agent/security"
 	"github.com/lxc/incus/v7/internal/server/project"
 	"github.com/lxc/incus/v7/internal/server/response"
 	"github.com/lxc/incus/v7/internal/server/seccomp"

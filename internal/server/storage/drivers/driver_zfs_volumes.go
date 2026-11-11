@@ -29,7 +29,7 @@ import (
 	"github.com/lxc/incus/v7/internal/server/backup"
 	localMigration "github.com/lxc/incus/v7/internal/server/migration"
 	"github.com/lxc/incus/v7/internal/server/operations"
-	nodesecurity "github.com/lxc/incus/v7/internal/server/payincus/security"
+	nodesecurity "github.com/lxc/incus/v7/internal/server/agent/security"
 	internalUtil "github.com/lxc/incus/v7/internal/util"
 	"github.com/lxc/incus/v7/shared/api"
 	"github.com/lxc/incus/v7/shared/archive"

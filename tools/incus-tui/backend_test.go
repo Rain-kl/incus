@@ -145,7 +145,7 @@ func TestInitializePropagatesInterfaceErrors(t *testing.T) {
 }
 
 func TestServicesAndListenerContracts(t *testing.T) {
-	for _, unit := range []string{"incus", "incudal-agent"} {
+	for _, unit := range []string{"incus", "incus-agent"} {
 		for _, action := range []string{"start", "stop", "restart", "enable", "disable"} {
 			f := &fakeRunner{}
 			b := &backend{runner: f}
@@ -243,10 +243,10 @@ func TestPanelTokenProtocol(t *testing.T) {
 		{"unauthorized", "", 401, false},
 		{"server error", "", 500, false},
 		{"JSON instead of assignments", `{"credentials":{}}`, 200, false},
-		{"shell injection", "INCUDAL_AGENT_ID='$(touch /tmp/unsafe)'\nINCUDAL_AGENT_SECRET='bad'", 200, false},
-		{"extra assignment", fmt.Sprintf("INCUDAL_AGENT_ID='%s'\nINCUDAL_AGENT_SECRET='%s'\nEXEC='evil'", c.ID, c.Secret), 200, false},
+		{"shell injection", "INCUS_AGENT_ID='$(touch /tmp/unsafe)'\nINCUS_AGENT_SECRET='bad'", 200, false},
+		{"extra assignment", fmt.Sprintf("INCUS_AGENT_ID='%s'\nINCUS_AGENT_SECRET='%s'\nEXEC='evil'", c.ID, c.Secret), 200, false},
 		{"oversized", strings.Repeat("x", 131073), 200, false},
-		{"duplicate", fmt.Sprintf("INCUDAL_AGENT_ID='%s'\nINCUDAL_AGENT_ID='%s'", c.ID, c.ID), 200, false},
+		{"duplicate", fmt.Sprintf("INCUS_AGENT_ID='%s'\nINCUS_AGENT_ID='%s'", c.ID, c.ID), 200, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -356,7 +356,7 @@ func TestCertificateTrustContract(t *testing.T) {
 
 func TestConnectorPreflightAndConnection(t *testing.T) {
 	c := goodConnection()
-	f := &fakeRunner{reply: func(call) ([]byte, error) { return []byte("/usr/local/bin/incudal-agent"), nil }}
+	f := &fakeRunner{reply: func(call) ([]byte, error) { return []byte("/usr/local/bin/incus-agent"), nil }}
 	b := &backend{runner: f, path: filepath.Join(t.TempDir(), "config.yaml")}
 	if b.connect(context.Background(), c) == nil {
 		t.Fatal("accepted legacy service override")
@@ -368,7 +368,7 @@ func TestConnectorPreflightAndConnection(t *testing.T) {
 		}
 	}
 	f = &fakeRunner{reply: func(call) ([]byte, error) {
-		return []byte("{ path=/usr/libexec/incus/payincus-agent ; argv[]=... }"), nil
+		return []byte("{ path=/usr/libexec/incus/agent/incus-agent ; argv[]=... }"), nil
 	}}
 	b.runner = f
 	{
@@ -377,13 +377,13 @@ func TestConnectorPreflightAndConnection(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if len(f.calls) != 3 || !reflect.DeepEqual(f.calls[1].args, []string{"enable", "--now", "incudal-agent"}) || !reflect.DeepEqual(f.calls[2].args, []string{"restart", "incudal-agent"}) {
+	if len(f.calls) != 3 || !reflect.DeepEqual(f.calls[1].args, []string{"enable", "--now", "incus-agent"}) || !reflect.DeepEqual(f.calls[2].args, []string{"restart", "incus-agent"}) {
 		t.Fatal(f.calls)
 	}
 }
 
 func TestStatusCapabilityAndFailure(t *testing.T) {
-	for _, body := range []string{`{"api_extensions":["payincus_node_v1"]}`, `{"api_extensions":[]}`, `{"api_extensions":"payincus_node_v1"}`, `{}`} {
+	for _, body := range []string{`{"api_extensions":["incus_node_v1"]}`, `{"api_extensions":[]}`, `{"api_extensions":"incus_node_v1"}`, `{}`} {
 		f := &fakeRunner{reply: func(c call) ([]byte, error) {
 			if c.name == "systemctl" && reflect.DeepEqual(c.args, []string{"show", "incus", "--property=MainPID", "--value"}) {
 				return []byte("0\n"), nil
@@ -400,7 +400,7 @@ func TestStatusCapabilityAndFailure(t *testing.T) {
 			return []byte(body), nil
 		}}
 		result := (&backend{runner: f}).status(context.Background())
-		want := body == `{"api_extensions":["payincus_node_v1"]}`
+		want := body == `{"api_extensions":["incus_node_v1"]}`
 		if strings.Contains(result, "节点 API: 可连接") != want {
 			t.Fatal("incorrect capability state", result)
 		}

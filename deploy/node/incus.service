@@ -1,0 +1,24 @@
+[Unit]
+Description=Incus with Incus node extensions
+# Incus: local daemon must not wait for external DNS/network readiness.
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+Environment=INCUS_AGENT=1
+Environment=PATH=/usr/libexec/incus:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# Incus: validate the mapping prepared by package installation without writing system files at startup.
+ExecStartPre=/usr/libexec/incus/prepare-idmap --check
+ExecStart=/usr/libexec/incus/incusd --group incus-admin
+ExecStop=/usr/libexec/incus/incusd shutdown --timeout 600
+KillMode=process
+TimeoutStopSec=610
+Delegate=yes
+TasksMax=infinity
+LimitNOFILE=1048576
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

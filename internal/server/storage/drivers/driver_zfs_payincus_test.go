@@ -7,7 +7,7 @@ import (
 )
 
 // PayIncus: native pool PATCH must reject shrink/invalid sizes before truncating a live file vdev.
-func TestPayIncusNativeZFSLoopRejectsShrink(t *testing.T) {
+func TestIncusNativeZFSLoopRejectsShrink(t *testing.T) {
 	t.Setenv("INCUS_DIR", t.TempDir())
 	path := loopFilePath("resize-test")
 	if os.MkdirAll(filepath.Dir(path), 0o700) != nil || os.WriteFile(path, []byte("preserve"), 0o600) != nil || os.Truncate(path, 2<<30) != nil {

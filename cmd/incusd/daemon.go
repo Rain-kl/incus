@@ -58,7 +58,7 @@ import (
 	"github.com/lxc/incus/v7/internal/server/network/ovs"
 	networkZone "github.com/lxc/incus/v7/internal/server/network/zone"
 	"github.com/lxc/incus/v7/internal/server/node"
-	nodesecurity "github.com/lxc/incus/v7/internal/server/payincus/security"
+	nodesecurity "github.com/lxc/incus/v7/internal/server/agent/security"
 	"github.com/lxc/incus/v7/internal/server/project"
 	"github.com/lxc/incus/v7/internal/server/request"
 	"github.com/lxc/incus/v7/internal/server/response"
@@ -1402,7 +1402,7 @@ func (d *Daemon) init() error {
 	d.events.SetLocalLocation(d.serverName)
 
 	// PayIncus: retain alarms but fence normal startup for control-plane key recovery; see FEATURES.md.
-	if os.Getenv("INCUS_PAYINCUS") == "1" {
+	if os.Getenv("INCUS_AGENT") == "1" {
 		guardErr := nodesecurity.Default().Boot()
 		if guardErr != nil {
 			logger.Error("Node initialization failed")
@@ -1837,7 +1837,7 @@ func closeGlobalDatabase(clusterDB *db.Cluster) {
 func (d *Daemon) Stop(ctx context.Context, sig os.Signal) error {
 	logger.Info("Starting shutdown sequence", logger.Ctx{"signal": sig})
 	// PayIncus: report verified key-unload failures through the existing shutdown error result.
-	var payincusStopErr error
+	var nodeStopErr error
 
 	s := d.State()
 
@@ -1929,10 +1929,10 @@ func (d *Daemon) Stop(ctx context.Context, sig os.Signal) error {
 		}
 
 		// PayIncus: normal stops checkpoint workloads and unload keys without setting the alarm lock.
-		if os.Getenv("INCUS_PAYINCUS") == "1" {
-			payincusStopErr = nodesecurity.Default().Shutdown(ctx)
-			if payincusStopErr != nil {
-				logger.Error("Node storage shutdown incomplete", logger.Ctx{"err": payincusStopErr})
+		if os.Getenv("INCUS_AGENT") == "1" {
+			nodeStopErr = nodesecurity.Default().Shutdown(ctx)
+			if nodeStopErr != nil {
+				logger.Error("Node storage shutdown incomplete", logger.Ctx{"err": nodeStopErr})
 			}
 		}
 
@@ -1989,7 +1989,7 @@ func (d *Daemon) Stop(ctx context.Context, sig os.Signal) error {
 	}
 
 	// PayIncus: a failed key unload must not be reported as a successful daemon stop.
-	trackError(payincusStopErr, "Unload node storage")
+	trackError(nodeStopErr, "Unload node storage")
 	trackError(d.tasks.Stop(3*time.Second), "Stop tasks")                // Give tasks a bit of time to cleanup.
 	trackError(d.clusterTasks.Stop(3*time.Second), "Stop cluster tasks") // Give tasks a bit of time to cleanup.
 

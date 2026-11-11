@@ -413,7 +413,7 @@ func (b *backend) repairBridge(ctx context.Context) error {
 	return c.repairBridge(ctx, b.runner, "/var/lib/incus-tui/repairs")
 }
 
-// PayIncus: repair only the panel NAT bridge; preserve disks, profiles, valid IPs and stopped state.
+// Incus: repair only the panel NAT bridge; preserve disks, profiles, valid IPs and stopped state.
 func (c *localClient) repairBridge(ctx context.Context, runner Runner, backupRoot string) (err error) {
 	err = os.MkdirAll(backupRoot, 0o700)
 	if err != nil {

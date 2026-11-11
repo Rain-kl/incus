@@ -46,39 +46,37 @@ func TestInstalledUpdatePendingUsesRunningProcess(t *testing.T) {
 	}
 }
 
-func TestApplyInstalledUpdateChecksBeforeRestartAndDoesNotInstall(t *testing.T) {
+func TestApplyInstalledUpdateChecksAndRunsOfflineMigrationsWithoutDownload(t *testing.T) {
 	for _, states := range [][2]bool{{true, true}, {true, false}, {false, false}} {
 		f := updateRunner(states[0], states[1], "", nil)
-		err := updaterBackend(t, f).applyInstalledUpdate(context.Background())
-		if err != nil {
+		if err := updaterBackend(t, f).applyInstalledUpdate(context.Background()); err != nil {
 			t.Fatal(err)
 		}
 		checked := false
-		var restarted []string
+		var phases []string
 		for _, c := range f.calls {
-			if c.name == "/usr/libexec/incus/prepare-idmap" {
+			switch c.name {
+			case "/usr/libexec/incus/prepare-idmap":
 				checked = true
 				if !reflect.DeepEqual(c.args, []string{"--check"}) {
-					t.Fatal("apply mutated root mappings", c)
+					t.Fatal(c)
 				}
-			} else if c.name == "systemctl" && c.args[0] != "show" {
-				if !checked || c.args[0] != "restart" {
-					t.Fatal("restarted before validation or changed enablement", c)
+			case "/bin/bash":
+				if !checked || len(c.args) != 3 || c.args[0] != nodeUpgradePath || c.args[2] != "installed" {
+					t.Fatal(c)
 				}
-				restarted = append(restarted, c.args[1])
-			} else if c.name != "systemctl" && c.name != "/usr/bin/incus" {
-				t.Fatal("apply attempted installation or another mutation", c)
+				phases = append(phases, c.args[1])
+			case "systemctl":
+				if c.args[0] != "show" {
+					t.Fatal("service change escaped upgrade script", c)
+				}
+			case "/usr/bin/incus":
+			default:
+				t.Fatal("unexpected installation or download", c)
 			}
 		}
-		want := []string(nil)
-		if states[0] {
-			want = append(want, "incus")
-		}
-		if states[1] {
-			want = append(want, "incudal-agent")
-		}
-		if !checked || !reflect.DeepEqual(restarted, want) {
-			t.Fatal(checked, restarted, want)
+		if !reflect.DeepEqual(phases, []string{"--dry-run", "--apply"}) {
+			t.Fatal(phases)
 		}
 	}
 }
@@ -91,8 +89,8 @@ func TestStatusWarnsPendingInstalledUpdate(t *testing.T) {
 		if c.name == "readlink" {
 			return []byte("/usr/libexec/incus/incusd (deleted)"), nil
 		}
-		if c.name == "/usr/bin/incus" && strings.Contains(strings.Join(c.args, " "), "/1.0/payincus") {
-			return []byte(`{"api_extensions":["payincus_node_v1"]}`), nil
+		if c.name == "/usr/bin/incus" && strings.Contains(strings.Join(c.args, " "), "/1.0/agent") {
+			return []byte(`{"api_extensions":["incus_node_v1"]}`), nil
 		}
 		return []byte("[]"), nil
 	}}
@@ -103,7 +101,7 @@ func TestStatusWarnsPendingInstalledUpdate(t *testing.T) {
 }
 
 func TestApplyInstalledUpdatePropagatesFailureAndSharesUpdateLock(t *testing.T) {
-	for _, stage := range []string{"/usr/libexec/incus/prepare-idmap --check", "systemctl restart incus"} {
+	for _, stage := range []string{"/usr/libexec/incus/prepare-idmap --check", "/bin/bash " + nodeUpgradePath + " --dry-run installed", "/bin/bash " + nodeUpgradePath + " --apply installed"} {
 		cause := errors.New("fixture failure at " + stage)
 		f := updateRunner(true, true, stage, cause)
 		err := updaterBackend(t, f).applyInstalledUpdate(context.Background())
@@ -111,7 +109,7 @@ func TestApplyInstalledUpdatePropagatesFailureAndSharesUpdateLock(t *testing.T) 
 			t.Fatal("apply hid failure", err)
 		}
 		for _, c := range f.calls {
-			if c.name == "systemctl" && reflect.DeepEqual(c.args, []string{"restart", "incudal-agent"}) {
+			if c.name == "systemctl" && reflect.DeepEqual(c.args, []string{"restart", "incus-agent"}) {
 				t.Fatal("continued after failed prerequisite")
 			}
 		}

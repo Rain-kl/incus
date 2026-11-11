@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// PayIncus: complete enrollment through one token and preserve existing Incus trust entries.
+// Incus: complete enrollment through one token and preserve existing Incus trust entries.
 func (b *backend) enroll(ctx context.Context, panel, token string) error {
 	logOperation(ctx, "[1/5] 检查连接器、启动 Incus 并等待本地 API")
 	err := b.connectorReady(ctx)
@@ -45,11 +45,11 @@ func (b *backend) enroll(ctx context.Context, panel, token string) error {
 			if err != nil {
 				return err
 			}
-			_, err = b.run(ctx, "systemctl", "enable", "incudal-agent")
+			_, err = b.run(ctx, "systemctl", "enable", "incus-agent")
 			if err != nil {
 				return err
 			}
-			return b.service(ctx, "incudal-agent", "restart")
+			return b.service(ctx, "incus-agent", "restart")
 		}},
 	}
 	for _, step := range steps {

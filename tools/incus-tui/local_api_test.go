@@ -93,7 +93,7 @@ func TestLocalAdapterQueryInitAndAsyncContract(t *testing.T) {
 		t.Fatal(calls)
 	}
 	{
-		_, err := c.runAdapter(context.Background(), []string{"query", "/1.0/payincus"}, "")
+		_, err := c.runAdapter(context.Background(), []string{"query", "/1.0/agent"}, "")
 		if err != nil {
 			t.Fatal(err)
 		}

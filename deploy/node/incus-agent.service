@@ -1,0 +1,14 @@
+[Unit]
+Description=Incus node connector
+Wants=network-online.target incus.service
+After=network-online.target incus.service
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/incus/agent/incus-agent -config /etc/incus/agent/config.yaml
+Restart=always
+RestartSec=5
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

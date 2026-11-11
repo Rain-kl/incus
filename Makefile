@@ -410,8 +410,8 @@ help:
 .PHONY: tui
 # doc: Build the node setup TUI and start it with sudo (needs root)
 tui:
-	cd tools/incus-tui && CGO_ENABLED=0 $(GO) build -trimpath -o "$(CURDIR)/scripts/payincus/dist/incus-tui" .
-	sudo "$(CURDIR)/scripts/payincus/dist/incus-tui"
+	cd tools/incus-tui && CGO_ENABLED=0 $(GO) build -trimpath -o "$(CURDIR)/scripts/node/dist/incus-tui" .
+	sudo "$(CURDIR)/scripts/node/dist/incus-tui"
 
 # PayIncus: cross-build the standalone TUI module into a Linux binary; override the target with TUI_ARCH=amd64|arm64.
 TUI_ARCH ?= $(shell $(GO) env GOARCH)
@@ -419,5 +419,5 @@ TUI_ARCH ?= $(shell $(GO) env GOARCH)
 .PHONY: tui-build
 # doc: Cross-build the node setup TUI as a Linux binary (TUI_ARCH=amd64|arm64)
 tui-build:
-	cd tools/incus-tui && CGO_ENABLED=0 GOOS=linux GOARCH=$(TUI_ARCH) $(GO) build -trimpath -o "$(CURDIR)/scripts/payincus/dist/incus-tui-linux-$(TUI_ARCH)" .
-	@echo "Linux TUI binary built: $(CURDIR)/scripts/payincus/dist/incus-tui-linux-$(TUI_ARCH)"
+	cd tools/incus-tui && CGO_ENABLED=0 GOOS=linux GOARCH=$(TUI_ARCH) $(GO) build -trimpath -o "$(CURDIR)/scripts/node/dist/incus-tui-linux-$(TUI_ARCH)" .
+	@echo "Linux TUI binary built: $(CURDIR)/scripts/node/dist/incus-tui-linux-$(TUI_ARCH)"

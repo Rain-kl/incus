@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-// PayIncus: a reachable API can still belong to a replaced daemon with a stale cached idmap.
+// Incus: a reachable API can still belong to a replaced daemon with a stale cached idmap.
 func (b *backend) installedUpdatePending(ctx context.Context) (bool, error) {
 	data, err := b.run(ctx, "systemctl", "show", "incus", "--property=MainPID", "--value")
 	if err != nil {
@@ -35,14 +35,14 @@ func (b *backend) applyInstalledUpdate(ctx context.Context) (err error) {
 	}
 	defer func() { err = errors.Join(err, lock.Close()) }()
 	states := map[string]updateServiceState{}
-	for _, unit := range []string{"incus", "incudal-agent"} {
+	for _, unit := range []string{"incus", "incus-agent"} {
 		state, stateErr := b.updateServiceState(ctx, unit)
 		if stateErr != nil {
 			return stateErr
 		}
 		states[unit] = state
 	}
-	if states["incudal-agent"].active && !states["incus"].active {
+	if states["incus-agent"].active && !states["incus"].active {
 		return errors.New("连接器正在运行但 Incus 未运行，请先处理服务状态后再应用更新")
 	}
 	err = b.connectorReady(ctx)
@@ -54,5 +54,13 @@ func (b *backend) applyInstalledUpdate(ctx context.Context) (err error) {
 		return fmt.Errorf("已安装软件包的 root ID 映射检查失败，未重启服务：%w", err)
 	}
 	logOperation(ctx, "应用磁盘上已安装的软件包；不下载、不重新安装，不修改 ID 映射")
-	return b.restartUpdatedServices(ctx, states)
+	_, err = b.run(ctx, "/bin/bash", nodeUpgradePath, "--dry-run", "installed")
+	if err != nil {
+		return err
+	}
+	_, err = b.run(ctx, "/bin/bash", nodeUpgradePath, "--apply", "installed")
+	if err != nil {
+		return err
+	}
+	return b.checkUpdatedServices(ctx, states)
 }

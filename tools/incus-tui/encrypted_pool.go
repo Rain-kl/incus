@@ -65,17 +65,17 @@ func (b *backend) createEncryptedPool(ctx context.Context, client *localClient, 
 		}
 	}
 	// Refuse unsupported or locked nodes before allocating a disk or creating a pool.
-	data, err := client.call(ctx, "GET", "/1.0/payincus", nil)
+	data, err := client.call(ctx, "GET", "/1.0/agent", nil)
 	if err != nil {
 		return nil, err
 	}
 	var info struct {
 		Extensions []string `json:"api_extensions"`
 	}
-	if json.Unmarshal(data, &info) != nil || !slices.Contains(info.Extensions, "payincus_storage_encryption_v1") {
+	if json.Unmarshal(data, &info) != nil || !slices.Contains(info.Extensions, "incus_storage_encryption_v1") {
 		return nil, errors.New("节点不支持独立加密存储初始化，请先更新节点集成包；未创建存储池")
 	}
-	data, err = client.call(ctx, "GET", "/1.0/payincus/security", nil)
+	data, err = client.call(ctx, "GET", "/1.0/agent/security", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -94,7 +94,7 @@ func (b *backend) createEncryptedPool(ctx context.Context, client *localClient, 
 	clear(material[:])
 	contextLog(ctx).secret(key)
 	receipt := &encryptedPoolReceipt{dataset: request.name + "/incus", key: key}
-	data, err = client.call(ctx, "POST", "/1.0/payincus/storage/pool", map[string]any{"name": request.name, "device": request.device, "sizeGiB": sizeGiB, "key": key})
+	data, err = client.call(ctx, "POST", "/1.0/agent/storage/pool", map[string]any{"name": request.name, "device": request.device, "sizeGiB": sizeGiB, "key": key})
 	if err != nil {
 		return receipt, fmt.Errorf("池 %s 的加密初始化未确认完成；请保存结果页密钥并检查存储状态：%w", request.name, err)
 	}

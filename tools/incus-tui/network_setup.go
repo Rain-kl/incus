@@ -45,7 +45,7 @@ func compatiblePanelNetwork(network *nodeNetwork) bool {
 		network.Config["ipv4.nat"] == "true" && network.Config["ipv4.dhcp"] != "false"
 }
 
-// PayIncus: credentials alone are insufficient for nodes using the panel's fixed IPv4 pool.
+// Incus: credentials alone are insufficient for nodes using the panel's fixed IPv4 pool.
 func (c *localClient) ensurePanelNetwork(ctx context.Context) error {
 	network, err := c.panelNetwork(ctx)
 	if err != nil {

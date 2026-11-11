@@ -12,7 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// PayIncus: Xray maintenance runs without a per-action confirmation and returns raw metadata for a friendly report.
+// Incus: Xray maintenance runs without a per-action confirmation and returns raw metadata for a friendly report.
 func (b *backend) xray(ctx context.Context, action string) ([]byte, error) {
 	if action != "inspect" && action != "test" && action != "restart" && action != "reconfigure" {
 		return nil, errors.New("unknown Xray action")
@@ -24,7 +24,7 @@ func (b *backend) xray(ctx context.Context, action string) ([]byte, error) {
 	if action == "inspect" {
 		method, input = "GET", nil
 	}
-	return client.call(ctx, method, "/1.0/payincus/xray", input)
+	return client.call(ctx, method, "/1.0/agent/xray", input)
 }
 
 func xrayOperation(ctx context.Context, cancel context.CancelFunc, b *backend, action string) tea.Cmd {
@@ -73,7 +73,7 @@ type xrayProbe struct {
 	Error     string `json:"error"`
 }
 
-// PayIncus: render the local Xray API metadata as readable lines instead of a raw JSON/log dump.
+// Incus: render the local Xray API metadata as readable lines instead of a raw JSON/log dump.
 func xrayReport(action string, data []byte) ([]string, error) {
 	switch action {
 	case "inspect":
