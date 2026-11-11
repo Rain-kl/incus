@@ -2,6 +2,7 @@
 # PayIncus: native Debian build inside the same target used by the installer.
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
+bash scripts/node/ci-apt.sh
 apt-get update
 apt-get install -y --no-install-recommends ca-certificates python3 build-essential pkg-config \
   libcowsql-dev lxc-dev libsqlite3-dev libcap-dev libudev-dev libacl1-dev \

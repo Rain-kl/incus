@@ -54,6 +54,7 @@ jobs:
       - name: Native build dependencies
         if: matrix.target == 'ubuntu-24.04'
         run: |
+          sudo bash scripts/node/ci-apt.sh
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             python3 build-essential pkg-config libcowsql-dev liblxc-dev libsqlite3-dev \

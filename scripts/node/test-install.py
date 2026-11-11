@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import unittest
 
 SCRIPT = Path(__file__).with_name('install.sh').read_text()
-INTERNAL_VERSION = '2.0.0'
+INTERNAL_VERSION = '2.0.1'
 
 
 def evaluate_publish_condition(node, github):

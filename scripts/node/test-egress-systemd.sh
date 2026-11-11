@@ -22,7 +22,7 @@ if [[ -z "${INCUS_EGRESS_SYSTEMD_IMAGE:-}" ]]; then
   if [[ -n "${CODEX_PROXY_CERT:-}" ]]; then
     build_args+=(--secret "id=proxy_ca,src=$CODEX_PROXY_CERT")
   fi
-  docker build "${build_args[@]}" -t "$fixture_image" -f scripts/node/fixtures/egress-systemd.Dockerfile scripts/node/fixtures
+  docker build "${build_args[@]}" -t "$fixture_image" -f scripts/node/fixtures/egress-systemd.Dockerfile scripts/node
 fi
 docker run -d -t --name "$fixture_name" \
   --cap-drop ALL --cap-add SYS_ADMIN --cap-add NET_ADMIN --cap-add NET_RAW \

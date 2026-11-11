@@ -18,7 +18,7 @@
 
 ## 内部版本与发行身份
 
-- 内部发行版本唯一来源为 `scripts/node/VERSION`，当前为 2.0.0；不得改动上游 Incus 自身版本。
+- 内部发行版本唯一来源为 `scripts/node/VERSION`，当前为 2.0.1；不得改动上游 Incus 自身版本。
 - 每次修改 Incus 定制代码必须同步更新 Agent 构建版本：正式版为 `v<内部版本>`，开发版为 `v<内部版本>-<本次提交 SHA 前 12 位>`；Agent、TUI 和软件包由同一构建输入生成，不得使用独立硬编码旧版本。
 - 软件包资产为 `incus-<版本>[-canary.<SHA>]-linux-<系统>-<系统版本>-<架构>.deb`；默认 canary 推送集成，main 仅正式 tag 集成。正式 tag 必须匹配 VERSION 且提交属于 main。
 
