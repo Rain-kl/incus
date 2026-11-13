@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Run the actual installer with fixture OS metadata, GitHub transport and apt."""
 import ast
+import io
+import tarfile
 import hashlib
 import itertools
 import json
@@ -39,12 +41,18 @@ def evaluate_publish_condition(node, github):
 class InstallerTests(unittest.TestCase):
     def run_installer(self, channel='canary', target='debian-13', arch='amd64', damage=False,
                       missing=False, bad_url=False, distro=None, draft=False, wrong_channel=False,
-                      mode='--no-tui', apt_failure=False, service_active=False):
+                      mode='--no-tui', apt_failure=False, service_active=False, missing_upgrader=False):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             binary = root / 'bin'
             binary.mkdir()
-            payload = b'deb fixture bytes'
+            target_script = b'set -eu\necho "target-upgrade $1" >> "$FIXTURE/apt.log"\nif [ "$1" = --apply ]; then apt-get install -y --reinstall --allow-downgrades --no-remove "$2"; fi\n'
+            tar_buffer = io.BytesIO()
+            with tarfile.open(fileobj=tar_buffer, mode='w') as archive:
+                info = tarfile.TarInfo('./usr/libexec/incus/node-upgrade.sh' if not missing_upgrader else './unrelated')
+                info.size = len(target_script)
+                archive.addfile(info, io.BytesIO(target_script))
+            payload = tar_buffer.getvalue()
             version = f'{INTERNAL_VERSION}-canary.abcdef012345' if channel == 'canary' else INTERNAL_VERSION
             name = f'incus-{version}-linux-{target}-{arch}.deb'
             checksum = hashlib.sha256(payload).hexdigest()
@@ -62,7 +70,7 @@ class InstallerTests(unittest.TestCase):
             os_id, version = (distro or target).rsplit('-', 1)
             (root / 'os-release').write_text(f'ID={os_id}\nVERSION_ID={version}\nID_LIKE=debian\n')
             script = SCRIPT.replace('. /etc/os-release', f'. "{root}/os-release"').replace('/usr/libexec/incus/node-upgrade.sh', str(root / 'node-upgrade.sh'))
-            (root / 'node-upgrade.sh').write_text('set -eu\necho "upgrade $1" >> "$FIXTURE/apt.log"\nif [ "$1" = --apply ]; then apt-get install -y --reinstall --allow-downgrades --no-remove "$2"; fi\n')
+            (root / 'node-upgrade.sh').write_text('echo BROKEN_INSTALLED_UPGRADER >&2\nexit 99\n')
             script = '\n'.join(line for line in script.splitlines() if not line.startswith('[[ $EUID -eq 0 ]]'))
             (root / 'install.sh').write_text(script)
             mocks = {
@@ -88,6 +96,7 @@ if '--allow-downgrades' in sys.argv and os.environ.get('NEEDRESTART_MODE') != 'l
     print('Update delegates unexpected restarts to needrestart', file=sys.stderr)
     sys.exit(102)
 ''',
+                'dpkg-deb': "import sys\nassert sys.argv[1]=='--fsys-tarfile'\nsys.stdout.buffer.write(open(sys.argv[2], 'rb').read())\n",
                 'dpkg': "import os\nprint(os.environ['TEST_ARCH'])\n",
                 'systemctl': "import os,sys\nassert sys.argv[1:] == ['is-active', '--quiet', 'incus']\nsys.exit(0 if os.environ['TEST_SERVICE_ACTIVE'] == '1' else 3)\n",
             }
@@ -127,7 +136,7 @@ if '--allow-downgrades' in sys.argv and os.environ.get('NEEDRESTART_MODE') != 'l
                 result, log = self.run_installer(channel, target, arch, mode='--update')
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn('--reinstall --allow-downgrades', log)
-                self.assertLess(log.index('upgrade --dry-run'), log.index('upgrade --apply'))
+                self.assertLess(log.index('target-upgrade --dry-run'), log.index('target-upgrade --apply'))
                 self.assertIn('Downloading incus-', result.stdout)
                 self.assertIn('(82.4 MiB)', result.stdout)
                 self.assertIn('Verified SHA256 checksum for incus-', result.stdout)
@@ -138,6 +147,16 @@ if '--allow-downgrades' in sys.argv and os.environ.get('NEEDRESTART_MODE') != 'l
         self.assertEqual(result.returncode, 100)
         self.assertIn('APT fixture error:', result.stderr)
         self.assertNotIn('Node package installed:', result.stdout)
+
+    def test_verified_target_repairs_broken_installed_upgrader(self):
+        result, log = self.run_installer(mode='--update')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('target-upgrade --apply', log)
+        self.assertNotIn('BROKEN_INSTALLED_UPGRADER', result.stderr)
+        result, log = self.run_installer(mode='--update', missing_upgrader=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn('target-upgrade', log)
+        self.assertNotIn('install -y', log)
 
     def test_update_failures_do_not_install(self):
         for kwargs in ({'damage': True}, {'missing': True}, {'bad_url': True}, {'wrong_channel': True}, {'draft': True}):

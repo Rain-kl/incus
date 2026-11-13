@@ -7,11 +7,13 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
 
+	"github.com/lxc/incus/v7/internal/server/agent/nodeclient"
 	"github.com/lxc/incus/v7/internal/server/agent/protocol"
 )
 
@@ -148,4 +150,100 @@ func TestNativeIncusStreamAndRejectedRPC(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("tunnel leaked after cancellation")
 	}
+}
+
+type testRoundTripper func(*http.Request) (*http.Response, error)
+
+func (f testRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+func TestAgentJournalLogControlUsesIncusAgentUnit(t *testing.T) {
+	var gotUnit string
+	var gotLines string
+	nodeAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/1.0/agent/journal" {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		gotUnit = r.URL.Query().Get("unit")
+		gotLines = r.URL.Query().Get("lines")
+		if gotUnit != "incus-agent" {
+			http.Error(w, "invalid journal request", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: \"agent started\"\n\n"))
+	}))
+	defer nodeAPI.Close()
+
+	targetURL, err := url.Parse(nodeAPI.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodeClient := &nodeclient.Client{
+		HTTP: &http.Client{
+			Transport: testRoundTripper(func(r *http.Request) (*http.Response, error) {
+				cloned := r.Clone(r.Context())
+				cloned.URL.Scheme = targetURL.Scheme
+				cloned.URL.Host = targetURL.Host
+				return http.DefaultTransport.RoundTrip(cloned)
+			}),
+		},
+	}
+
+	connections := make(chan *websocket.Conn, 1)
+	secret := "local-test-secret"
+	panel := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, e := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if e == nil {
+			connections <- conn
+		}
+	}))
+	defer panel.Close()
+
+	worker := NewWorker(WorkerConfig{
+		PanelURL:    panel.URL,
+		AgentID:     "local-agent",
+		AgentSecret: secret,
+		TargetHost:  "127.0.0.1",
+		TargetPort:  8443,
+		NodeClient:  nodeClient,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- worker.connectAndServe(ctx) }()
+
+	var conn *websocket.Conn
+	select {
+	case conn = <-connections:
+	case <-time.After(3 * time.Second):
+		t.Fatal("no websocket")
+	}
+	defer conn.Close()
+
+	payload, _ := json.Marshal(LogControl{Action: "start", Lines: 100})
+	if err := conn.WriteMessage(websocket.BinaryMessage, EncodeFrame(FrameTypeLogCtl, 0, payload)); err != nil {
+		t.Fatal(err)
+	}
+
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	_, frame, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	kind, streamID, data, err := DecodeFrame(frame)
+	if err != nil || kind != FrameTypeLogData || streamID != 0 {
+		t.Fatalf("unexpected frame %d/%d: %v", kind, streamID, err)
+	}
+	if string(data) != "agent started" {
+		t.Fatalf("unexpected log line: %q (unit=%q lines=%q)", string(data), gotUnit, gotLines)
+	}
+	if gotUnit != "incus-agent" || gotLines != "100" {
+		t.Fatalf("unexpected journal query: unit=%q lines=%q", gotUnit, gotLines)
+	}
+
+	cancel()
+	<-done
 }

@@ -91,8 +91,11 @@ PY
 apt-get update
 if [[ "${2:-}" == --update ]]; then
   # Channel selection authorizes switching versions; SHA suffixes are not chronological.
-  /bin/bash /usr/libexec/incus/node-upgrade.sh --dry-run "$stage/$package"
-  /bin/bash /usr/libexec/incus/node-upgrade.sh --apply "$stage/$package"
+  # Run the upgrader from the verified target, so a broken installed upgrader can repair itself.
+  dpkg-deb --fsys-tarfile "$stage/$package" | tar -xOf - ./usr/libexec/incus/node-upgrade.sh > "$stage/node-upgrade.sh"
+  [[ -s "$stage/node-upgrade.sh" ]] || { echo 'Verified package contains no node upgrader.' >&2; exit 1; }
+  /bin/bash "$stage/node-upgrade.sh" --dry-run "$stage/$package"
+  /bin/bash "$stage/node-upgrade.sh" --apply "$stage/$package"
   echo "Node package installed: $package"
   exit 0
 fi

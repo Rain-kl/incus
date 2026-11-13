@@ -147,7 +147,7 @@ func TestSSEAndCancellation(t *testing.T) {
 
 func TestJournalEndpointContract(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != prefix+"/journal" || r.URL.Query().Get("unit") != "agent" || r.URL.Query().Get("lines") != "100" {
+		if r.URL.Path != prefix+"/journal" || r.URL.Query().Get("unit") != "incus-agent" || r.URL.Query().Get("lines") != "100" {
 			t.Error(r.URL)
 		}
 
@@ -156,7 +156,7 @@ func TestJournalEndpointContract(t *testing.T) {
 	}))
 	defer server.Close()
 	count := 0
-	err := testClient(server).Journal(context.Background(), "agent", 100, func(line string) {
+	err := testClient(server).Journal(context.Background(), "incus-agent", 100, func(line string) {
 		if line != "journal" {
 			t.Error(line)
 		}

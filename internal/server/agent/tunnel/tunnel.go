@@ -538,7 +538,7 @@ func (w *Worker) connectAndServe(ctx context.Context) error {
 				logCtx, cancel := context.WithCancel(connCtx)
 				logStreamCancel = cancel
 				log.Printf("[tunnel] starting agent log stream (last %d lines, follow)", lines)
-				go streamJournalLogs(logCtx, writeChan, "agent", lines, w.cfg.NodeClient)
+				go streamJournalLogs(logCtx, writeChan, "incus-agent", lines, w.cfg.NodeClient)
 			case "stop":
 				if logStreamCancel != nil {
 					log.Printf("[tunnel] stopping agent log stream")
