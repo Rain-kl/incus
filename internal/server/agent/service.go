@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/lxc/incus/v7/internal/server/agent/backups"
 	"github.com/lxc/incus/v7/internal/server/agent/caddy"
 	"github.com/lxc/incus/v7/internal/server/agent/config"
 	"github.com/lxc/incus/v7/internal/server/agent/diagnostics"
@@ -38,6 +39,8 @@ type Engine interface {
 
 // Service serves authenticated node extension requests inside incusd.
 type Service struct {
+	backupsOnce   sync.Once
+	backups       *backups.Manager
 	ctx           context.Context
 	guard         *nodesecurity.Manager
 	engine        Engine
@@ -139,13 +142,18 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		respond(w, code, value)
 		return
 	}
+	if r.URL.Path == Prefix+"/instance-backups" {
+		s.backupsOnce.Do(func() { s.backups = backups.New(s.ctx, s.guard) })
+		s.backups.ServeHTTP(w, r)
+		return
+	}
 	switch r.URL.Path {
 	case Prefix:
 		if r.Method != http.MethodGet {
 			break
 		}
 
-		respond(w, 200, map[string]any{"api_extensions": []string{Extension, XrayMaintenanceExtension, ResetExtension, nodesecurity.StartupExtension, nodesecurity.Extension, nodesecurity.ResumeExtension, nodesecurity.StorageExtension, nodesecurity.StoragePoolDirExtension, nodesecurity.StoragePoolAllocExtension, nodesecurity.StoragePoolResizeExtension}, "api_version": "1.0", "transport_only_agent": true})
+		respond(w, 200, map[string]any{"api_extensions": []string{backups.Extension, Extension, XrayMaintenanceExtension, ResetExtension, nodesecurity.StartupExtension, nodesecurity.Extension, nodesecurity.ResumeExtension, nodesecurity.StorageExtension, nodesecurity.StoragePoolDirExtension, nodesecurity.StoragePoolAllocExtension, nodesecurity.StoragePoolResizeExtension}, "api_version": "1.0", "transport_only_agent": true})
 		return
 	case Prefix + "/report":
 		if r.Method != http.MethodGet {

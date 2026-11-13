@@ -629,3 +629,13 @@ CI 接线修正：fork 初始没有官方 release tag，校验步骤从官方仓
 - `internal/server/agent/egress/maintenance_test.go` 新增 `TestMaintainReconfigureWithoutPolicyPreparesEnvironment`（用假 `systemctl`/`ip` 记录调用，断言无策略时 reconfigure 不再返回 `no network policy` 且确实执行了 `systemctl show --property=LoadState` 与 `ip link show igw-host`）与 `TestMaintainRestartWithoutPolicyStillRejects`（无策略时 restart 仍拒绝）。既有 `TestXrayMaintenanceRejectsUnsafeStatesWithoutHostCommands`、`TestMaintenanceChecksAndStopsLegacyUnitEvenWhenPolicyIsOff` 保持通过。
 - `tools/incus-tui/xray_test.go` 的 `TestXrayReportRendersFriendlySummary` 增加 `appliedRevision == 0` 的重建提示断言。
 - 验证命令：linux 容器内 `go test ./internal/server/agent/...` 全部通过（egress 等包为 linux-only，macOS 上无法执行）；独立 TUI module 的 `gofmt -l`、`go vet ./...`、`go test -race ./...` 通过。未在节点真机复验无策略重建，也未发布新包。
+
+## 管理员手动备份节点全部实例（2026-11-13）
+
+- 目的与行为：控制端运维中心提交宿主机绝对目录后，由 incusd 后台逐个导出本节点所有项目的实例；不调用 CLI、不停止或重启实例。每次创建权限 0700 的独立任务目录，归档以 0600 临时文件写入，完成同步后原子改名。单个实例失败继续处理其它实例，最终区分成功、部分失败、失败和中断；不包含历史快照，宿主机路径挂载数据需另行备份。
+- 长程任务：不设执行时限，不按任务年龄、心跳或前端轮询次数判定失败。HTTP 连接断开和控制端重启不取消节点任务。任务 ID 支持幂等提交，每节点同时一个任务；最近 50 条任务保存在节点认证加密日志，Incus 重启后将未完成任务标记中断，保留已完成归档，不自动重跑。
+- 配置与兼容：目标须为已存在且可访问的目录（可为已挂载的 NAS）；拒绝系统目录、Incus 状态目录、存储源和实例路径挂载内部，解析符号链接后再次核验。原生存储导出格式使用 gzip 非 optimized 归档；原生依赖卷行为由当前 LTS 的备份 API 处理。管理员仍需管理目标空间、清理策略与恢复演练；本功能不自动删除已完成归档。
+- API：新增 `incus_instance_backup_v1`；`GET /1.0/agent/instance-backups` 返回任务列表，`POST` 接收 32 位小写 hex `id` 和 `directory` 并在持久化后立即返回。复用 `cmd/incusd/node.go` 的 server `can_edit` 授权及安全锁约束。控制端要求管理员与已人工核对的节点证书指纹，探测扩展后才提交。
+- 接入点：定制模块 `internal/server/agent/backups/{manager,native}.go`，`service.go` 仅添加分发、懒初始化与能力声明，`security/backup_state.go` 复用既有 AES-256-GCM 状态存储。上游 API 为 GetServer、GetInstancesAllProjects、GetStoragePools、CreateInstanceBackupStream；缺少 direct_backup 时使用 CreateInstanceBackup / Operation.Wait / GetInstanceBackupFile / DeleteInstanceBackup，正常完成后清理临时备份。未改上游 API 或数据库格式。
+- 测试：`backups/manager_test.go` 覆盖请求断开后继续执行、幂等、节点并发、部分失败、临时文件清理、状态恢复、危险目录及持久化失败；`native_test.go` 通过真实上游 Go 客户端检查项目/集群成员筛选、流式导出和请求参数；`security/backup_state_test.go` 检查密文、篡改与密钥丢失拒绝。Linux 下 backups/security/agent 全模块 race 测试通过；控制端管理员权限、能力与指纹缺失、审计失败、节点错误传播测试及类型检查、前端守卫和双端构建通过。浏览器已验证入口、设置、提交、刷新后任务恢复及 390px 布局。本地隔离 Debian 13 / Incus 6.0.4 真实容器验证原生兼容导出路径：原容器 PID 4859 保持运行，1,019,280 字节归档导入另一实例后校验文件一致；7.0.2 源码的 direct_backup 契约经真实上游客户端 fixture 验证。生产未部署。
+- 构建版本：继续使用 `scripts/node/VERSION` 与构建提交 SHA 统一生成 Agent/TUI/软件包身份；此新增扩展要求重新构建并升级节点集成包。后续 LTS 同步核对以上原生客户端契约、依赖卷语义、operation 生命周期及 server can_edit 接线。

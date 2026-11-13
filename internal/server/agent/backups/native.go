@@ -1,0 +1,108 @@
+package backups
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+
+	incus "github.com/lxc/incus/v7/client"
+	"github.com/lxc/incus/v7/internal/server/agent/localapi"
+	"github.com/lxc/incus/v7/shared/api"
+)
+
+type nativeSource struct {
+	connect func(context.Context) (incus.InstanceServer, error)
+}
+
+func (n nativeSource) client(ctx context.Context) (incus.InstanceServer, error) {
+	if n.connect != nil {
+		return n.connect(ctx)
+	}
+	return nativeClient(ctx)
+}
+
+func nativeClient(ctx context.Context) (incus.InstanceServer, error) {
+	return incus.ConnectIncusUnixWithContext(ctx, localapi.SocketCandidates()[0], nil)
+}
+
+func (n nativeSource) Inventory(ctx context.Context, destination string) ([]Item, error) {
+	client, err := n.client(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer client.Disconnect()
+	server, _, err := client.GetServer()
+	if err != nil {
+		return nil, err
+	}
+	instances, err := client.GetInstancesAllProjects(api.InstanceTypeAny)
+	if err != nil {
+		return nil, err
+	}
+	pools, err := client.GetStoragePools()
+	if err != nil {
+		return nil, err
+	}
+	// Avoid putting an archive inside a volume that the same task will read.
+	for _, pool := range pools {
+		source := pool.Config["source"]
+		if filepath.IsAbs(source) {
+			resolved, resolveErr := filepath.EvalSymlinks(source)
+			if resolveErr == nil && (destination == resolved || strings.HasPrefix(destination, resolved+string(os.PathSeparator))) {
+				return nil, errors.New("backup directory is inside an Incus storage source")
+			}
+		}
+	}
+	items := []Item{}
+	for _, instance := range instances {
+		if server.Environment.ServerClustered && instance.Location != "" && instance.Location != server.Environment.ServerName {
+			continue
+		}
+		for _, device := range instance.ExpandedDevices {
+			if device["type"] == "disk" && filepath.IsAbs(device["source"]) {
+				resolved, resolveErr := filepath.EvalSymlinks(device["source"])
+				if resolveErr == nil && (destination == resolved || strings.HasPrefix(destination, resolved+string(os.PathSeparator))) {
+					return nil, fmt.Errorf("backup directory is inside instance %s/%s disk source", instance.Project, instance.Name)
+				}
+			}
+		}
+		items = append(items, Item{Project: instance.Project, Name: instance.Name, Status: "pending"})
+	}
+	return items, nil
+}
+
+func (n nativeSource) Export(ctx context.Context, item Item, writer io.WriteSeeker) (result error) {
+	client, err := n.client(ctx)
+	if err != nil {
+		return err
+	}
+	defer client.Disconnect()
+	client = client.UseProject(item.Project)
+	req := api.InstanceBackupsPost{Name: "node-" + randomName(), InstanceOnly: true, CompressionAlgorithm: "gzip"}
+	file := &incus.BackupFileRequest{BackupFile: writer}
+	if client.HasExtension("direct_backup") {
+		return client.CreateInstanceBackupStream(item.Name, req, file)
+	}
+	operation, err := client.CreateInstanceBackup(item.Name, req)
+	if err != nil {
+		return err
+	}
+	if err = operation.Wait(); err != nil {
+		return err
+	}
+	defer func() {
+		cleanup, cleanupErr := client.DeleteInstanceBackup(item.Name, req.Name)
+		if cleanupErr == nil {
+			cleanupErr = cleanup.Wait()
+		}
+		if cleanupErr != nil {
+			result = errors.Join(result, fmt.Errorf("temporary backup cleanup failed: %w", cleanupErr))
+		}
+	}()
+	_, err = client.GetInstanceBackupFile(item.Name, req.Name, file)
+	return err
+}
