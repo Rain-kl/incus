@@ -508,7 +508,18 @@ func (m *Manager) run(id string) {
 				t.Error = runErr.Error()
 			} else if failed > 0 {
 				t.Status = "partial"
-				t.Error = fmt.Sprintf("%d instance exports failed", failed)
+				var detail string
+				for _, item := range t.Items {
+					if item.Status != "success" && item.Error != "" {
+						detail = fmt.Sprintf("%s: %s", item.Name, item.Error)
+						break
+					}
+				}
+				if detail != "" {
+					t.Error = fmt.Sprintf("%d instance exports failed (%s)", failed, detail)
+				} else {
+					t.Error = fmt.Sprintf("%d instance exports failed", failed)
+				}
 			}
 		})
 	}()

@@ -59,6 +59,9 @@ func TestNativeAPIInventoryAndStreamingExport(t *testing.T) {
 	if err = source.Export(context.Background(), items[0], file); err != nil {
 		t.Fatal(err)
 	}
+	if request.Name != "" {
+		t.Fatalf("direct_backup must not set backup name, got %q", request.Name)
+	}
 	data, err := os.ReadFile(file.Name())
 	if err != nil || string(data) != "real upstream client stream" || !exported {
 		t.Fatal(err, string(data))

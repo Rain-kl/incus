@@ -83,11 +83,12 @@ func (n nativeSource) Export(ctx context.Context, item Item, writer io.WriteSeek
 	}
 	defer client.Disconnect()
 	client = client.UseProject(item.Project)
-	req := api.InstanceBackupsPost{Name: "node-" + randomName(), InstanceOnly: true, CompressionAlgorithm: "gzip"}
+	req := api.InstanceBackupsPost{InstanceOnly: true, CompressionAlgorithm: "gzip"}
 	file := &incus.BackupFileRequest{BackupFile: writer}
 	if client.HasExtension("direct_backup") {
 		return client.CreateInstanceBackupStream(item.Name, req, file)
 	}
+	req.Name = "node-" + randomName()
 	operation, err := client.CreateInstanceBackup(item.Name, req)
 	if err != nil {
 		return err
