@@ -66,17 +66,19 @@ for asset in selected:
 size = packages[0].get('size')
 size_label = f" ({size / 1048576:.1f} MiB)" if isinstance(size, int) and size > 0 else ""
 print(f"Installing {release['tag_name']} for {target}/{arch}")
-print(f"Downloading {packages[0]['name']}{size_label}")
+(folder / 'download_label.txt').write_text(f"Downloading {packages[0]['name']}{size_label}")
 PY
 mapfile -t urls < "$stage/assets.txt"
 package="$(cat "$stage/package.txt")"
-# Incus: keep the progress bar within an 80-column TUI log row after the RFC3339 prefix.
-COLUMNS=48 curl --fail --progress-bar --show-error --location --proto '=https' --proto-redir '=https' \
-  --connect-timeout 15 --max-time 900 "${urls[0]}" -o "$stage/$package"
+cache_dir="${INCUS_CACHE_DIR:-/var/cache/incus/node-install}"
+pkg_dir="$stage"
+if mkdir -p "$cache_dir" 2>/dev/null && chmod 0755 "$cache_dir" 2>/dev/null; then
+  pkg_dir="$cache_dir"
+fi
 curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
-  --connect-timeout 15 --max-time 120 "${urls[1]}" -o "$stage/SHA256SUMS"
-python3 - "$stage" "$package" <<'PY'
-import hashlib, re, sys
+  --retry 3 --retry-delay 2 --connect-timeout 15 --max-time 120 "${urls[1]}" -o "$stage/SHA256SUMS"
+expected_sha="$(python3 - "$stage" "$package" <<'PY'
+import re, sys
 from pathlib import Path
 folder, name = Path(sys.argv[1]), sys.argv[2]
 matches = []
@@ -84,22 +86,62 @@ for line in (folder / 'SHA256SUMS').read_text().splitlines():
     match = re.fullmatch(r'([0-9a-f]{64}) [ *](.+)', line)
     if match and match[2] == name:
         matches.append(match[1])
-if len(matches) != 1 or hashlib.file_digest((folder / name).open('rb'), 'sha256').hexdigest() != matches[0]:
-    sys.exit('Package checksum verification failed; installation aborted.')
-print(f"Verified SHA256 checksum for {name}")
+if len(matches) != 1:
+    sys.exit('Package checksum entry missing; installation aborted.')
+print(matches[0])
 PY
+)"
+pkg_path="$pkg_dir/$package"
+cache_hit=0
+if [[ -f "$pkg_path" ]]; then
+  actual_sha="$(python3 - "$pkg_path" <<'PY'
+import hashlib, sys
+from pathlib import Path
+print(hashlib.file_digest(Path(sys.argv[1]).open('rb'), 'sha256').hexdigest())
+PY
+)"
+  if [[ "$actual_sha" == "$expected_sha" ]]; then
+    cache_hit=1
+    echo "Using cached package $package (skipping download)"
+    echo "Verified SHA256 checksum for $package"
+  else
+    rm -f "$pkg_path"
+  fi
+fi
+if [[ "$cache_hit" == 0 ]]; then
+  cat "$stage/download_label.txt"
+  # Incus: keep the progress bar within an 80-column TUI log row after the RFC3339 prefix.
+  COLUMNS=48 curl --fail --progress-bar --show-error --location --proto '=https' --proto-redir '=https' \
+    --retry 3 --retry-delay 2 --connect-timeout 15 --max-time 900 "${urls[0]}" -o "$stage/$package.part"
+  actual_sha="$(python3 - "$stage/$package.part" <<'PY'
+import hashlib, sys
+from pathlib import Path
+print(hashlib.file_digest(Path(sys.argv[1]).open('rb'), 'sha256').hexdigest())
+PY
+)"
+  if [[ "$actual_sha" != "$expected_sha" ]]; then
+    echo 'Package checksum verification failed; installation aborted.' >&2
+    exit 1
+  fi
+  echo "Verified SHA256 checksum for $package"
+  chmod 0644 "$stage/$package.part"
+  mv -f "$stage/$package.part" "$pkg_path"
+fi
+if [[ "$pkg_dir" == "$cache_dir" ]]; then
+  find "$cache_dir" -maxdepth 1 -type f -name 'incus-*.deb' ! -name "$package" -delete 2>/dev/null || true
+fi
 apt-get update
 if [[ "${2:-}" == --update ]]; then
   # Channel selection authorizes switching versions; SHA suffixes are not chronological.
   # Run the upgrader from the verified target, so a broken installed upgrader can repair itself.
-  dpkg-deb --fsys-tarfile "$stage/$package" | tar -xOf - ./usr/libexec/incus/node-upgrade.sh > "$stage/node-upgrade.sh"
+  dpkg-deb --fsys-tarfile "$pkg_path" | tar -xOf - ./usr/libexec/incus/node-upgrade.sh > "$stage/node-upgrade.sh"
   [[ -s "$stage/node-upgrade.sh" ]] || { echo 'Verified package contains no node upgrader.' >&2; exit 1; }
-  /bin/bash "$stage/node-upgrade.sh" --dry-run "$stage/$package"
-  /bin/bash "$stage/node-upgrade.sh" --apply "$stage/$package"
+  /bin/bash "$stage/node-upgrade.sh" --dry-run "$pkg_path"
+  /bin/bash "$stage/node-upgrade.sh" --apply "$pkg_path"
   echo "Node package installed: $package"
   exit 0
 fi
-apt-get install -y "$stage/$package"
+apt-get install -y "$pkg_path"
 if command -v systemctl >/dev/null && systemctl is-active --quiet incus; then
   echo '软件包已安装；正在运行的 Incus 尚未由本安装器重启，新二进制和 ID 映射可能未生效。'
   echo '请在维护窗口进入 TUI：更新 → 应用已安装更新（无需下载）。Incus 重启可能停止实例。'

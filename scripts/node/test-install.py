@@ -41,7 +41,8 @@ def evaluate_publish_condition(node, github):
 class InstallerTests(unittest.TestCase):
     def run_installer(self, channel='canary', target='debian-13', arch='amd64', damage=False,
                       missing=False, bad_url=False, distro=None, draft=False, wrong_channel=False,
-                      mode='--no-tui', apt_failure=False, service_active=False, missing_upgrader=False):
+                      mode='--no-tui', apt_failure=False, service_active=False, missing_upgrader=False,
+                      cache_dir=None):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             binary = root / 'bin'
@@ -69,7 +70,8 @@ class InstallerTests(unittest.TestCase):
             (root / 'releases.json').write_text(json.dumps([release] if channel == 'canary' else release))
             os_id, version = (distro or target).rsplit('-', 1)
             (root / 'os-release').write_text(f'ID={os_id}\nVERSION_ID={version}\nID_LIKE=debian\n')
-            script = SCRIPT.replace('. /etc/os-release', f'. "{root}/os-release"').replace('/usr/libexec/incus/node-upgrade.sh', str(root / 'node-upgrade.sh'))
+            script = SCRIPT.replace('. /etc/os-release', f'. "{root}/os-release"')
+            script = re.sub(r'(?<!\.)/usr/libexec/incus/node-upgrade\.sh', str(root / 'node-upgrade.sh'), script)
             (root / 'node-upgrade.sh').write_text('echo BROKEN_INSTALLED_UPGRADER >&2\nexit 99\n')
             script = '\n'.join(line for line in script.splitlines() if not line.startswith('[[ $EUID -eq 0 ]]'))
             (root / 'install.sh').write_text(script)
@@ -106,7 +108,8 @@ if '--allow-downgrades' in sys.argv and os.environ.get('NEEDRESTART_MODE') != 'l
                 path.chmod(0o755)
             env = {**os.environ, 'PATH': f'{binary}:' + os.environ['PATH'], 'FIXTURE': str(root), 'TEST_ARCH': arch,
                    'TEST_APT_FAILURE': '1' if apt_failure else '0',
-                   'TEST_SERVICE_ACTIVE': '1' if service_active else '0'}
+                   'TEST_SERVICE_ACTIVE': '1' if service_active else '0',
+                   'INCUS_CACHE_DIR': str(cache_dir or (root / 'cache'))}
             result = subprocess.run(['bash', str(root/'install.sh'), channel, mode],
                                     env=env, text=True, capture_output=True, timeout=15)
             log = (root / 'apt.log').read_text() if (root / 'apt.log').exists() else ''
@@ -173,6 +176,20 @@ if '--allow-downgrades' in sys.argv and os.environ.get('NEEDRESTART_MODE') != 'l
         result, _ = self.run_installer(service_active=False)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn('尚未由本安装器重启', result.stdout)
+
+    def test_cached_package_skips_download_when_checksum_matches(self):
+        with tempfile.TemporaryDirectory() as shared_cache:
+            first, log1 = self.run_installer(mode='--update', cache_dir=shared_cache)
+            self.assertEqual(first.returncode, 0, first.stderr)
+            self.assertIn('Downloading incus-', first.stdout)
+            self.assertIn('target-upgrade --apply', log1)
+
+            second, log2 = self.run_installer(mode='--update', cache_dir=shared_cache)
+            self.assertEqual(second.returncode, 0, second.stderr)
+            self.assertIn('Using cached package incus-', second.stdout)
+            self.assertNotIn('Downloading incus-', second.stdout)
+            self.assertIn('Verified SHA256 checksum for incus-', second.stdout)
+            self.assertIn('target-upgrade --apply', log2)
 
     def test_publish_gate_allows_trusted_manual_canary_builds(self):
         workflow = Path(__file__).resolve().parents[2] / '.github/workflows/payincus-publish.yml'
