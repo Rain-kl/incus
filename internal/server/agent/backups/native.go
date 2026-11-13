@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -105,4 +106,36 @@ func (n nativeSource) Export(ctx context.Context, item Item, writer io.WriteSeek
 	}()
 	_, err = client.GetInstanceBackupFile(item.Name, req.Name, file)
 	return err
+}
+
+func (n nativeSource) Import(ctx context.Context, reader io.Reader, name string, poolName string) (string, error) {
+	client, err := n.client(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer client.Disconnect()
+	op, err := client.CreateInstanceFromBackup(incus.InstanceBackupArgs{
+		BackupFile: reader,
+		Name:       name,
+		PoolName:   poolName,
+	})
+	if err != nil {
+		return "", err
+	}
+	if err = op.Wait(); err != nil {
+		return "", err
+	}
+	if name != "" {
+		return name, nil
+	}
+	opAPI := op.Get()
+	if opAPI.Resources != nil {
+		for _, ref := range opAPI.Resources["instances"] {
+			base := path.Base(strings.TrimSuffix(ref, "/"))
+			if base != "" && base != "." && base != "/" {
+				return base, nil
+			}
+		}
+	}
+	return "", nil
 }

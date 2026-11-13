@@ -68,6 +68,19 @@ func (s fixtureSource) Export(ctx context.Context, item Item, w io.WriteSeeker) 
 	_, err := w.Write([]byte("fixture archive"))
 	return err
 }
+func (s fixtureSource) Import(_ context.Context, r io.Reader, name string, _ string) (string, error) {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return "", err
+	}
+	if string(data) != "fixture archive" {
+		return "", errors.New("unexpected archive payload")
+	}
+	if name != "" {
+		return name, nil
+	}
+	return "imported-from-archive", nil
+}
 func post(m *Manager, id, path string) *httptest.ResponseRecorder {
 	body, _ := json.Marshal(map[string]string{"id": id, "directory": path})
 	r := httptest.NewRequest("POST", "/1.0/agent/instance-backups", strings.NewReader(string(body)))
@@ -167,5 +180,43 @@ func TestSymlinkCannotSelectSystemDirectory(t *testing.T) {
 	}
 	if _, err := validateDirectory(path); err == nil {
 		t.Fatal("system directory accepted")
+	}
+}
+func TestSingleInstanceExportAndImport(t *testing.T) {
+	store := &memoryStore{}
+	m := newManager(context.Background(), store, fixtureSource{})
+	dir := t.TempDir()
+	targetFile := filepath.Join(dir, "good-export.tar.gz")
+	body, _ := json.Marshal(map[string]string{
+		"id":       strings.Repeat("d", 32),
+		"instance": "good",
+		"filePath": targetFile,
+	})
+	w := httptest.NewRecorder()
+	m.ServeHTTP(w, httptest.NewRequest("POST", "/1.0/agent/instance-backups", strings.NewReader(string(body))))
+	if w.Code != 200 {
+		t.Fatalf("export status=%d body=%s", w.Code, w.Body.String())
+	}
+	task := awaitTask(t, m)
+	if task.Status != "success" || task.Kind != "export" || task.Instance != "good" || len(task.Items) != 1 || task.FilePath == "" {
+		t.Fatalf("unexpected export task: %+v", task)
+	}
+	exported, err := os.ReadFile(task.FilePath)
+	if err != nil || string(exported) != "fixture archive" {
+		t.Fatalf("read exported file: err=%v data=%q", err, string(exported))
+	}
+
+	importBody, _ := json.Marshal(map[string]string{
+		"id":       strings.Repeat("e", 32),
+		"filePath": task.FilePath,
+	})
+	iw := httptest.NewRecorder()
+	m.ServeImportHTTP(iw, httptest.NewRequest("POST", "/1.0/agent/instance-import", strings.NewReader(string(importBody))))
+	if iw.Code != 200 {
+		t.Fatalf("import status=%d body=%s", iw.Code, iw.Body.String())
+	}
+	impTask := awaitTask(t, m)
+	if impTask.Status != "success" || impTask.Kind != "import" || impTask.Instance != "imported-from-archive" || impTask.Items[0].Name != "imported-from-archive" {
+		t.Fatalf("unexpected import task: %+v", impTask)
 	}
 }

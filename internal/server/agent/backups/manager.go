@@ -13,12 +13,16 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 )
 
 const Extension = "incus_instance_backup_v1"
+const TransferExtension = "incus_instance_transfer_v1"
+
+var instanceNamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$`)
 
 type Store interface {
 	Check() error
@@ -37,6 +41,9 @@ type Item struct {
 
 type Task struct {
 	ID         string     `json:"id"`
+	Kind       string     `json:"kind,omitempty"`
+	Instance   string     `json:"instance,omitempty"`
+	FilePath   string     `json:"filePath,omitempty"`
 	Directory  string     `json:"directory"`
 	Status     string     `json:"status"`
 	CreatedAt  time.Time  `json:"createdAt"`
@@ -48,6 +55,10 @@ type Task struct {
 type Source interface {
 	Inventory(context.Context, string) ([]Item, error)
 	Export(context.Context, Item, io.WriteSeeker) error
+}
+
+type ImportSource interface {
+	Import(context.Context, io.Reader, string, string) (string, error)
 }
 
 type Manager struct {
@@ -134,6 +145,8 @@ func (m *Manager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		ID        string `json:"id"`
 		Directory string `json:"directory"`
+		Instance  string `json:"instance"`
+		FilePath  string `json:"filePath"`
 	}
 	dec := json.NewDecoder(io.LimitReader(r.Body, 8193))
 	dec.DisallowUnknownFields()
@@ -145,15 +158,61 @@ func (m *Manager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		reply(w, 400, "invalid backup id")
 		return
 	}
-	directory, err := validateDirectory(input.Directory)
-	if err != nil {
-		reply(w, 400, err.Error())
+	if input.Instance != "" && !instanceNamePattern.MatchString(input.Instance) {
+		reply(w, 400, "invalid instance name")
 		return
 	}
+	if input.FilePath != "" && input.Instance == "" {
+		reply(w, 400, "filePath requires instance")
+		return
+	}
+
+	var directory string
+	var taskDirectory string
+	var targetFilePath string
+	if input.FilePath != "" {
+		resolvedFile, err := validateTargetFilePath(input.FilePath)
+		if err != nil {
+			reply(w, 400, err.Error())
+			return
+		}
+		if _, statErr := os.Lstat(resolvedFile); statErr == nil {
+			reply(w, 409, "target backup file already exists")
+			return
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			reply(w, 400, "cannot access target backup file")
+			return
+		}
+		directory = filepath.Dir(resolvedFile)
+		taskDirectory = directory
+		targetFilePath = resolvedFile
+	} else {
+		var err error
+		directory, err = validateDirectory(input.Directory)
+		if err != nil {
+			reply(w, 400, err.Error())
+			return
+		}
+		if input.Instance != "" {
+			taskDirectory = directory
+			targetFilePath = filepath.Join(directory, fmt.Sprintf("%s-%s.tar.gz", input.Instance, input.ID[:8]))
+			if _, statErr := os.Lstat(targetFilePath); statErr == nil {
+				reply(w, 409, "target backup file already exists")
+				return
+			}
+		} else {
+			taskDirectory = filepath.Join(directory, "instances-"+input.ID)
+		}
+	}
+
 	for _, task := range m.tasks {
 		if task.ID == input.ID {
 			// A retry must identify the same operation, including its destination.
-			if directory != filepath.Dir(task.Directory) {
+			expectedDir := filepath.Dir(task.Directory)
+			if task.FilePath != "" {
+				expectedDir = filepath.Dir(task.FilePath)
+			}
+			if directory != expectedDir || task.Instance != input.Instance {
 				reply(w, 409, "backup id already used for another destination")
 				return
 			}
@@ -172,13 +231,22 @@ func (m *Manager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Inventory and export run after durable acceptance, using the daemon context.
-	task := Task{ID: input.ID, Directory: filepath.Join(directory, "instances-"+input.ID), Status: "running", CreatedAt: time.Now().UTC(), Items: []Item{}}
+	task := Task{
+		ID:        input.ID,
+		Kind:      "export",
+		Instance:  input.Instance,
+		FilePath:  targetFilePath,
+		Directory: taskDirectory,
+		Status:    "running",
+		CreatedAt: time.Now().UTC(),
+		Items:     []Item{},
+	}
 	old := append([]Task(nil), m.tasks...)
 	m.tasks = append([]Task{task}, m.tasks...)
 	if len(m.tasks) > 50 {
 		m.tasks = m.tasks[:50]
 	}
-	if err = m.save(); err != nil {
+	if err := m.save(); err != nil {
 		m.tasks = old
 		reply(w, 503, "cannot persist backup task")
 		return
@@ -214,6 +282,187 @@ func validateDirectory(path string) (string, error) {
 		}
 	}
 	return resolved, nil
+}
+
+func validateTargetFilePath(path string) (string, error) {
+	if !filepath.IsAbs(path) || len(path) > 4096 || strings.ContainsAny(path, "\x00\r\n") {
+		return "", errors.New("backup file path must be an absolute host path")
+	}
+	clean := filepath.Clean(path)
+	base := filepath.Base(clean)
+	if base == "" || base == "." || base == ".." || base == "/" {
+		return "", errors.New("backup file path must include a file name")
+	}
+	parent, err := validateDirectory(filepath.Dir(clean))
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(parent, base), nil
+}
+
+func validateSourceFilePath(path string) (string, int64, error) {
+	if !filepath.IsAbs(path) || len(path) > 4096 || strings.ContainsAny(path, "\x00\r\n") {
+		return "", 0, errors.New("import file path must be an absolute host path")
+	}
+	clean := filepath.Clean(path)
+	resolved, err := filepath.EvalSymlinks(clean)
+	if err != nil {
+		return "", 0, errors.New("import file does not exist or is not accessible")
+	}
+	info, err := os.Stat(resolved)
+	if err != nil || !info.Mode().IsRegular() {
+		return "", 0, errors.New("import path must be a regular file")
+	}
+	if info.Size() == 0 {
+		return "", 0, errors.New("import file is empty")
+	}
+	if _, err := validateDirectory(filepath.Dir(resolved)); err != nil {
+		return "", 0, err
+	}
+	return resolved, info.Size(), nil
+}
+
+// ServeImportHTTP handles POST /1.0/agent/instance-import to restore an archive from a host file path.
+func (m *Manager) ServeImportHTTP(w http.ResponseWriter, r *http.Request) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.err != nil {
+		reply(w, 503, m.err.Error())
+		return
+	}
+	if r.Method != http.MethodPost {
+		reply(w, 405, "method not allowed")
+		return
+	}
+	var input struct {
+		ID          string `json:"id"`
+		FilePath    string `json:"filePath"`
+		Name        string `json:"name"`
+		StoragePool string `json:"storagePool"`
+	}
+	dec := json.NewDecoder(io.LimitReader(r.Body, 8193))
+	dec.DisallowUnknownFields()
+	if dec.Decode(&input) != nil || dec.Decode(new(any)) != io.EOF || len(input.ID) != 32 {
+		reply(w, 400, "invalid import request")
+		return
+	}
+	if _, err := hex.DecodeString(input.ID); err != nil || input.ID != strings.ToLower(input.ID) {
+		reply(w, 400, "invalid import id")
+		return
+	}
+	if input.Name != "" && !instanceNamePattern.MatchString(input.Name) {
+		reply(w, 400, "invalid instance name")
+		return
+	}
+	resolvedFile, fileSize, err := validateSourceFilePath(input.FilePath)
+	if err != nil {
+		reply(w, 400, err.Error())
+		return
+	}
+	for _, task := range m.tasks {
+		if task.ID == input.ID {
+			if task.Kind != "import" || task.FilePath != resolvedFile {
+				reply(w, 409, "import id already used for another file")
+				return
+			}
+			reply(w, 200, task)
+			return
+		}
+	}
+	for _, task := range m.tasks {
+		if task.Status == "running" {
+			reply(w, 409, "a node transfer task is already running")
+			return
+		}
+	}
+	if err := m.store.Check(); err != nil {
+		reply(w, 409, "node is locked or security state unavailable")
+		return
+	}
+	task := Task{
+		ID:        input.ID,
+		Kind:      "import",
+		Instance:  input.Name,
+		FilePath:  resolvedFile,
+		Directory: filepath.Dir(resolvedFile),
+		Status:    "running",
+		CreatedAt: time.Now().UTC(),
+		Items: []Item{{
+			Project: "default",
+			Name:    input.Name,
+			Status:  "running",
+			File:    filepath.Base(resolvedFile),
+			Bytes:   fileSize,
+		}},
+	}
+	old := append([]Task(nil), m.tasks...)
+	m.tasks = append([]Task{task}, m.tasks...)
+	if len(m.tasks) > 50 {
+		m.tasks = m.tasks[:50]
+	}
+	if err := m.save(); err != nil {
+		m.tasks = old
+		reply(w, 503, "cannot persist import task")
+		return
+	}
+	go m.runImport(input.ID, resolvedFile, input.Name, input.StoragePool)
+	reply(w, 200, task)
+}
+
+func (m *Manager) runImport(id, filePath, name, storagePool string) {
+	var runErr error
+	var importedName string
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			runErr = fmt.Errorf("import worker failed: %v", recovered)
+		}
+		_ = m.update(id, func(t *Task) {
+			now := time.Now().UTC()
+			t.FinishedAt = &now
+			if runErr != nil {
+				t.Status = "failed"
+				if m.ctx.Err() != nil {
+					t.Status = "interrupted"
+				}
+				t.Error = runErr.Error()
+				if len(t.Items) > 0 {
+					t.Items[0].Status = "failed"
+					t.Items[0].Error = runErr.Error()
+				}
+				return
+			}
+			t.Status = "success"
+			if importedName != "" {
+				t.Instance = importedName
+				if len(t.Items) > 0 {
+					t.Items[0].Name = importedName
+				}
+			}
+			if len(t.Items) > 0 {
+				t.Items[0].Status = "success"
+			}
+		})
+	}()
+	if err := m.ctx.Err(); err != nil {
+		runErr = err
+		return
+	}
+	if err := m.store.Check(); err != nil {
+		runErr = errors.New("node is locked during import")
+		return
+	}
+	imp, ok := m.source.(ImportSource)
+	if !ok {
+		runErr = errors.New("instance import is not supported by backup source")
+		return
+	}
+	file, err := os.Open(filePath)
+	if err != nil {
+		runErr = err
+		return
+	}
+	defer file.Close()
+	importedName, runErr = imp.Import(m.ctx, file, name, storagePool)
 }
 
 func (m *Manager) update(id string, change func(*Task)) error {
@@ -279,11 +528,26 @@ func (m *Manager) execute(task Task) error {
 	if err != nil {
 		return err
 	}
+	if task.Instance != "" {
+		filtered := make([]Item, 0, 1)
+		for _, item := range items {
+			if item.Name == task.Instance {
+				filtered = append(filtered, item)
+				break
+			}
+		}
+		if len(filtered) == 0 {
+			return fmt.Errorf("instance %q not found", task.Instance)
+		}
+		items = filtered
+	}
 	if err = m.update(task.ID, func(t *Task) { t.Items = items }); err != nil {
 		return err
 	}
-	if err = os.Mkdir(task.Directory, 0o700); err != nil {
-		return err
+	if task.Instance == "" {
+		if err = os.Mkdir(task.Directory, 0o700); err != nil {
+			return err
+		}
 	}
 	dir, err := os.OpenRoot(task.Directory)
 	if err != nil {
@@ -298,6 +562,9 @@ func (m *Manager) execute(task Task) error {
 			return err
 		}
 		filename := fmt.Sprintf("%04d-%s.tar.gz", i+1, url.PathEscape(item.Project)+"_"+url.PathEscape(item.Name))
+		if task.Instance != "" && task.FilePath != "" {
+			filename = filepath.Base(task.FilePath)
+		}
 		if err = m.update(task.ID, func(t *Task) { t.Items[i].Status = "running" }); err != nil {
 			return err
 		}

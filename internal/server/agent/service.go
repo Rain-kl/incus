@@ -147,13 +147,18 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.backups.ServeHTTP(w, r)
 		return
 	}
+	if r.URL.Path == Prefix+"/instance-import" {
+		s.backupsOnce.Do(func() { s.backups = backups.New(s.ctx, s.guard) })
+		s.backups.ServeImportHTTP(w, r)
+		return
+	}
 	switch r.URL.Path {
 	case Prefix:
 		if r.Method != http.MethodGet {
 			break
 		}
 
-		respond(w, 200, map[string]any{"api_extensions": []string{backups.Extension, Extension, XrayMaintenanceExtension, ResetExtension, nodesecurity.StartupExtension, nodesecurity.Extension, nodesecurity.ResumeExtension, nodesecurity.StorageExtension, nodesecurity.StoragePoolDirExtension, nodesecurity.StoragePoolAllocExtension, nodesecurity.StoragePoolResizeExtension}, "api_version": "1.0", "transport_only_agent": true})
+		respond(w, 200, map[string]any{"api_extensions": []string{backups.Extension, backups.TransferExtension, Extension, XrayMaintenanceExtension, ResetExtension, nodesecurity.StartupExtension, nodesecurity.Extension, nodesecurity.ResumeExtension, nodesecurity.StorageExtension, nodesecurity.StoragePoolDirExtension, nodesecurity.StoragePoolAllocExtension, nodesecurity.StoragePoolResizeExtension}, "api_version": "1.0", "transport_only_agent": true})
 		return
 	case Prefix + "/report":
 		if r.Method != http.MethodGet {
