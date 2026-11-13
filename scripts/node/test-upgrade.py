@@ -10,6 +10,11 @@ import unittest
 
 SCRIPT = Path(__file__).with_name('upgrade.sh').read_text()
 
+
+def real_installs(log):
+    """Count package installs, excluding the pre-shutdown download-only fetch."""
+    return sum(1 for line in log.splitlines() if ' install -y' in line and '--download-only' not in line)
+
 class UpgradeTests(unittest.TestCase):
     def run_sequence(self, actions, active=True, process=False):
         with tempfile.TemporaryDirectory() as directory:
@@ -152,7 +157,7 @@ elif args[0]=='daemon-reload' and failure=='reload':sys.exit(42)
     def test_install_has_bounded_retry(self):
         result, log, states, _ = self.run_upgrade('--apply', failure='install-once')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(log.count(' install -y'), 2)
+        self.assertEqual(real_installs(log), 2)
         self.assert_running(states)
 
     def test_failed_migration_and_install_keep_services_stopped(self):
@@ -175,7 +180,7 @@ elif args[0]=='daemon-reload' and failure=='reload':sys.exit(42)
                 self.assertEqual(log.count('migration1 --apply'), 1)
                 self.assert_running(states)
                 self.assertIsNone(checkpoint)
-                if failure == 'start': self.assertEqual(log.count(' install -y'), 1)
+                if failure == 'start': self.assertEqual(real_installs(log), 1)
 
     def test_retry_does_not_accept_a_different_package(self):
         first, second = self.run_sequence([('--apply', 'install'), ('--apply', 'other-package')])
@@ -211,7 +216,7 @@ elif args[0]=='daemon-reload' and failure=='reload':sys.exit(42)
         result, log, states, _ = self.run_upgrade('--apply', process=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn('migration1 --apply', log)
-        self.assertNotIn(' install -y', log)
+        self.assertEqual(real_installs(log), 0)
         self.assert_running(states)
 
 if __name__ == '__main__': unittest.main()
