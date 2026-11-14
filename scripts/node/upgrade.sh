@@ -142,7 +142,12 @@ if [[ "$package" == installed ]]; then
 else
   package="$(realpath -- "$package")"
   [[ -f "$package" ]] || { echo 'Package not found.' >&2; exit 1; }
-  [[ "$(dpkg-deb --field "$package" Package)" == incus ]] || { echo 'Expected the incus package.' >&2; exit 1; }
+  pkg_name="$(dpkg-deb --field "$package" Package)"
+  [[ "$pkg_name" == incus || "$pkg_name" == incus-lts ]] || { echo 'Expected the incus or incus-lts package.' >&2; exit 1; }
+  no_remove=(--no-remove)
+  if [[ "$pkg_name" == incus-lts ]] && dpkg-query -W -f='${Status}' incus 2>/dev/null | grep -q 'install ok installed'; then
+    no_remove=()
+  fi
   dpkg-deb --extract "$package" "$stage"
   target_root="$stage"
   target_id="$(sha256sum "$package" | cut -d' ' -f1)"
@@ -164,7 +169,7 @@ if [[ -e "$journal" || -L "$journal" ]]; then
   echo "Resuming interrupted node upgrade. Phase: $phase."
 fi
 if [[ "$package" != installed && "$phase" != install && "$phase" != restore ]]; then
-  apt-get -o DPkg::Lock::Timeout=60 --simulate install --reinstall --allow-downgrades --no-remove "$package"
+  apt-get -o DPkg::Lock::Timeout=60 --simulate install --reinstall --allow-downgrades "${no_remove[@]}" "$package"
 fi
 shopt -s nullglob
 migrations=("$target_root"/usr/libexec/incus/migrations/*.sh)
@@ -204,7 +209,7 @@ echo 'Package, services and migration preflight passed.'
 if [[ "$mode" == --dry-run ]]; then exit 0; fi
 if [[ "$package" != installed && "$phase" != install && "$phase" != restore ]]; then
   # Fetch dependencies before stopping any services; APT handles transient network errors.
-  apt-get -o DPkg::Lock::Timeout=60 -o Acquire::Retries=3 --download-only install -y --reinstall --allow-downgrades --no-remove "$package"
+  apt-get -o DPkg::Lock::Timeout=60 -o Acquire::Retries=3 --download-only install -y --reinstall --allow-downgrades "${no_remove[@]}" "$package"
 fi
 if [[ "$resume" == 0 ]]; then
   pending="$(mktemp -d "$journal.new.XXXXXX")"
@@ -242,7 +247,7 @@ if [[ "$phase" != restore ]]; then
     installed=0
     for attempt in 1 2 3; do
       result=0
-      apt-get -o DPkg::Lock::Timeout=60 install -y --reinstall --allow-downgrades --no-remove "$package" || result=$?
+      apt-get -o DPkg::Lock::Timeout=60 install -y --reinstall --allow-downgrades "${no_remove[@]}" "$package" || result=$?
       if [[ "$result" == 0 ]]; then installed=1; break; fi
       echo "Package installation failed (exit $result); retry $attempt/3. No package locks will be removed." >&2
       sleep 2

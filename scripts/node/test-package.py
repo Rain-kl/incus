@@ -12,7 +12,7 @@ PACKAGE = Path(sys.argv[1]).resolve() if len(sys.argv) == 2 else None
 class PackageLayoutTests(unittest.TestCase):
     def test_actual_package_has_minimal_neutral_layout(self):
         self.assertIsNotNone(PACKAGE, 'Pass a built .deb package')
-        self.assertEqual(subprocess.check_output(['dpkg-deb','--field',str(PACKAGE),'Package'],text=True).strip(),'incus')
+        self.assertEqual(subprocess.check_output(['dpkg-deb','--field',str(PACKAGE),'Package'],text=True).strip(),'incus-lts')
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory)
             subprocess.run(['dpkg-deb','--raw-extract',str(PACKAGE),directory],check=True,stdout=subprocess.DEVNULL)

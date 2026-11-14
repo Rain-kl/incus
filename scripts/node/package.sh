@@ -58,7 +58,7 @@ Section: admin
 Priority: optional
 Maintainer: Incus maintainers <noreply@localhost>
 
-Package: incus
+Package: incus-lts
 Architecture: any
 Description: Incus LTS with Incus node extensions and authenticated connector
 CONTROL
@@ -68,7 +68,7 @@ shlibs="$(cd "$stage" && dpkg-shlibdeps -O \
 test -n "$shlibs"
 mkdir -p "$stage/rootfs/DEBIAN"
 cat > "$stage/rootfs/DEBIAN/control" <<CONTROL
-Package: incus
+Package: incus-lts
 Version: $deb_version
 Architecture: $arch
 Section: admin
@@ -76,9 +76,9 @@ Priority: optional
 Maintainer: Incus maintainers <noreply@localhost>
 Depends: $shlibs, liblxc-common, adduser, ca-certificates, iproute2, rsync, attr, tar, squashfs-tools, xz-utils, nftables, iptables, dnsmasq-base, uidmap, passwd, python3, systemd, util-linux, procps
 Recommends: virtiofsd
-Provides: incus-base, incus-client
-Conflicts: incus-base, incus-client
-Replaces: incus-base, incus-client
+Provides: incus, incus-base, incus-client, incus-agent
+Conflicts: incus, incus-base, incus-client, incus-agent
+Replaces: incus, incus-base, incus-client, incus-agent
 Description: Incus 7.0 LTS with Incus node API and reverse connector
  Optional QEMU and UEFI packages are required for virtual machines.
 CONTROL

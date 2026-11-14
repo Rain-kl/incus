@@ -36,7 +36,7 @@ class UpgradeTests(unittest.TestCase):
                 'sleep': 'pass',
                 'dpkg-deb': '''import sys
 from pathlib import Path
-if sys.argv[1]=='--field': print('incus'); sys.exit()
+if sys.argv[1]=='--field': print('incus-lts'); sys.exit()
 root=Path(sys.argv[-1])
 for name in ['usr/libexec/incus/incusd','usr/bin/incus-tui','usr/libexec/incus/agent/incus-agent']:
  p=root/name;p.parent.mkdir(parents=True,exist_ok=True);p.write_text('#!/bin/sh\\nexit 0\\n');p.chmod(0o755)
