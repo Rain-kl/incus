@@ -136,19 +136,121 @@ func (n nativeSource) Import(ctx context.Context, reader io.Reader, name string,
 	if err = op.WaitContext(ctx); err != nil {
 		return "", err
 	}
-	if name != "" {
-		return name, nil
+	importedName := resolveImportedInstanceName(name, op.Get())
+	if importedName != "" {
+		removed := sanitizeImportedHostDevices(ctx, client, importedName)
+		if len(removed) > 0 {
+			reportProgress(ctx, fmt.Sprintf("Importing: removed incompatible host GPU devices (%s)", strings.Join(removed, ", ")))
+		}
 	}
-	opAPI := op.Get()
+	return importedName, nil
+}
+
+func resolveImportedInstanceName(requested string, opAPI api.Operation) string {
+	if requested != "" {
+		return requested
+	}
 	if opAPI.Resources != nil {
 		for _, ref := range opAPI.Resources["instances"] {
 			base := path.Base(strings.TrimSuffix(ref, "/"))
 			if base != "" && base != "." && base != "/" {
-				return base, nil
+				return base
 			}
 		}
 	}
-	return "", nil
+	return ""
+}
+
+func sanitizeImportedHostDevices(ctx context.Context, client incus.InstanceServer, instanceName string) []string {
+	inst, etag, err := client.GetInstance(instanceName)
+	if err != nil || inst == nil {
+		return nil
+	}
+	hasGPUDevice := false
+	for _, dev := range inst.Devices {
+		if dev["type"] == "gpu" {
+			hasGPUDevice = true
+			break
+		}
+	}
+	hasNvidiaConfig := inst.Config["nvidia.runtime"] != "" || inst.Config["nvidia.driver.capabilities"] != ""
+	if !hasGPUDevice && !hasNvidiaConfig {
+		return nil
+	}
+	resources, err := client.GetServerResources()
+	if err != nil || resources == nil {
+		return nil
+	}
+	hostPCIs := make(map[string]struct{}, len(resources.GPU.Cards))
+	for _, card := range resources.GPU.Cards {
+		pci := strings.ToLower(strings.TrimSpace(card.PCIAddress))
+		if pci != "" {
+			hostPCIs[pci] = struct{}{}
+		}
+	}
+
+	writable := inst.Writable()
+	devices := make(map[string]map[string]string, len(writable.Devices))
+	devNames := make([]string, 0, len(writable.Devices))
+	for devName := range writable.Devices {
+		devNames = append(devNames, devName)
+	}
+	slices.Sort(devNames)
+
+	var removed []string
+	remainingGPUs := 0
+	for _, devName := range devNames {
+		dev := writable.Devices[devName]
+		if dev["type"] == "gpu" {
+			pci := strings.ToLower(strings.TrimSpace(dev["pci"]))
+			_, existsOnHost := hostPCIs[pci]
+			if (pci != "" && !existsOnHost) || (pci == "" && len(hostPCIs) == 0) {
+				rawPCI := strings.TrimSpace(dev["pci"])
+				if rawPCI != "" {
+					removed = append(removed, fmt.Sprintf("%s(%s)", devName, rawPCI))
+				} else {
+					removed = append(removed, devName)
+				}
+				continue
+			}
+			remainingGPUs++
+		}
+		cloned := make(map[string]string, len(dev))
+		for k, v := range dev {
+			cloned[k] = v
+		}
+		devices[devName] = cloned
+	}
+
+	config := make(map[string]string, len(writable.Config))
+	for k, v := range writable.Config {
+		config[k] = v
+	}
+	configChanged := false
+	if remainingGPUs == 0 {
+		for _, key := range []string{"nvidia.runtime", "nvidia.driver.capabilities"} {
+			if _, ok := config[key]; ok {
+				delete(config, key)
+				configChanged = true
+			}
+		}
+	}
+	if len(removed) == 0 && !configChanged {
+		return nil
+	}
+	writable.Devices = devices
+	writable.Config = config
+	op, err := client.UpdateInstance(instanceName, writable, etag)
+	if err != nil {
+		return nil
+	}
+	if op != nil && op.Get().ID != "" {
+		err = op.WaitContext(ctx)
+		if err != nil {
+			return nil
+		}
+	}
+	return removed
 }
 
 func attachOperationProgress(ctx context.Context, op incus.Operation, prefix string) {

@@ -13,6 +13,14 @@
 
 上游始终以正式 LTS 版本为准，仅同步 LTS 维护版本及经过兼容性验证的新 LTS 系列。普通功能版、开发分支及未发版提交均不纳入基线或同步目标。定制提交建立在记录的 LTS 基线上。
 
+## 跨宿主机实例导入自动清理不兼容宿主 GPU 设备（2026-11-14）
+
+- 目的：修复携带源宿主机 PCI GPU 直通/共享设备（`gpu0` 及 `nvidia.runtime` / `nvidia.driver.capabilities`）的实例备份导入到另一台宿主机后，因目标宿主机不存在原 PCI 地址而导致实例启动失败（`Invalid PCI address (no device found)`）的问题。
+- 行为与限制：`nativeSource.Import` 在异步备份恢复完成并通过 `resolveImportedInstanceName` 解析实例名后，调用 `sanitizeImportedHostDevices` 查询本地 `GET /1.0/instances/<name>` 与 `GET /1.0/resources`：若实例包含 `type: "gpu"` 设备且目标宿主机 `GPU.Cards` 中不存在匹配的 `pci` 地址（或宿主机无任何 GPU 时包含未指定 `pci` 的 `gpu` 设备），则移除这些失效 GPU 设备并按确定性顺序报告进度；当移除后实例不再剩余 GPU 设备时，一并清理 `nvidia.runtime` 与 `nvidia.driver.capabilities`，再通过 `PUT /1.0/instances/<name>` 提交更新。若目标宿主机存在对应 PCI GPU 或实例无 GPU 配置，则保持原配置不变；不自动改写其它非 GPU 设备或强行绑定目标机陌生 GPU（由控制端按分配策略管理）。
+- 配置与兼容性：无新增控制端配置项、数据库迁移或 CLI 参数；不修改上游 Incus 源码或 API 扩展签名，仅复用原生 `GetInstance`、`GetServerResources` 与 `UpdateInstance` 契约，并遵守中性 `incus` 命名规范。
+- 代码接入点与上游 API：`internal/server/agent/backups/native.go`（`resolveImportedInstanceName`、`sanitizeImportedHostDevices`）、`internal/server/agent/backups/native_test.go`（`TestNativeImportSanitizesIncompatibleGPUDevices` 等）；调用原生 `/1.0/instances/<name>`（GET/PUT）与 `/1.0/resources`（GET）。
+- 测试位置与验证结果：`internal/server/agent/backups` 下 `go test -race -count=1 -v ./internal/server/agent/backups/...`（10 项单测通过，原 `TestLiveRunningInstanceBackupRestore` 因 `isolated live node not requested` 跳过）、`GOOS=linux go vet ./internal/server/agent/...` 与 `GOOS=linux GOARCH=amd64 go build ./internal/server/agent/backups` 通过；`gofmt -l` 无差异。
+
 ## 出口事务前置校验与 TUI 离线自救机制（2026-11-14）
 
 - 目的：

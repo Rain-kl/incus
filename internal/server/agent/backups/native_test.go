@@ -123,6 +123,11 @@ func TestNativeImportReportsOperationStage(t *testing.T) {
 					"resources":   map[string][]string{"instances": {"/1.0/instances/restored-vm"}},
 				},
 			})
+		case r.URL.Path == "/1.0/instances/restored-vm" && r.Method == "GET":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"type":     "sync",
+				"metadata": map[string]any{"name": "restored-vm", "devices": map[string]any{}, "config": map[string]any{}},
+			})
 		default:
 			t.Errorf("unexpected endpoint %s %s", r.Method, r.URL.String())
 			http.Error(w, "unexpected", 500)
@@ -190,6 +195,11 @@ func TestNativeImportResolvesFallbackPoolAndFailsFastOnMissingPool(t *testing.T)
 					"resources":   map[string][]string{"instances": {"/1.0/instances/u3-ok"}},
 				},
 			})
+		case r.URL.Path == "/1.0/instances/u3-ok" && r.Method == "GET":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"type":     "sync",
+				"metadata": map[string]any{"name": "u3-ok", "devices": map[string]any{}, "config": map[string]any{}},
+			})
 		default:
 			t.Errorf("unexpected endpoint %s %s", r.Method, r.URL.String())
 			http.Error(w, "unexpected", 500)
@@ -214,5 +224,127 @@ func TestNativeImportResolvesFallbackPoolAndFailsFastOnMissingPool(t *testing.T)
 	}
 	if name != "u3-ok" || seenPoolHeader != "nvme-pool" {
 		t.Fatalf("expected fallback X-Incus-pool nvme-pool, got name=%q header=%q", name, seenPoolHeader)
+	}
+}
+
+func TestNativeImportSanitizesIncompatibleGPUDevices(t *testing.T) {
+	opID := "33333333-3333-3333-3333-333333333333"
+	var hostCards []map[string]any
+	var updatedPayload *api.InstancePut
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/1.0":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"type":     "sync",
+				"metadata": map[string]any{"api_extensions": []string{"instances", "storage", "container_backup", "container_backup_override_pool", "backup_override_name", "resources", "resources_v2", "resources_gpu"}, "environment": map[string]any{"server_name": "node-b"}},
+			})
+		case r.URL.Path == "/1.0/storage-pools" && r.Method == "GET":
+			_ = json.NewEncoder(w).Encode(map[string]any{"type": "sync", "metadata": []string{"/1.0/storage-pools/default"}})
+		case r.URL.Path == "/1.0/instances" && r.Method == "POST":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"type":      "async",
+				"operation": "/1.0/operations/" + opID,
+				"metadata": map[string]any{
+					"id":          opID,
+					"class":       "task",
+					"status":      "Success",
+					"status_code": 200,
+					"resources":   map[string][]string{"instances": {"/1.0/instances/u3-gpu"}},
+				},
+			})
+		case r.URL.Path == "/1.0/instances/u3-gpu" && r.Method == "GET":
+			w.Header().Set("ETag", "\"etag-1\"")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"type": "sync",
+				"metadata": map[string]any{
+					"name":   "u3-gpu",
+					"config": map[string]string{"nvidia.runtime": "true", "nvidia.driver.capabilities": "compute,utility", "limits.cpu": "4"},
+					"devices": map[string]any{
+						"gpu0": map[string]string{"type": "gpu", "gputype": "physical", "pci": "0000:17:00.0"},
+						"root": map[string]string{"type": "disk", "path": "/", "pool": "default"},
+					},
+				},
+			})
+		case r.URL.Path == "/1.0/resources" && r.Method == "GET":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"type":     "sync",
+				"metadata": map[string]any{"gpu": map[string]any{"cards": hostCards, "total": len(hostCards)}},
+			})
+		case r.URL.Path == "/1.0/instances/u3-gpu" && r.Method == "PUT":
+			var body api.InstancePut
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			updatedPayload = &body
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"type":      "async",
+				"operation": "/1.0/operations/44444444-4444-4444-4444-444444444444",
+				"metadata": map[string]any{
+					"id":          "44444444-4444-4444-4444-444444444444",
+					"class":       "task",
+					"status":      "Success",
+					"status_code": 200,
+				},
+			})
+		case r.URL.Path == "/1.0/operations/44444444-4444-4444-4444-444444444444/wait":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"type": "sync",
+				"metadata": map[string]any{
+					"id":          "44444444-4444-4444-4444-444444444444",
+					"class":       "task",
+					"status":      "Success",
+					"status_code": 200,
+				},
+			})
+		default:
+			t.Errorf("unexpected endpoint %s %s", r.Method, r.URL.String())
+			http.Error(w, "unexpected", 500)
+		}
+	}))
+	defer server.Close()
+
+	source := nativeSource{connect: func(ctx context.Context) (incus.InstanceServer, error) {
+		return incus.ConnectIncusWithContext(ctx, server.URL, &incus.ConnectionArgs{InsecureSkipVerify: true, SkipGetEvents: true})
+	}}
+
+	// Mismatched GPU PCI on target host (A10 0000:17:00.0 -> A40 0000:3b:00.0)
+	hostCards = []map[string]any{{"pci_address": "0000:3b:00.0"}}
+	var stages []string
+	ctx := withProgressReporter(context.Background(), func(msg string) { stages = append(stages, msg) })
+	name, err := source.Import(ctx, strings.NewReader("archive"), "u3-gpu", "default")
+	if err != nil {
+		t.Fatalf("Import failed: %v", err)
+	}
+	if name != "u3-gpu" || updatedPayload == nil {
+		t.Fatalf("expected PUT update removing stale GPU device, name=%q updated=%v", name, updatedPayload)
+	}
+	if _, exists := updatedPayload.Devices["gpu0"]; exists {
+		t.Fatalf("stale gpu0 must be removed, got %#v", updatedPayload.Devices)
+	}
+	if updatedPayload.Devices["root"]["path"] != "/" || updatedPayload.Config["limits.cpu"] != "4" {
+		t.Fatalf("non-GPU devices/config must be preserved: %#v %#v", updatedPayload.Devices, updatedPayload.Config)
+	}
+	if _, exists := updatedPayload.Config["nvidia.runtime"]; exists {
+		t.Fatalf("nvidia.runtime must be removed when no GPU remains, got %#v", updatedPayload.Config)
+	}
+	if _, exists := updatedPayload.Config["nvidia.driver.capabilities"]; exists {
+		t.Fatalf("nvidia.driver.capabilities must be removed when no GPU remains, got %#v", updatedPayload.Config)
+	}
+	if !strings.Contains(strings.Join(stages, "|"), "gpu0(0000:17:00.0)") {
+		t.Fatalf("expected progress log mentioning stripped device, got %#v", stages)
+	}
+
+	// Matching GPU PCI on target host stays intact without PUT update.
+	updatedPayload = nil
+	hostCards = []map[string]any{{"pci_address": "0000:17:00.0"}}
+	if _, err := source.Import(context.Background(), strings.NewReader("archive"), "u3-gpu", "default"); err != nil {
+		t.Fatalf("Import with matching PCI failed: %v", err)
+	}
+	if updatedPayload != nil {
+		t.Fatalf("matching host GPU must not be stripped, got PUT %#v", updatedPayload)
 	}
 }
