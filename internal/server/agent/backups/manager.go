@@ -17,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/lxc/incus/v7/shared/units"
 )
 
 const Extension = "incus_instance_backup_v1"
@@ -46,6 +48,7 @@ type Task struct {
 	FilePath   string     `json:"filePath,omitempty"`
 	Directory  string     `json:"directory"`
 	Status     string     `json:"status"`
+	Progress   string     `json:"progress,omitempty"`
 	CreatedAt  time.Time  `json:"createdAt"`
 	FinishedAt *time.Time `json:"finishedAt,omitempty"`
 	Items      []Item     `json:"items"`
@@ -419,6 +422,7 @@ func (m *Manager) runImport(id, filePath, name, storagePool string) {
 		_ = m.update(id, func(t *Task) {
 			now := time.Now().UTC()
 			t.FinishedAt = &now
+			t.Progress = ""
 			if runErr != nil {
 				t.Status = "failed"
 				if m.ctx.Err() != nil {
@@ -462,7 +466,23 @@ func (m *Manager) runImport(id, filePath, name, storagePool string) {
 		return
 	}
 	defer file.Close()
-	importedName, runErr = imp.Import(m.ctx, file, name, storagePool)
+	var totalSize int64
+	if info, statErr := file.Stat(); statErr == nil {
+		totalSize = info.Size()
+	}
+	if totalSize > 0 {
+		m.setTaskProgress(id, fmt.Sprintf("Importing: preparing transfer (0 B / %s)", units.GetByteSizeString(totalSize, 2)), 0, nil)
+	} else {
+		m.setTaskProgress(id, "Importing: preparing transfer", 0, nil)
+	}
+	reader := newProgressReader(file, totalSize, func(read, total, speed int64) {
+		bytesCopy := read
+		m.setTaskProgress(id, formatImportProgress(read, total, speed), 0, &bytesCopy)
+	})
+	importCtx := withProgressReporter(m.ctx, func(msg string) {
+		m.setTaskProgress(id, msg, 0, nil)
+	})
+	importedName, runErr = imp.Import(importCtx, reader, name, storagePool)
 }
 
 func (m *Manager) update(id string, change func(*Task)) error {
@@ -490,6 +510,7 @@ func (m *Manager) run(id string) {
 		_ = m.update(id, func(t *Task) {
 			now := time.Now().UTC()
 			t.FinishedAt = &now
+			t.Progress = ""
 			t.Status = "success"
 			failed := 0
 			for i := range t.Items {
@@ -579,13 +600,21 @@ func (m *Manager) execute(task Task) error {
 		if err = m.update(task.ID, func(t *Task) { t.Items[i].Status = "running" }); err != nil {
 			return err
 		}
+		m.setTaskProgress(task.ID, fmt.Sprintf("Exporting %s: preparing archive", item.Name), i, nil)
 		exportErr := func() error {
 			file, openErr := dir.OpenFile(filename+".partial", os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
 			if openErr != nil {
 				return openErr
 			}
 			defer file.Close()
-			exportErr := m.source.Export(m.ctx, item, file)
+			writer := newProgressWriteSeeker(file, func(written, _, speed int64) {
+				bytesCopy := written
+				m.setTaskProgress(task.ID, formatExportProgress(item.Name, written, speed), i, &bytesCopy)
+			})
+			exportCtx := withProgressReporter(m.ctx, func(msg string) {
+				m.setTaskProgress(task.ID, msg, i, nil)
+			})
+			exportErr := m.source.Export(exportCtx, item, writer)
 			if exportErr == nil {
 				exportErr = file.Sync()
 			}
@@ -634,4 +663,160 @@ func randomName() string {
 	var value [8]byte
 	_, _ = rand.Read(value[:])
 	return hex.EncodeToString(value[:])
+}
+
+const progressReportInterval = 500 * time.Millisecond
+
+type progressReporterKey struct{}
+
+type progressReportFn func(string)
+
+func withProgressReporter(ctx context.Context, fn func(string)) context.Context {
+	if fn == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, progressReporterKey{}, progressReportFn(fn))
+}
+
+func reportProgress(ctx context.Context, message string) {
+	if message == "" || ctx == nil {
+		return
+	}
+	if fn, ok := ctx.Value(progressReporterKey{}).(progressReportFn); ok && fn != nil {
+		fn(message)
+	}
+}
+
+func (m *Manager) setTaskProgress(id string, progress string, itemIndex int, bytes *int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := range m.tasks {
+		if m.tasks[i].ID == id {
+			if m.tasks[i].Status != "running" {
+				return
+			}
+			m.tasks[i].Progress = progress
+			if bytes != nil && itemIndex >= 0 && itemIndex < len(m.tasks[i].Items) {
+				m.tasks[i].Items[itemIndex].Bytes = *bytes
+			}
+			return
+		}
+	}
+}
+
+type progressTracker struct {
+	lastReport  time.Time
+	lastBytes   int64
+	transferred int64
+	total       int64
+	reported    bool
+	minInterval time.Duration
+	onReport    func(transferred, total, speed int64)
+}
+
+func newProgressTracker(total int64, onReport func(transferred, total, speed int64)) *progressTracker {
+	return &progressTracker{
+		lastReport:  time.Now(),
+		total:       total,
+		minInterval: progressReportInterval,
+		onReport:    onReport,
+	}
+}
+
+func (pt *progressTracker) advance(delta int64, force bool) {
+	if pt == nil || pt.onReport == nil {
+		return
+	}
+	pt.transferred += delta
+	now := time.Now()
+	elapsed := now.Sub(pt.lastReport)
+	if !force && pt.reported && elapsed < pt.minInterval {
+		return
+	}
+	var speed int64
+	if seconds := elapsed.Seconds(); seconds >= 0.05 {
+		if diff := pt.transferred - pt.lastBytes; diff > 0 {
+			speed = int64(float64(diff) / seconds)
+		}
+	}
+	pt.reported = true
+	pt.lastReport = now
+	pt.lastBytes = pt.transferred
+	pt.onReport(pt.transferred, pt.total, speed)
+}
+
+type progressWriteSeeker struct {
+	writer  io.WriteSeeker
+	tracker *progressTracker
+}
+
+func newProgressWriteSeeker(writer io.WriteSeeker, onReport func(written, total, speed int64)) *progressWriteSeeker {
+	return &progressWriteSeeker{
+		writer:  writer,
+		tracker: newProgressTracker(0, onReport),
+	}
+}
+
+func (w *progressWriteSeeker) Write(p []byte) (int, error) {
+	n, err := w.writer.Write(p)
+	if n > 0 {
+		w.tracker.advance(int64(n), false)
+	}
+	return n, err
+}
+
+func (w *progressWriteSeeker) Seek(offset int64, whence int) (int64, error) {
+	return w.writer.Seek(offset, whence)
+}
+
+type progressReader struct {
+	reader      io.Reader
+	tracker     *progressTracker
+	eofReported bool
+}
+
+func newProgressReader(reader io.Reader, total int64, onReport func(read, total, speed int64)) *progressReader {
+	return &progressReader{
+		reader:  reader,
+		tracker: newProgressTracker(total, onReport),
+	}
+}
+
+func (r *progressReader) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	force := err == io.EOF || (r.tracker.total > 0 && r.tracker.transferred+int64(n) >= r.tracker.total)
+	if n > 0 || (err == io.EOF && !r.eofReported) {
+		if force {
+			r.eofReported = true
+		}
+		r.tracker.advance(int64(n), force)
+	}
+	return n, err
+}
+
+func formatExportProgress(instance string, written, speed int64) string {
+	sizeStr := units.GetByteSizeString(written, 2)
+	if speed > 0 {
+		return fmt.Sprintf("Exporting %s: %s (%s/s)", instance, sizeStr, units.GetByteSizeString(speed, 2))
+	}
+	return fmt.Sprintf("Exporting %s: %s", instance, sizeStr)
+}
+
+func formatImportProgress(read, total, speed int64) string {
+	readStr := units.GetByteSizeString(read, 2)
+	if total > 0 {
+		totalStr := units.GetByteSizeString(total, 2)
+		if read >= total {
+			return fmt.Sprintf("Importing: uploaded %s, unpacking on host", totalStr)
+		}
+		pct := min(int(read*100/total), 99)
+		if speed > 0 {
+			return fmt.Sprintf("Importing: transferring %d%% (%s / %s, %s/s)", pct, readStr, totalStr, units.GetByteSizeString(speed, 2))
+		}
+		return fmt.Sprintf("Importing: transferring %d%% (%s / %s)", pct, readStr, totalStr)
+	}
+	if speed > 0 {
+		return fmt.Sprintf("Importing: transferring %s (%s/s)", readStr, units.GetByteSizeString(speed, 2))
+	}
+	return fmt.Sprintf("Importing: transferring %s", readStr)
 }

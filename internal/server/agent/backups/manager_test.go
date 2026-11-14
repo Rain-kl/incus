@@ -220,3 +220,133 @@ func TestSingleInstanceExportAndImport(t *testing.T) {
 		t.Fatalf("unexpected import task: %+v", impTask)
 	}
 }
+
+type blockingProgressSource struct {
+	exportWritten chan struct{}
+	exportRelease chan struct{}
+	importRead    chan struct{}
+	importRelease chan struct{}
+}
+
+func (s blockingProgressSource) Inventory(context.Context, string) ([]Item, error) {
+	return []Item{{Project: "default", Name: "vm1", Status: "pending"}}, nil
+}
+
+func (s blockingProgressSource) Export(ctx context.Context, _ Item, w io.WriteSeeker) error {
+	if _, err := w.Write(make([]byte, 2048)); err != nil {
+		return err
+	}
+	close(s.exportWritten)
+	select {
+	case <-s.exportRelease:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (s blockingProgressSource) Import(ctx context.Context, r io.Reader, name string, _ string) (string, error) {
+	buf := make([]byte, 512)
+	if _, err := io.ReadFull(r, buf); err != nil {
+		return "", err
+	}
+	close(s.importRead)
+	select {
+	case <-s.importRelease:
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+	if _, err := io.Copy(io.Discard, r); err != nil {
+		return "", err
+	}
+	reportProgress(ctx, "Importing: unpacking instance on host")
+	if name != "" {
+		return name, nil
+	}
+	return "vm1-restored", nil
+}
+
+func fetchTasksViaHTTP(t *testing.T, m *Manager) []Task {
+	t.Helper()
+	w := httptest.NewRecorder()
+	m.ServeHTTP(w, httptest.NewRequest("GET", "/1.0/agent/instance-backups", nil))
+	if w.Code != 200 {
+		t.Fatalf("GET status=%d body=%s", w.Code, w.Body.String())
+	}
+	var payload struct {
+		Metadata struct {
+			Tasks []Task `json:"tasks"`
+		} `json:"metadata"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	return payload.Metadata.Tasks
+}
+
+func findTaskByID(tasks []Task, id string) (Task, bool) {
+	for _, task := range tasks {
+		if task.ID == id {
+			return task, true
+		}
+	}
+	return Task{}, false
+}
+
+func TestTaskProgressReportingDuringExportAndImport(t *testing.T) {
+	src := blockingProgressSource{
+		exportWritten: make(chan struct{}),
+		exportRelease: make(chan struct{}),
+		importRead:    make(chan struct{}),
+		importRelease: make(chan struct{}),
+	}
+	m := newManager(context.Background(), &memoryStore{}, src)
+	dir := t.TempDir()
+	exportFile := filepath.Join(dir, "vm1.tar.gz")
+	expID := strings.Repeat("f", 32)
+	body, _ := json.Marshal(map[string]string{
+		"id":       expID,
+		"instance": "vm1",
+		"filePath": exportFile,
+	})
+	w := httptest.NewRecorder()
+	m.ServeHTTP(w, httptest.NewRequest("POST", "/1.0/agent/instance-backups", strings.NewReader(string(body))))
+	if w.Code != 200 {
+		t.Fatalf("export status=%d body=%s", w.Code, w.Body.String())
+	}
+	<-src.exportWritten
+	tasks := fetchTasksViaHTTP(t, m)
+	liveExp, ok := findTaskByID(tasks, expID)
+	if !ok || liveExp.Status != "running" || !strings.Contains(liveExp.Progress, "Exporting vm1:") || liveExp.Items[0].Bytes != 2048 {
+		close(src.exportRelease)
+		t.Fatalf("expected live export progress and bytes, got %+v", tasks)
+	}
+	close(src.exportRelease)
+	expTask := awaitTask(t, m)
+	if expTask.Status != "success" || expTask.Progress != "" {
+		t.Fatalf("expected cleared progress after export completion, got %+v", expTask)
+	}
+
+	impID := strings.Repeat("a", 32)
+	importBody, _ := json.Marshal(map[string]string{
+		"id":       impID,
+		"filePath": exportFile,
+	})
+	iw := httptest.NewRecorder()
+	m.ServeImportHTTP(iw, httptest.NewRequest("POST", "/1.0/agent/instance-import", strings.NewReader(string(importBody))))
+	if iw.Code != 200 {
+		t.Fatalf("import status=%d body=%s", iw.Code, iw.Body.String())
+	}
+	<-src.importRead
+	tasks = fetchTasksViaHTTP(t, m)
+	liveImp, ok := findTaskByID(tasks, impID)
+	if !ok || liveImp.Status != "running" || !strings.Contains(liveImp.Progress, "Importing: transferring") || liveImp.Items[0].Bytes != 512 {
+		close(src.importRelease)
+		t.Fatalf("expected live import progress and bytes, got %+v", tasks)
+	}
+	close(src.importRelease)
+	impTask := awaitTask(t, m)
+	if impTask.Status != "success" || impTask.Progress != "" || impTask.Instance != "vm1-restored" {
+		t.Fatalf("expected cleared progress after import completion, got %+v", impTask)
+	}
+}

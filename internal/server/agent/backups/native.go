@@ -89,11 +89,13 @@ func (n nativeSource) Export(ctx context.Context, item Item, writer io.WriteSeek
 		return client.CreateInstanceBackupStream(item.Name, req, file)
 	}
 	req.Name = "node-" + randomName()
+	reportProgress(ctx, fmt.Sprintf("Exporting %s: creating temporary backup", item.Name))
 	operation, err := client.CreateInstanceBackup(item.Name, req)
 	if err != nil {
 		return err
 	}
-	if err = operation.Wait(); err != nil {
+	attachOperationProgress(ctx, operation, "Exporting "+item.Name)
+	if err = operation.WaitContext(ctx); err != nil {
 		return err
 	}
 	defer func() {
@@ -105,6 +107,7 @@ func (n nativeSource) Export(ctx context.Context, item Item, writer io.WriteSeek
 			result = errors.Join(result, fmt.Errorf("temporary backup cleanup failed: %w", cleanupErr))
 		}
 	}()
+	reportProgress(ctx, fmt.Sprintf("Exporting %s: downloading archive", item.Name))
 	_, err = client.GetInstanceBackupFile(item.Name, req.Name, file)
 	return err
 }
@@ -123,7 +126,9 @@ func (n nativeSource) Import(ctx context.Context, reader io.Reader, name string,
 	if err != nil {
 		return "", err
 	}
-	if err = op.Wait(); err != nil {
+	reportProgress(ctx, "Importing: unpacking instance on host")
+	attachOperationProgress(ctx, op, "Importing")
+	if err = op.WaitContext(ctx); err != nil {
 		return "", err
 	}
 	if name != "" {
@@ -139,4 +144,34 @@ func (n nativeSource) Import(ctx context.Context, reader io.Reader, name string,
 		}
 	}
 	return "", nil
+}
+
+func attachOperationProgress(ctx context.Context, op incus.Operation, prefix string) {
+	if op == nil || op.Get().StatusCode.IsFinal() {
+		return
+	}
+	_, _ = op.AddHandler(func(opAPI api.Operation) {
+		for _, key := range []string{"progress", "create_instance_from_backup_progress"} {
+			raw, ok := opAPI.Metadata[key]
+			if !ok {
+				continue
+			}
+			switch val := raw.(type) {
+			case string:
+				if strings.TrimSpace(val) != "" {
+					reportProgress(ctx, fmt.Sprintf("%s: %s", prefix, strings.TrimSpace(val)))
+					return
+				}
+			case map[string]any:
+				if stage, ok := val["stage"].(string); ok && strings.TrimSpace(stage) != "" {
+					if pct, ok := val["percent"].(float64); ok && pct > 0 {
+						reportProgress(ctx, fmt.Sprintf("%s: %s (%d%%)", prefix, strings.TrimSpace(stage), int(pct)))
+					} else {
+						reportProgress(ctx, fmt.Sprintf("%s: %s", prefix, strings.TrimSpace(stage)))
+					}
+					return
+				}
+			}
+		}
+	})
 }

@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
+	"sync"
 	"testing"
 
 	incus "github.com/lxc/incus/v7/client"
@@ -68,5 +70,82 @@ func TestNativeAPIInventoryAndStreamingExport(t *testing.T) {
 	}
 	if !request.InstanceOnly || request.OptimizedStorage || request.RootOnly || request.CompressionAlgorithm != "gzip" {
 		t.Fatal(request)
+	}
+}
+
+func TestNativeImportReportsOperationStage(t *testing.T) {
+	opID := "11111111-1111-1111-1111-111111111111"
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/1.0":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"type":     "sync",
+				"metadata": map[string]any{"api_extensions": []string{"instances", "storage", "container_backup", "container_backup_override_pool"}, "environment": map[string]any{"server_name": "node-a"}},
+			})
+		case r.URL.Path == "/1.0/instances" && r.Method == "POST":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"type":      "async",
+				"operation": "/1.0/operations/" + opID,
+				"metadata": map[string]any{
+					"id":          opID,
+					"class":       "task",
+					"status":      "Success",
+					"status_code": 200,
+					"resources":   map[string][]string{"instances": {"/1.0/instances/restored-vm"}},
+				},
+			})
+		case r.URL.Path == "/1.0/operations/"+opID:
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"type": "sync",
+				"metadata": map[string]any{
+					"id":          opID,
+					"class":       "task",
+					"status":      "Success",
+					"status_code": 200,
+					"resources":   map[string][]string{"instances": {"/1.0/instances/restored-vm"}},
+				},
+			})
+		case r.URL.Path == "/1.0/operations/"+opID+"/wait":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"type": "sync",
+				"metadata": map[string]any{
+					"id":          opID,
+					"class":       "task",
+					"status":      "Success",
+					"status_code": 200,
+					"resources":   map[string][]string{"instances": {"/1.0/instances/restored-vm"}},
+				},
+			})
+		default:
+			t.Errorf("unexpected endpoint %s %s", r.Method, r.URL.String())
+			http.Error(w, "unexpected", 500)
+		}
+	}))
+	defer server.Close()
+
+	source := nativeSource{connect: func(ctx context.Context) (incus.InstanceServer, error) {
+		return incus.ConnectIncusWithContext(ctx, server.URL, &incus.ConnectionArgs{InsecureSkipVerify: true, SkipGetEvents: true})
+	}}
+	var mu sync.Mutex
+	var stages []string
+	ctx := withProgressReporter(context.Background(), func(msg string) {
+		mu.Lock()
+		stages = append(stages, msg)
+		mu.Unlock()
+	})
+	name, err := source.Import(ctx, strings.NewReader("archive"), "", "default")
+	if err != nil {
+		t.Fatalf("Import failed: %v", err)
+	}
+	if name != "restored-vm" {
+		t.Fatalf("expected restored-vm, got %q", name)
+	}
+	mu.Lock()
+	joined := strings.Join(stages, "|")
+	mu.Unlock()
+	if !strings.Contains(joined, "Importing: unpacking instance on host") {
+		t.Fatalf("expected unpacking progress stage, got %q", joined)
 	}
 }
