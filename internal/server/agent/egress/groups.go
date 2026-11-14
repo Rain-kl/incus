@@ -175,7 +175,7 @@ WantedBy=multi-user.target
 
 func readGroupRegistry() map[string]groupRuntime {
 	result := map[string]groupRuntime{}
-	body, err := os.ReadFile(filepath.Join(stateDir, "groups", "registry.json"))
+	body, err := os.ReadFile(filepath.Join(groupStateDir, "groups", "registry.json"))
 	if err == nil {
 		_ = json.Unmarshal(body, &result)
 	}
@@ -223,7 +223,7 @@ func allocateGroups(groups []EgressGroup, all map[string]groupRuntime) (map[stri
 
 func saveGroupRegistry(all map[string]groupRuntime) error {
 	body, _ := json.Marshal(all)
-	return atomicFile(filepath.Join(stateDir, "groups", "registry.json"), body, 0o600)
+	return atomicFile(filepath.Join(groupStateDir, "groups", "registry.json"), body, 0o600)
 }
 
 func groupInternal(inv inventory) []string {
@@ -502,27 +502,25 @@ func (m *Manager) teardownGroups(ctx context.Context) error {
 	return saveGroupRegistry(all)
 }
 
-func (m *Manager) reconcileGroups(ctx context.Context, in Instruction, inv inventory, restore bool) error {
-	{
-		err := validateGroups(in)
-		if err != nil {
-			return err
-		}
+type groupPlan struct {
+	all       map[string]groupRuntime
+	active    map[string]groupRuntime
+	resolvers []string
+}
+
+func planGroups(ctx context.Context, in Instruction, inv inventory) (*groupPlan, error) {
+	if err := validateGroups(in); err != nil {
+		return nil, err
 	}
 
-	// No package owns a group: tear down anything a previous revision left and
-	// stop. Claiming ownership and probing the gateway address pool would make an
-	// untouched node pay for package egress, and unrelated host state could then
-	// fail an apply that only wanted to disable egress.
+	// No package owns a group: callers tear down any previous group state
+	// without claiming ownership or probing host pools on untouched nodes.
 	if len(in.Groups) == 0 && len(in.Bindings) == 0 {
-		return m.teardownGroups(ctx)
+		return nil, nil
 	}
 
-	{
-		err := ensureGroupOwnership(ctx)
-		if err != nil {
-			return err
-		}
+	if err := checkGroupOwnership(ctx); err != nil {
+		return nil, err
 	}
 
 	all := readGroupRegistry()
@@ -533,46 +531,67 @@ func (m *Manager) reconcileGroups(ctx context.Context, in Instruction, inv inven
 
 	active, err := allocateGroups(in.Groups, all)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	{
-		err = protectGroupPool(ctx, previous)
-		if err != nil {
-			return err
-		}
+	if err := protectGroupPool(ctx, previous); err != nil {
+		return nil, err
 	}
 
 	for key, g := range active {
-		{
-			_, ok := previous[key]
-			if !ok {
-				if networkCommand(ctx, "ip", "link", "show", g.iface()).Run() == nil || networkCommand(ctx, "ip", "netns", "exec", g.ns(), "true").Run() == nil {
-					return fmt.Errorf("reserved group resources already exist")
-				}
-
-				routes, _ := networkCommand(ctx, "ip", "route", "show", "table", g.table()).Output()
-				if len(bytes.TrimSpace(routes)) > 0 {
-					return fmt.Errorf("reserved group routing table already in use")
-				}
-
-				rules, _ := networkCommand(ctx, "ip", "rule", "show").Output()
-				if strings.Contains(string(rules), "lookup "+g.table()) || strings.Contains(string(rules), fmt.Sprint(17000+g.Slot)+":") || strings.Contains(string(rules), fmt.Sprint(groupRuleBase+g.Slot)+":") {
-					return fmt.Errorf("reserved group routing rule already in use")
-				}
-			}
+		if _, ok := previous[key]; ok {
+			continue
 		}
-	}
-	{
-		err = saveGroupRegistry(all)
-		if err != nil {
-			return err
+		if networkCommand(ctx, "ip", "link", "show", g.iface()).Run() == nil || networkCommand(ctx, "ip", "netns", "exec", g.ns(), "true").Run() == nil {
+			return nil, fmt.Errorf("reserved group resources already exist")
+		}
+		for _, family := range []string{"-4", "-6"} {
+			routes, _ := networkCommand(ctx, "ip", family, "route", "show", "table", g.table()).Output()
+			if len(bytes.TrimSpace(routes)) > 0 {
+				return nil, fmt.Errorf("reserved group routing table already in use")
+			}
+
+			rules, _ := networkCommand(ctx, "ip", family, "rule", "show").Output()
+			if strings.Contains(string(rules), "lookup "+g.table()) || strings.Contains(string(rules), fmt.Sprint(17000+g.Slot)+":") || strings.Contains(string(rules), fmt.Sprint(groupRuleBase+g.Slot)+":") {
+				return nil, fmt.Errorf("reserved group routing rule already in use")
+			}
 		}
 	}
 
 	resolvers, resolverErr := hostBootstrapResolvers(inv)
 	if resolverErr != nil && len(in.Groups) > 0 {
-		return resolverErr
+		return nil, resolverErr
 	}
+
+	return &groupPlan{
+		all:       all,
+		active:    active,
+		resolvers: resolvers,
+	}, nil
+}
+
+func (m *Manager) preflightGroups(ctx context.Context, in Instruction, inv inventory) error {
+	_, err := planGroups(ctx, in, inv)
+	return err
+}
+
+func (m *Manager) reconcileGroups(ctx context.Context, in Instruction, inv inventory, restore bool) error {
+	plan, err := planGroups(ctx, in, inv)
+	if err != nil {
+		return err
+	}
+	if plan == nil {
+		return m.teardownGroups(ctx)
+	}
+
+	if err := ensureGroupOwnership(ctx); err != nil {
+		return err
+	}
+	all := plan.all
+	active := plan.active
+	if err := saveGroupRegistry(all); err != nil {
+		return err
+	}
+	resolvers := plan.resolvers
 
 	in.GroupDirectDNS = "1.1.1.1"
 	for _, resolver := range resolvers {

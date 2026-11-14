@@ -114,6 +114,134 @@ remove_path() {
   rm -rf "$target"
 }
 
+run_or_dry() {
+  if [[ "$dry_run" == 1 ]]; then
+    echo "[dry-run] $*"
+    return 0
+  fi
+  "$@" || true
+}
+
+cleanup_egress_unit_files() {
+  local unit_dir="${INCUS_SYSTEMD_UNIT_DIR:-/etc/systemd/system}"
+  local netns_dir="${INCUS_NETNS_DIR:-/etc/netns}"
+  local unit=""
+  local file=""
+  for unit in incus-package-guard.service incus-xray.service incus-network.service incus-egress-v2.service incus-user.service "${egress_units[@]}"; do
+    [[ -n "$unit" ]] || continue
+    remove_path "$unit_dir/$unit"
+  done
+  if [[ -d "$unit_dir" ]]; then
+    for file in "$unit_dir"/incus-egress-*.service; do
+      [[ -e "$file" || -L "$file" ]] || continue
+      remove_path "$file"
+    done
+    for dir_name in incus.service.d incus-containers.service.d; do
+      [[ -d "$unit_dir/$dir_name" ]] || continue
+      for file in "$unit_dir/$dir_name"/incus*.conf; do
+        [[ -e "$file" || -L "$file" ]] || continue
+        remove_path "$file"
+      done
+    done
+  fi
+  if [[ -d "$netns_dir" ]]; then
+    remove_path "$netns_dir/incus-egress"
+    for file in "$netns_dir"/incus-eg-*; do
+      [[ -e "$file" || -L "$file" ]] || continue
+      remove_path "$file"
+    done
+  fi
+}
+
+cleanup_egress_kernel_state() {
+  local owned_tables=" "
+  local family=""
+  if command -v ip >/dev/null 2>&1; then
+    for family in -4 -6; do
+      while IFS= read -r line; do
+        [[ -n "$line" ]] || continue
+        local prio="" fwmark="" table=""
+        prio="$(printf '%s\n' "$line" | awk -F: '/^[0-9]+:/{print $1; exit}')"
+        fwmark="$(printf '%s\n' "$line" | sed -nE 's/.*[[:space:]]fwmark[[:space:]]+([^[:space:]]+).*/\1/p')"
+        table="$(printf '%s\n' "$line" | sed -nE 's/.*[[:space:]](lookup|table)[[:space:]]+([^[:space:]]+).*/\2/p')"
+        [[ -n "$prio" ]] || continue
+        local is_mark=0 is_tbl=0 is_prio=0
+        if [[ "$fwmark" =~ ^0x0*4[24][0-9a-fA-F]{4}(/|$) ]]; then
+          is_mark=1
+        fi
+        if [[ "$table" == 7420 || ( "$table" =~ ^[0-9]+$ && "$table" -ge 8001 && "$table" -le 8063 ) ]]; then
+          is_tbl=1
+        fi
+        if [[ "$prio" == 1100 || "$prio" == 17420 || ( "$prio" -ge 1001 && "$prio" -le 1063 ) || ( "$prio" -ge 17001 && "$prio" -le 17063 ) ]]; then
+          is_prio=1
+        fi
+        if [[ ( "$is_mark" == 1 && ( "$is_tbl" == 1 || "$is_prio" == 1 ) ) || ( "$is_tbl" == 1 && "$is_prio" == 1 ) ]]; then
+          if [[ "$is_tbl" == 1 ]]; then
+            owned_tables+="${family}:${table} "
+          fi
+          run_or_dry ip "$family" rule del priority "$prio"
+        fi
+      done < <(ip "$family" rule show 2>/dev/null || true)
+    done
+
+    for family in -4 -6; do
+      local candidate_tables=""
+      candidate_tables="$(ip "$family" route show table all 2>/dev/null | sed -nE 's/.*[[:space:]]table[[:space:]]+([0-9]+).*/\1/p' | sort -u || true)"
+      for table in $candidate_tables; do
+        [[ "$table" == 7420 || ( "$table" -ge 8001 && "$table" -le 8063 ) ]] || continue
+        local flush=0
+        if [[ "$owned_tables" == *" ${family}:${table} "* ]]; then
+          flush=1
+        elif ip "$family" route show table "$table" 2>/dev/null | grep -Eq 'unreachable default.*metric 42760|dev (igw-host|ipgh[1-9])|169\.254\.24[04]\.|fd42:696e:6375::'; then
+          flush=1
+        fi
+        if [[ "$flush" == 1 ]]; then
+          run_or_dry ip "$family" route flush table "$table"
+        fi
+      done
+    done
+
+    while IFS= read -r link_name; do
+      [[ -n "$link_name" ]] || continue
+      if [[ "$link_name" == igw-host || "$link_name" =~ ^ipgh([1-9]|[1-5][0-9]|6[0-3])$ ]]; then
+        run_or_dry ip link del "$link_name"
+      fi
+    done < <(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | cut -d@ -f1 || true)
+
+    while IFS= read -r ns_name; do
+      [[ -n "$ns_name" ]] || continue
+      if [[ "$ns_name" == incus-egress || "$ns_name" == incus-eg-* ]]; then
+        run_or_dry ip netns del "$ns_name"
+      fi
+    done < <(ip netns list 2>/dev/null | awk '{print $1}' || true)
+  fi
+
+  if command -v nft >/dev/null 2>&1; then
+    while IFS= read -r tbl_line; do
+      local tbl_family="" tbl_name=""
+      tbl_family="$(printf '%s\n' "$tbl_line" | awk '{print $2}')"
+      tbl_name="$(printf '%s\n' "$tbl_line" | awk '{print $3}')"
+      [[ -n "$tbl_family" && -n "$tbl_name" ]] || continue
+      local drop_tbl=0
+      case "${tbl_family}:${tbl_name}" in
+        inet:incus_egress|bridge:incus_package_ports|bridge:incus_package_boot|inet:incus_package_egress)
+          drop_tbl=1
+          ;;
+        inet:*_egress|inet:*_package_egress|bridge:*_package_ports|bridge:*_package_boot)
+          local body=""
+          body="$(nft list table "$tbl_family" "$tbl_name" 2>/dev/null || true)"
+          if printf '%s\n' "$body" | grep -Eq '"ipg\*"|"ipgh|"igw-host"|0x00420000|0x420000|0x00440000|169\.254\.24[24]\.|fd42:696e:6375::' || (printf '%s\n' "$body" | grep -q 'set ready' && printf '%s\n' "$body" | grep -q 'type mark'); then
+            drop_tbl=1
+          fi
+          ;;
+      esac
+      if [[ "$drop_tbl" == 1 ]]; then
+        run_or_dry nft delete table "$tbl_family" "$tbl_name"
+      fi
+    done < <(nft list tables 2>/dev/null || true)
+  fi
+}
+
 confirm_uninstall
 
 if [[ "$mode" == agent-only ]]; then
@@ -151,6 +279,9 @@ if [[ "$pkg_status" == *"installed"* ]]; then
 else
   echo 'Package incus-lts is not installed; skipping apt purge.'
 fi
+
+cleanup_egress_unit_files
+cleanup_egress_kernel_state
 
 if [[ -d /run/systemd/system ]] && command -v systemctl >/dev/null; then
   if [[ "$dry_run" == 1 ]]; then

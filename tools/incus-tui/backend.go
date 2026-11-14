@@ -65,6 +65,7 @@ func (commandRunner) Run(ctx context.Context, name string, args []string, input 
 type backend struct {
 	runner         Runner
 	path           string
+	rootDir        string
 	client         *http.Client
 	releasePath    string
 	sourcePath     string
@@ -88,8 +89,24 @@ func (b *backend) run(ctx context.Context, name string, args ...string) ([]byte,
 	return b.runner.Run(ctx, name, args, "")
 }
 
+var dynamicEgressUnitPattern = regexp.MustCompile(`^incus-egress-[a-z0-9-]+\.service$`)
+
+func isAllowedManagedUnit(unit string) bool {
+	switch unit {
+	case "incus", "incus.service",
+		"incus-agent", "incus-agent.service",
+		"incus-containers.service",
+		"incus-xray.service",
+		"incus-network.service",
+		"incus-package-guard.service",
+		"incus-egress-v2.service":
+		return true
+	}
+	return dynamicEgressUnitPattern.MatchString(unit)
+}
+
 func (b *backend) service(ctx context.Context, unit, action string) error {
-	if unit != "incus" && unit != "incus-agent" {
+	if !isAllowedManagedUnit(unit) {
 		return errors.New("unknown service")
 	}
 	switch action {
@@ -111,7 +128,7 @@ func (b *backend) manageService(ctx context.Context, unit, action string) error 
 	if err != nil {
 		return err
 	}
-	if unit == "incus" && (action == "start" || action == "restart" || action == "enable") {
+	if (unit == "incus" || unit == "incus.service") && (action == "start" || action == "restart" || action == "enable") {
 		logOperation(ctx, "Incus 服务命令已完成，等待节点 API 就绪")
 		return b.waitUpdatedNode(ctx)
 	}
@@ -149,20 +166,25 @@ func (b *backend) connect(ctx context.Context, c connection) error {
 
 func (b *backend) status(ctx context.Context) string {
 	var lines []string
+	incusActive := false
 	for _, unit := range []string{"incus", "incus-agent"} {
 		data, err := b.run(ctx, "systemctl", "show", unit, "--property=ActiveState,SubState,UnitFileState", "--no-pager")
 		if err != nil {
 			lines = append(lines, unit+": 状态读取失败: "+err.Error())
 			continue
 		}
-		lines = append(lines, unit+": "+strings.ReplaceAll(strings.TrimSpace(string(data)), "\n", "  "))
+		text := strings.ReplaceAll(strings.TrimSpace(string(data)), "\n", "  ")
+		lines = append(lines, unit+": "+text)
+		if unit == "incus" && strings.Contains(string(data), "ActiveState=active") {
+			incusActive = true
+		}
 	}
-	data, err := b.run(ctx, "/usr/bin/incus", "query", "/1.0/agent")
+	data, agentErr := b.run(ctx, "/usr/bin/incus", "query", "/1.0/agent")
 	var capabilities struct {
 		Extensions []string `json:"api_extensions"`
 	}
-	if err == nil {
-		err = json.Unmarshal(data, &capabilities)
+	if agentErr == nil {
+		agentErr = json.Unmarshal(data, &capabilities)
 	}
 	supported := false
 	for _, extension := range capabilities.Extensions {
@@ -170,10 +192,10 @@ func (b *backend) status(ctx context.Context) string {
 			supported = true
 		}
 	}
-	if err != nil || !supported {
+	if agentErr != nil || !supported {
 		lines = append(lines, "节点 API: 不可用，请启动 Incus 或查看日志")
-		if err != nil {
-			lines = append(lines, err.Error())
+		if agentErr != nil {
+			lines = append(lines, agentErr.Error())
 		}
 	} else {
 		lines = append(lines, "节点 API: 可连接")
@@ -184,7 +206,7 @@ func (b *backend) status(ctx context.Context) string {
 	} else if pending {
 		lines = append(lines, "待应用更新：Incus 仍运行已被替换的旧二进制，ID 映射等启动配置可能未生效。请在维护窗口选择“更新 → 应用已安装更新（无需下载）”。")
 	}
-	data, err = b.run(ctx, "/usr/bin/incus", "query", "/1.0")
+	data, err := b.run(ctx, "/usr/bin/incus", "query", "/1.0")
 	var identity struct {
 		Environment struct {
 			Fingerprint string `json:"certificate_fingerprint"`
@@ -196,9 +218,9 @@ func (b *backend) status(ctx context.Context) string {
 	if err == nil && regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(identity.Environment.Fingerprint) {
 		lines = append(lines, "节点证书 SHA256（控制端核对）："+identity.Environment.Fingerprint)
 	}
-	data, err = b.run(ctx, "/usr/bin/incus", "query", "/1.0/networks?recursion=1")
-	if err != nil {
-		lines = append(lines, "NAT 网桥检查失败："+err.Error())
+	data, netErr := b.run(ctx, "/usr/bin/incus", "query", "/1.0/networks?recursion=1")
+	if netErr != nil {
+		lines = append(lines, "NAT 网桥检查失败："+netErr.Error())
 	} else {
 		var networks []nodeNetwork
 		if json.Unmarshal(data, &networks) != nil || networks == nil {
@@ -216,6 +238,12 @@ func (b *backend) status(ctx context.Context) string {
 				lines = append(lines, "NAT 网桥：缺失或配置不匹配，请使用“修复 → 修复网桥”")
 			}
 		}
+	}
+	if cp := b.readUpgradeState(); cp.exists {
+		lines = append(lines, fmt.Sprintf("升级恢复点：%s phase=%s（待恢复：%s）", upgradeRunDir, cp.phase, strings.Join(cp.active, ", ")))
+	}
+	if !incusActive || (agentErr != nil && netErr != nil) {
+		lines = append(lines, b.offlineStatusDiagnostics(ctx)...)
 	}
 	return strings.Join(lines, "\n")
 }

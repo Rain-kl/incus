@@ -414,9 +414,12 @@ func (c *localClient) patchRepairDevices(ctx context.Context, kind string, targe
 }
 
 func (b *backend) repairBridge(ctx context.Context) error {
+	if !b.localSocketExists() {
+		return errors.New("Incus 服务未就绪（缺少 " + filepath.Join(b.incusDataDir(), "unix.socket") + "）：请先使用“修复 → 故障诊断（离线）”或“恢复被阻塞的服务（离线自救）”")
+	}
 	c := newLocalClient()
 	defer c.http.CloseIdleConnections()
-	return c.repairBridge(ctx, b.runner, "/var/lib/incus-tui/repairs")
+	return c.repairBridge(ctx, b.runner, b.hostPath("/var/lib/incus-tui/repairs"))
 }
 
 func acquireRepairLock(backupRoot string) (*os.File, error) {

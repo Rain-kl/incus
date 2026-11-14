@@ -13,6 +13,22 @@
 
 上游始终以正式 LTS 版本为准，仅同步 LTS 维护版本及经过兼容性验证的新 LTS 系列。普通功能版、开发分支及未发版提交均不纳入基线或同步目标。定制提交建立在记录的 LTS 基线上。
 
+## 出口事务前置校验与 TUI 离线自救机制（2026-11-14）
+
+- 目的：
+  1. 修复出口策略在预检失败前提前写入状态或挂载 `incus-network.service` 启动依赖，导致节点重启或升级恢复阶段被孤立 `groups/owner` 与残留内核资源阻断 `incus.service` 启动的问题。
+  2. 为 `incus-tui` 建立不依赖 Incus Unix socket/API 的通用离线故障诊断、服务自救与阻塞清除能力，并同步补全 `uninstall.sh` 对动态出口单元及内核残留的清理。
+- 行为与限制：
+  1. `internal/server/agent/egress` 在变更系统资源、`applied.json` 或 `groups/owner` 前先运行只读 `checkGroupOwnership` / `preflightGroups`（同时核查 IPv4/IPv6 策略路由与表占用），通过 [safeErrorDetail](internal/server/agent/egress/manager.go) 收口错误摘要；仅在 `Egress.Mode != "off" || Firewall.Enabled || len(Groups) > 0 || len(Bindings) > 0` 时安装 `incus-network.service` 启动依赖；首次组出口应用失败且无其它启用策略时自动回滚新建 `applied.json` 与恢复单元。
+  2. `tools/incus-tui` 主页在 `incus` 离线或 API 不可达时自动显示离线根因诊断；「修复」菜单提供只读「故障诊断（离线）」（及 CLI `--diagnose`）、「恢复被阻塞的服务（离线自救）」与「清除网络阻塞状态（保留实例）」。按结构特征识别残留规则/路由表/link/netns/nft 表，并结合 `systemd` 单元活跃状态与 `/proc/<pid>/cgroup` 归属区分托管中与孤立 `dnsmasq`/`xray` 进程（自动避开 Tailscale、容器 `ipg*` 网卡及第三方配置）；若检测到 `/run/incus-upgrade/phase` 处于非 `restore` 阶段则拒绝变更以免破坏进行中的升级；所有离线自救动作严格保留容器实例、存储池、数据库、镜像与 `/etc/incus/agent/config.yaml`。`修复网桥` 与 `重置` 也具备离线检测与无 socket 兜底清理。
+  3. `scripts/node/uninstall.sh --full` 补充 `cleanup_egress_unit_files` 与 `cleanup_egress_kernel_state`，覆盖动态 `incus-egress-*.service`、drop-in 与关联内核残留。
+- 配置与兼容性：无新增控制端配置项或数据库变更；不涉及上游 Incus 源码或 API 扩展签名改动（全数位于定制 `agent/egress`、`tools/incus-tui` 与 `scripts/node`）。
+- 代码接入点与上游 API：`internal/server/agent/egress/{groups.go,groups_network.go,manager.go,groups_test.go}`、`tools/incus-tui/{offline_repair.go,offline_repair_test.go,backend.go,main.go,network_repair.go,reset.go}`、`scripts/node/{uninstall.sh,test-uninstall.py}`；离线诊断与修复不依赖 Incus 运行态 API（仅在线恢复等待及 `reset` 有 socket 时调用 `/1.0/agent` 与 `POST /1.0/agent/reset`）。
+- 测试位置与验证结果：
+  1. `tools/incus-tui`：`go test -count=1 ./...`、`go test -race -count=1 ./...` 与 `GOOS=linux GOARCH=amd64 go vet ./...` 全部通过（macOS 下原有 `TestEnrollmentWithLivePanel`、`TestPackageCommandDebconfNotice` 按环境条件跳过，新增 [offline_repair_test.go](tools/incus-tui/offline_repair_test.go) 8 组测试均通过）。
+  2. `internal/server/agent/egress` 与 `cmd/network-worker`：本地 `GOOS=linux GOARCH=amd64 go vet ./internal/server/agent/...` 与交叉编译通过；Linux 实机验证新增 `TestPreflightGroupsConflictLeavesNoOrphanedState` 及组出口核心/健康/隔离/池冲突单测通过。
+  3. `scripts/node`：`python3 -m unittest scripts/node/test-uninstall.py` 7/7 通过，`test-install.py` 与 `test-upgrade.py` 27/27 通过；跨端文本/二进制品牌前缀扫描与 `make check` 通过；`Interserver-US-S1` 节点实机已通过临时二进制交互与 `--diagnose` 复测确认自救恢复有效。
+
 ## 轻量化心跳、基线端点与隧道断线重连加固（2026-11-14）
 
 - 目的：

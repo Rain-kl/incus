@@ -18,8 +18,13 @@ const (
 	directMark = "0x00440000"
 )
 
-func ensureGroupOwnership(ctx context.Context) error {
-	path := filepath.Join(stateDir, "groups", "owner")
+var (
+	groupStateDir      = stateDir
+	groupBootGuardUnit = "/etc/systemd/system/incus-package-guard.service"
+)
+
+func checkGroupOwnership(ctx context.Context) error {
+	path := filepath.Join(groupStateDir, "groups", "owner")
 	{
 		body, err := os.ReadFile(path)
 		if err == nil {
@@ -28,6 +33,8 @@ func ensureGroupOwnership(ctx context.Context) error {
 			}
 
 			return fmt.Errorf("package egress ownership conflict")
+		} else if !os.IsNotExist(err) {
+			return err
 		}
 	}
 
@@ -37,12 +44,23 @@ func ensureGroupOwnership(ctx context.Context) error {
 		}
 	}
 	{
-		_, err := os.Stat("/etc/systemd/system/incus-package-guard.service")
+		_, err := os.Stat(groupBootGuardUnit)
 		if err == nil {
 			return fmt.Errorf("reserved package boot service already exists")
 		}
 	}
 
+	return nil
+}
+
+func ensureGroupOwnership(ctx context.Context) error {
+	if err := checkGroupOwnership(ctx); err != nil {
+		return err
+	}
+	path := filepath.Join(groupStateDir, "groups", "owner")
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	}
 	return atomicFile(path, []byte("incus-package-egress-v2\n"), 0o600)
 }
 
@@ -57,11 +75,11 @@ add rule bridge incus_package_boot guard iifname "ipg*" drop
 }
 
 func installGroupBootGuard(ctx context.Context) error {
-	path := filepath.Join(stateDir, "groups", "boot.nft")
+	path := filepath.Join(groupStateDir, "groups", "boot.nft")
 	unit := "[Unit]\nDescription=Block package NICs until egress restoration\nAfter=local-fs.target\nBefore=incus-network.service incus.service incus-containers.service\n[Service]\nType=oneshot\nExecStart=/usr/sbin/nft -f " + path + "\nRemainAfterExit=yes\n"
 	files := map[string]string{
-		path: groupBootRules(),
-		"/etc/systemd/system/incus-package-guard.service":                         unit,
+		path:               groupBootRules(),
+		groupBootGuardUnit: unit,
 		"/etc/systemd/system/incus.service.d/incus-package-guard.conf":            "[Unit]\nRequires=incus-package-guard.service\nAfter=incus-package-guard.service\n",
 		"/etc/systemd/system/incus-containers.service.d/incus-package-guard.conf": "[Unit]\nRequires=incus-package-guard.service\nAfter=incus-package-guard.service\n",
 	}
@@ -102,7 +120,7 @@ func (g groupRuntime) ip() string     { return fmt.Sprintf("169.254.244.%d", g.S
 func (g groupRuntime) mark() string   { return fmt.Sprintf("0x%x", 0x420000|g.Slot<<8) }
 func (g groupRuntime) table() string  { return fmt.Sprint(8000 + g.Slot) }
 func (g groupRuntime) unit() string   { return "incus-egress-" + g.Key + ".service" }
-func (g groupRuntime) dir() string    { return filepath.Join(stateDir, "groups", g.Key) }
+func (g groupRuntime) dir() string    { return filepath.Join(groupStateDir, "groups", g.Key) }
 
 func validateGroups(in Instruction) error {
 	if len(in.Groups) > 16 || len(in.Bindings) > 10000 {

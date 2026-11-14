@@ -188,6 +188,119 @@ with (Path(os.environ['FIXTURE']) / 'actions.log').open('a') as f:
         self.assertFalse(existing['var/log/incus-tui'])
         self.assertFalse(existing['etc/incus/other.conf'])
 
+    def test_full_uninstall_cleans_egress_units_dropins_and_kernel_artifacts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'bin').mkdir()
+            for rel in [
+                'etc/systemd/system/incus-network.service',
+                'etc/systemd/system/incus-package-guard.service',
+                'etc/systemd/system/incus-egress-p3.service',
+                'etc/systemd/system/incus.service.d/incus-network.conf',
+                'etc/systemd/system/incus.service.d/override.conf',
+                'etc/systemd/system/incus-containers.service.d/incus-package-guard.conf',
+                'etc/netns/incus-egress/resolv.conf',
+                'etc/netns/incus-eg-p3/resolv.conf',
+                'etc/netns/other-ns/resolv.conf',
+                'run/systemd/system/.keep',
+                'etc/incus/agent/config.yaml',
+            ]:
+                path = root / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(rel)
+
+            script = '\n'.join(
+                line for line in SCRIPT.splitlines()
+                if not line.startswith('[[ $EUID -eq 0 ]]')
+            ) + '\n'
+            script = re.sub(
+                r'/etc/incus/agent/config\.yaml|/etc/incus/agent|/var/cache/incus/node-install|/run/incus-upgrade|/var/lib/incus-tui|/var/lib/incus|/var/log/incus-tui|/etc/incus|/run/systemd/system',
+                lambda m: f'{root}{m.group(0)}',
+                script,
+            )
+            (root / 'uninstall.sh').write_text(script)
+
+            def write_exe(name, content):
+                p = root / 'bin' / name
+                p.write_text(content)
+                p.chmod(0o755)
+
+            write_exe('systemctl', '#!/usr/bin/env python3\nimport sys\nargs=sys.argv[1:]\nif args[0]=="show": print("loaded")\n')
+            write_exe('dpkg-query', '#!/usr/bin/env python3\n')
+            write_exe('ip', """#!/usr/bin/env python3
+import os, sys
+from pathlib import Path
+args = sys.argv[1:]
+log = Path(os.environ['FIXTURE']) / 'kernel.log'
+if args == ['-4', 'rule', 'show']:
+    print('17001:\\tfrom all fwmark 0x420100/0xffff00 lookup 8001')
+    print('5210:\\tfrom all fwmark 0x80000/0xff0000 lookup 52')
+elif args == ['-4', 'route', 'show', 'table', 'all']:
+    print('unreachable default table 8001 metric 42760')
+elif args == ['-4', 'route', 'show', 'table', '8001']:
+    print('unreachable default metric 42760')
+elif args == ['-o', 'link', 'show']:
+    print('2: ipgh1@if1: <UP>')
+    print('3: ipg0123456789a@if2: <UP>')
+elif args == ['netns', 'list']:
+    print('incus-eg-p3 (id: 0)')
+    print('other-ns')
+elif 'del' in args or 'flush' in args:
+    with log.open('a') as f:
+        f.write('ip ' + ' '.join(args) + '\\n')
+""")
+            write_exe('nft', """#!/usr/bin/env python3
+import os, sys
+from pathlib import Path
+args = sys.argv[1:]
+log = Path(os.environ['FIXTURE']) / 'kernel.log'
+if args == ['list', 'tables']:
+    print('table inet legacy_egress')
+    print('table bridge legacy_package_ports')
+    print('table inet filter')
+elif args == ['list', 'table', 'inet', 'legacy_egress']:
+    print('table inet legacy_egress {\\n\\tset ready {\\n\\t\\ttype mark\\n\\t}\\n}')
+elif args == ['list', 'table', 'bridge', 'legacy_package_ports']:
+    print('table bridge legacy_package_ports {\\n\\tiifname "ipg*" drop\\n}')
+elif args[0] == 'delete':
+    with log.open('a') as f:
+        f.write('nft ' + ' '.join(args) + '\\n')
+""")
+
+            env = {
+                **os.environ,
+                'PATH': f"{root / 'bin'}:{os.environ['PATH']}",
+                'FIXTURE': str(root),
+                'INCUS_SYSTEMD_UNIT_DIR': str(root / 'etc/systemd/system'),
+                'INCUS_NETNS_DIR': str(root / 'etc/netns'),
+            }
+            dry = subprocess.run(['bash', str(root / 'uninstall.sh'), '--full', '--dry-run'], env=env, text=True, capture_output=True, timeout=15)
+            self.assertEqual(dry.returncode, 0, dry.stderr)
+            self.assertIn('[dry-run] ip -4 rule del priority 17001', dry.stdout)
+            self.assertIn('[dry-run] nft delete table inet legacy_egress', dry.stdout)
+            self.assertTrue((root / 'etc/systemd/system/incus-egress-p3.service').exists())
+
+            res = subprocess.run(['bash', str(root / 'uninstall.sh'), '--full', '--yes'], env=env, text=True, capture_output=True, timeout=15)
+            self.assertEqual(res.returncode, 0, res.stderr)
+            actions = (root / 'kernel.log').read_text().splitlines()
+            for want in [
+                'ip -4 rule del priority 17001',
+                'ip -4 route flush table 8001',
+                'ip link del ipgh1',
+                'ip netns del incus-eg-p3',
+                'nft delete table inet legacy_egress',
+                'nft delete table bridge legacy_package_ports',
+            ]:
+                self.assertIn(want, actions)
+            for forbid in ['5210', 'ipg0123456789a', 'other-ns', 'inet filter']:
+                self.assertFalse(any(forbid in line for line in actions), actions)
+
+            self.assertFalse((root / 'etc/systemd/system/incus-egress-p3.service').exists())
+            self.assertFalse((root / 'etc/systemd/system/incus.service.d/incus-network.conf').exists())
+            self.assertTrue((root / 'etc/systemd/system/incus.service.d/override.conf').exists())
+            self.assertFalse((root / 'etc/netns/incus-eg-p3').exists())
+            self.assertTrue((root / 'etc/netns/other-ns').exists())
+
 
 if __name__ == '__main__':
     unittest.main()

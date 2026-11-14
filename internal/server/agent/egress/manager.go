@@ -229,6 +229,48 @@ func (m *Manager) Run(ctx context.Context) {
 	}
 }
 
+var safeErrorDetails = map[string]string{
+	"package egress ownership conflict":                          "package_egress_ownership_conflict",
+	"reserved package firewall already exists":                   "reserved_package_firewall_exists",
+	"reserved package boot service already exists":               "reserved_package_boot_service_exists",
+	"reserved group resources already exist":                     "reserved_group_resources_exist",
+	"reserved group routing table already in use":                "reserved_group_routing_table_in_use",
+	"reserved group routing rule already in use":                 "reserved_group_routing_rule_in_use",
+	"package gateway address pool already in use":                "package_gateway_pool_in_use",
+	"invalid group resource registry":                            "invalid_group_registry",
+	"group resource capacity":                                    "group_resource_capacity",
+	"invalid_request":                                            "invalid_request",
+	"embedded Xray payload is unavailable for this architecture": "embedded_xray_unavailable",
+	"group nft failed":                                           "group_nft_failed",
+	"invalid route inventory":                                    "invalid_route_inventory",
+	"reserved network ownership conflict":                        "reserved_network_ownership_conflict",
+	"reserved network resources already exist":                   "reserved_network_resources_exist",
+	"reserved service resource already exists":                   "reserved_service_resource_exists",
+	"reserved routing table already in use":                      "reserved_routing_table_in_use",
+	"reserved routing priority already in use":                   "reserved_routing_priority_in_use",
+}
+
+func safeErrorDetail(err error) string {
+	if err == nil {
+		return ""
+	}
+	var core *coreValidationError
+	switch {
+	case errors.As(err, &core):
+		return core.reason
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	case os.IsPermission(err):
+		return "permission_denied"
+	case os.IsNotExist(err):
+		return "missing_file"
+	}
+	if mapped, ok := safeErrorDetails[err.Error()]; ok {
+		return mapped
+	}
+	return "command_failed"
+}
+
 func (m *Manager) setError(code string) {
 	m.setErrorAt(code, code, nil)
 }
@@ -236,21 +278,7 @@ func (m *Manager) setError(code string) {
 func (m *Manager) setErrorAt(code, stage string, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	detail := ""
-	if err != nil {
-		detail = "command_failed"
-		var core *coreValidationError
-		switch {
-		case errors.As(err, &core):
-			detail = core.reason
-		case errors.Is(err, context.DeadlineExceeded):
-			detail = "timeout"
-		case os.IsPermission(err):
-			detail = "permission_denied"
-		case os.IsNotExist(err):
-			detail = "missing_file"
-		}
-	}
+	detail := safeErrorDetail(err)
 
 	if m.status.State != "error" || m.status.Error != code || m.status.ErrorStage != stage || m.status.ErrorDetail != detail {
 		revision := 0
@@ -337,7 +365,7 @@ func (m *Manager) reconcileLocked(parent context.Context, withHealth bool) {
 	{
 		err = ensureOwnership(ctx)
 		if err != nil {
-			m.setError("preflight")
+			m.setErrorAt("preflight", "preflight", err)
 			return
 		}
 	}
@@ -359,7 +387,12 @@ func (m *Manager) reconcileLocked(parent context.Context, withHealth bool) {
 	}{in, inv, resolvers})
 	sum := sha256.Sum256(encoded)
 	hash := hex.EncodeToString(sum[:])
-	if hash != m.lastHash {
+	appliedPath := filepath.Join(m.dir, "applied.json")
+	_, priorAppliedErr := os.Stat(appliedPath)
+	hadApplied := priorAppliedErr == nil
+	appliedCreated := false
+	hashChanged := hash != m.lastHash
+	if hashChanged {
 		log.Printf("[egress] applying revision=%d mode=%s proxyNodes=%d", in.Revision, in.Egress.Mode, len(in.Nodes))
 		m.mu.Lock()
 		m.status.State = "applying"
@@ -379,6 +412,12 @@ func (m *Manager) reconcileLocked(parent context.Context, withHealth bool) {
 		if e != nil {
 			m.setError("preflight")
 			return
+		}
+		if in.SchemaVersion >= 2 {
+			if preErr := m.preflightGroups(ctx, in, inv); preErr != nil {
+				m.setErrorAt("network", "groups", preErr)
+				return
+			}
 		}
 
 		binaryPath := ""
@@ -505,14 +544,16 @@ func (m *Manager) reconcileLocked(parent context.Context, withHealth bool) {
 		saved := savedNetwork{Instruction: in, Inventory: inv, Rules: rules}
 		body, _ := json.Marshal(saved)
 		{
-			e = atomicFile(filepath.Join(m.dir, "applied.json"), body, 0o600)
+			e = atomicFile(appliedPath, body, 0o600)
 			if e != nil {
-				m.setError("restore")
+				m.setErrorAt("restore", "restore", e)
 				return
 			}
+			appliedCreated = !hadApplied
 		}
 
-		if in.Egress.Mode == "off" && !in.Firewall.Enabled && in.SchemaVersion < 2 {
+		needsRestore := in.Egress.Mode != "off" || in.Firewall.Enabled || len(in.Groups) > 0 || len(in.Bindings) > 0
+		if !needsRestore {
 			e = removeRestoreUnit(ctx)
 		} else {
 			exe, err := workerExecutable()
@@ -523,10 +564,26 @@ func (m *Manager) reconcileLocked(parent context.Context, withHealth bool) {
 		}
 
 		if e != nil {
-			m.setError("restore")
+			m.setErrorAt("restore", "restore", e)
 			return
 		}
+	}
 
+	if in.SchemaVersion >= 2 {
+		{
+			err := m.reconcileGroups(ctx, in, inv, false)
+			if err != nil {
+				if appliedCreated && !hadApplied && len(in.Bindings) == 0 && in.Egress.Mode == "off" && !in.Firewall.Enabled {
+					_ = os.Remove(appliedPath)
+					_ = removeRestoreUnit(ctx)
+				}
+				m.setErrorAt("network", "groups", err)
+				return
+			}
+		}
+	}
+
+	if hashChanged {
 		if in.Egress.Mode == "proxy" {
 			m.lastHealth = time.Time{}
 		}
@@ -541,16 +598,6 @@ func (m *Manager) reconcileLocked(parent context.Context, withHealth bool) {
 		m.status.RoutedFallback = len(inv.Routed) > 0 || len(inv.RoutedSources) > 0
 		m.mu.Unlock()
 		log.Printf("[egress] applied revision=%d networks=%d", in.Revision, len(inv.Bridges))
-	}
-
-	if in.SchemaVersion >= 2 {
-		{
-			err := m.reconcileGroups(ctx, in, inv, false)
-			if err != nil {
-				m.setError("network")
-				return
-			}
-		}
 	}
 
 	if in.Egress.Mode != "off" && exec.CommandContext(ctx, "systemctl", "is-active", "--quiet", "incus-xray.service").Run() != nil {

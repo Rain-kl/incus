@@ -5,6 +5,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -55,6 +56,7 @@ type (
 		poolRequest           *encryptedPoolRequest
 		poolReceipt           *encryptedPoolReceipt
 		report                []string
+		reportOffset          int
 		quiet                 bool
 	}
 )
@@ -99,6 +101,9 @@ var advancedMenu = []menuItem{
 
 var repairMenu = []menuItem{
 	{"修复网桥", "repair-bridge"},
+	{"故障诊断（离线）", "repair-diagnose"},
+	{"恢复被阻塞的服务（离线自救）", "repair-recover"},
+	{"清除网络阻塞状态（保留实例）", "repair-reset-network"},
 	{"返回主菜单", "back"},
 }
 
@@ -217,9 +222,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.message = "操作失败：" + m.backend.logs.redact(msg.err.Error())
 		}
-		// Incus: Xray maintenance shows a friendly report instead of the raw operation log.
+		// Incus: Xray maintenance and offline diagnostics render as a friendly report page.
 		if msg.report != nil {
 			m.report = msg.report
+			m.reportOffset = 0
 			m.message = ""
 			m.page = "report"
 			m.showLogs = false
@@ -261,8 +267,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.page == "report" {
-			if msg.String() == "enter" || msg.String() == "esc" || msg.String() == "q" {
+			switch msg.String() {
+			case "enter", "esc", "q":
+				m.reportOffset = 0
 				m.backToMenu()
+			case "up", "k":
+				if m.reportOffset > 0 {
+					m.reportOffset--
+				}
+			case "down", "j":
+				if m.reportOffset+1 < len(m.report) {
+					m.reportOffset++
+				}
+			case "pgup":
+				m.reportOffset = max(0, m.reportOffset-max(1, m.height-6))
+			case "pgdown":
+				m.reportOffset = min(max(0, len(m.report)-1), m.reportOffset+max(1, m.height-6))
 			}
 			return m, nil
 		}
@@ -419,6 +439,22 @@ func (m model) selectMenu() (tea.Model, tea.Cmd) {
 		m.page = "confirm"
 		m.message = "启用 Incus，创建 default(dir)、incusbr0(10.10.0.1/22 NAT，禁用 IPv6)，补齐 default profile。匹配的基础资源可复用，已有实例或其它配置时拒绝覆盖。"
 		m.confirm = m.backend.initialize
+	case "repair-diagnose":
+		m.busy = true
+		m.quiet = false
+		m.logOffset = 0
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		ctx = context.WithValue(ctx, operationLogKey{}, m.backend.logs)
+		m.cancel = cancel
+		return m, diagnoseOperation(ctx, cancel, m.backend)
+	case "repair-recover":
+		m.page = "confirm"
+		m.message = "离线自救恢复被阻塞的服务：停止残留 Xray / dnsmasq 与失败单元，清理出口残留路由表/规则/接口/命名空间/防火墙并修复不一致的 groups 状态；然后尝试按现有策略启动 incus-network 与 incus，并续跑 phase=restore 升级恢复点。严格保留所有实例、存储池、数据库、镜像与面板接入凭据。"
+		m.confirm = m.backend.recoverBlockedServices
+	case "repair-reset-network":
+		m.page = "confirm"
+		m.message = "强制清除本机出口网络阻塞状态：停止并移除出口/包守卫服务单元与 Incus 启动依赖，清理出口内核规则/路由表/防火墙及 /var/lib/incus/agent/network 策略状态；严格保留所有实例、存储池、数据库、镜像与接入凭据，使 Incus 立即解除阻塞启动。"
+		m.confirm = m.backend.clearNetworkLockout
 	case "repair-bridge":
 		m.page = "confirm"
 		m.message = "请先在面板开启节点维护，暂停创建实例。修复 incusbr0：备份配置，停止受影响的持久 LXC，删除旧网桥并重建 10.10.0.1/22 NAT 网络，恢复网卡及原运行状态。保留有效 IP，仅重新分配缺失/冲突地址；会中断网络。集群、VM 占用或运行中的临时容器将拒绝自动修复。"
@@ -608,13 +644,37 @@ func (m model) progressView() string {
 	return out.String()
 }
 
+func diagnoseOperation(ctx context.Context, cancel context.CancelFunc, b *backend) tea.Cmd {
+	return func() tea.Msg {
+		defer cancel()
+		lines, err := b.diagnoseNode(ctx)
+		if err != nil {
+			return resultMsg{err: err}
+		}
+		return resultMsg{report: lines}
+	}
+}
+
 func (m model) reportView() string {
 	var out strings.Builder
 	out.WriteString("Incus 节点管理 · " + version + "\n\n")
-	for _, line := range m.report {
+	start := 0
+	end := len(m.report)
+	if m.height > 6 {
+		visible := m.height - 5
+		if end > visible {
+			start = min(m.reportOffset, end-visible)
+			end = min(end, start+visible)
+		}
+	}
+	for _, line := range m.report[start:end] {
 		out.WriteString(cleanText(line) + "\n")
 	}
-	out.WriteString("\nEnter / Esc / q 返回菜单\n")
+	if start > 0 || end < len(m.report) {
+		out.WriteString(fmt.Sprintf("\n显示 %d-%d/%d · ↑/↓ / PgUp/PgDn 翻页 · Enter / Esc / q 返回菜单\n", start+1, end, len(m.report)))
+	} else {
+		out.WriteString("\nEnter / Esc / q 返回菜单\n")
+	}
 	return out.String()
 }
 
@@ -706,8 +766,20 @@ func initialModel(b *backend) model {
 	return m
 }
 
+func runDiagnoseCLI(ctx context.Context, b *backend, out io.Writer) error {
+	lines, err := b.diagnoseNode(ctx)
+	if err != nil {
+		return err
+	}
+	for _, line := range lines {
+		fmt.Fprintln(out, cleanText(line))
+	}
+	return nil
+}
+
 func main() {
 	showVersion := flag.Bool("version", false, "print version")
+	runDiagnose := flag.Bool("diagnose", false, "run offline read-only node diagnosis")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println("incus-tui " + version)
@@ -716,6 +788,15 @@ func main() {
 	if os.Geteuid() != 0 {
 		fmt.Fprintln(os.Stderr, "请使用 sudo incus-tui")
 		os.Exit(1)
+	}
+	if *runDiagnose {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		if err := runDiagnoseCLI(ctx, newBackend(), os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, "离线诊断失败：", err)
+			os.Exit(1)
+		}
+		return
 	}
 	logDir := "/var/log/incus-tui"
 	err := os.MkdirAll(logDir, 0o700)

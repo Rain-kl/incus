@@ -369,3 +369,66 @@ func TestReconcileGroupsWithoutGroupsSkipsOwnershipChecks(t *testing.T) {
 		t.Fatalf("reconciling without groups must not claim package egress ownership")
 	}
 }
+
+func TestPreflightGroupsConflictLeavesNoOrphanedState(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+	bin := filepath.Join(tmp, "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	writeStub := func(name, body string) {
+		t.Helper()
+		path := filepath.Join(bin, name)
+		if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeStub("nft", "exit 1\n")
+	writeStub("nsenter", "while [ $# -gt 0 ]; do if [ \"$1\" = \"--\" ]; then shift; break; fi; shift; done\nexec \"$@\"\n")
+	writeStub("ip", `if [ "$1" = "-j" ] && [ "$2" = "route" ]; then echo '[]'; exit 0; fi
+if [ "$1" = "netns" ]; then exit 1; fi
+if [ "$1" = "link" ]; then exit 1; fi
+if [ "$2" = "route" ] && [ "$3" = "show" ] && [ "$4" = "table" ] && [ "$5" = "8001" ]; then echo "unreachable default metric 42760"; exit 0; fi
+exit 0
+`)
+
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	oldState := groupStateDir
+	oldGuard := groupBootGuardUnit
+	groupStateDir = filepath.Join(tmp, "state")
+	groupBootGuardUnit = filepath.Join(tmp, "systemd", "incus-package-guard.service")
+	t.Cleanup(func() {
+		groupStateDir = oldState
+		groupBootGuardUnit = oldGuard
+	})
+
+	in := Instruction{
+		SchemaVersion: 2,
+		Revision:      1,
+		Egress:        Policy{Mode: "off"},
+		Groups: []EgressGroup{{
+			Key:    "p3",
+			Egress: Policy{Mode: "proxy", Strategy: "failover", ProbeURL: "https://www.gstatic.com/generate_204", ProbeIntervalSeconds: 30, ProxyNodeIDs: []int{1}},
+			Nodes:  []Node{{ID: 1, Outbound: json.RawMessage(`{"protocol":"socks","settings":{"servers":[{"address":"198.18.0.2","port":1080}]}}`)}},
+		}},
+	}
+	inv := inventory{Internal: []string{"10.10.0.0/24"}}
+
+	m := newManager(groupStateDir)
+	err := m.preflightGroups(ctx, in, inv)
+	if err == nil || err.Error() != "reserved group routing table already in use" {
+		t.Fatalf("expected table conflict error, got %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(groupStateDir, "groups", "owner")); !os.IsNotExist(statErr) {
+		t.Fatalf("preflight failure must not create groups/owner, stat err=%v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(groupStateDir, "groups", "registry.json")); !os.IsNotExist(statErr) {
+		t.Fatalf("preflight failure must not create groups/registry.json, stat err=%v", statErr)
+	}
+
+	if detail := safeErrorDetail(err); detail != "reserved_group_routing_table_in_use" {
+		t.Fatalf("unexpected error detail: %q", detail)
+	}
+}
