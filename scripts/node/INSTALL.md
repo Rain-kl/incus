@@ -50,6 +50,24 @@ sudo bash /usr/libexec/incus/node-upgrade.sh --apply /absolute/path/incus-packag
 
 “应用已安装更新（无需下载）”使用相同流程，参数为 `installed`，执行当前磁盘上的迁移脚本并恢复服务，不重新下载软件包。Incus 启动后，TUI 会等待 `/1.0/agent` 就绪再报告成功。
 
+## 卸载节点
+
+软件包内置卸载脚本 `/usr/libexec/incus/node-uninstall.sh`（源码位于 `scripts/node/uninstall.sh`），支持 `--dry-run` 预览、交互确认或 `--yes` 非交互执行：
+
+- 仅停用并移除面板连接器（保留 `incus-lts`、Incus 服务与所有实例数据）：
+
+```bash
+sudo bash /usr/libexec/incus/node-uninstall.sh --agent-only --yes
+```
+
+- 完整卸载节点软件包与连接器（停止并禁用 `incus-agent`、`incus-user`、`incus`、代理及出口 worker 服务，执行 `apt-get purge -y incus-lts` 并清理 `/etc/incus/agent`、安装缓存与升级临时目录，默认保留 `/var/lib/incus` 与 `/etc/incus` 实例数据）：
+
+```bash
+sudo bash /usr/libexec/incus/node-uninstall.sh --full --yes
+```
+
+- 如确认不再需要本地实例、TUI 状态与节点配置，可附加 `--purge-data` 一并删除 `/var/lib/incus`、`/var/lib/incus-tui`、`/var/log/incus-tui` 和 `/etc/incus`（不可逆）。
+
 ## 安装布局
 
 - 软件包：`incus`。

@@ -86,6 +86,7 @@ jobs:
           (cd tools/incus-tui && go test -race ./...)
           python3 scripts/node/test-install.py
           python3 scripts/node/test-upgrade.py
+          python3 scripts/node/test-uninstall.py
       - name: Real systemd and native proxy API recovery
         if: matrix.arch == 'amd64' && matrix.target == 'debian-13'
         timeout-minutes: 10

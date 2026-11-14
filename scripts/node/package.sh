@@ -43,6 +43,7 @@ for migration in scripts/node/migrations/*.sh; do
 done
 install -m 0755 scripts/node/upgrade.sh "$stage/rootfs/usr/libexec/incus/node-upgrade.sh"
 install -m 0755 scripts/node/install.sh "$stage/rootfs/usr/libexec/incus/node-install.sh"
+install -m 0755 scripts/node/uninstall.sh "$stage/rootfs/usr/libexec/incus/node-uninstall.sh"
 install -m 0755 scripts/node/prepare-idmap.py "$stage/rootfs/usr/libexec/incus/prepare-idmap"
 install -D -m 0755 "$binaries/incus-node-agent" "$stage/rootfs/usr/libexec/incus/agent/incus-agent"
 for unit in incus.service incus-user.service incus-agent.service; do

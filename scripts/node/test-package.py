@@ -31,6 +31,7 @@ class PackageLayoutTests(unittest.TestCase):
             unit=(root/'usr/lib/systemd/system/incus-agent.service').read_text()
             self.assertIn('ExecStart=/usr/libexec/incus/agent/incus-agent -config /etc/incus/agent/config.yaml',unit)
             self.assertTrue((root/'usr/libexec/incus/node-upgrade.sh').is_file())
+            self.assertTrue((root/'usr/libexec/incus/node-uninstall.sh').is_file())
             self.assertTrue((root/'usr/share/incus/manifest.json').is_file())
 
 if __name__=='__main__':unittest.main(argv=[sys.argv[0]])
