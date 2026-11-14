@@ -27,6 +27,7 @@ import (
 const (
 	Prefix                   = "/1.0/agent"
 	Extension                = "incus_node_v1"
+	BaselineExtension        = "incus_baseline_v1"
 	XrayMaintenanceExtension = "incus_xray_maintenance_v1"
 )
 
@@ -45,11 +46,12 @@ type Service struct {
 	guard         *nodesecurity.Manager
 	engine        Engine
 	enabled       bool
-	caddyGate     chan struct{}
-	reportGate    chan struct{}
-	logs          chan struct{}
-	collect       func(string, int) map[string]any
-	collectLocked func() map[string]any
+	caddyGate       chan struct{}
+	reportGate      chan struct{}
+	logs            chan struct{}
+	collect         func(string, int) map[string]any
+	collectBaseline func(string, int) map[string]any
+	collectLocked   func() map[string]any
 	caddyAction   func(context.Context, string) error
 	diagnostics   func(context.Context, string, func(string))
 	journal       func(context.Context, string, int, func(string))
@@ -66,7 +68,7 @@ func New(ctx context.Context, enabled bool) *Service {
 
 func newService(ctx context.Context, enabled bool, engine Engine) *Service {
 	return &Service{
-		ctx: ctx, enabled: enabled, engine: engine, guard: nodesecurity.Default(), caddyGate: make(chan struct{}, 1), reportGate: make(chan struct{}, 1), logs: make(chan struct{}, 32), collect: report.HeartbeatPayload, collectLocked: report.LockedStoragePayload, diagnostics: diagnostics.Stream, journal: diagnostics.Journal,
+		ctx: ctx, enabled: enabled, engine: engine, guard: nodesecurity.Default(), caddyGate: make(chan struct{}, 1), reportGate: make(chan struct{}, 1), logs: make(chan struct{}, 32), collect: report.HeartbeatPayload, collectBaseline: report.BaselinePayload, collectLocked: report.LockedStoragePayload, diagnostics: diagnostics.Stream, journal: diagnostics.Journal,
 		caddyAction: func(ctx context.Context, action string) error {
 			if action == "install" {
 				return caddy.Install(ctx)
@@ -158,19 +160,11 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 
-		respond(w, 200, map[string]any{"api_extensions": []string{backups.Extension, backups.TransferExtension, Extension, XrayMaintenanceExtension, ResetExtension, nodesecurity.StartupExtension, nodesecurity.Extension, nodesecurity.ResumeExtension, nodesecurity.StorageExtension, nodesecurity.StoragePoolDirExtension, nodesecurity.StoragePoolAllocExtension, nodesecurity.StoragePoolResizeExtension}, "api_version": "1.0", "transport_only_agent": true})
+		respond(w, 200, map[string]any{"api_extensions": []string{backups.Extension, backups.TransferExtension, Extension, BaselineExtension, XrayMaintenanceExtension, ResetExtension, nodesecurity.StartupExtension, nodesecurity.Extension, nodesecurity.ResumeExtension, nodesecurity.StorageExtension, nodesecurity.StoragePoolDirExtension, nodesecurity.StoragePoolAllocExtension, nodesecurity.StoragePoolResizeExtension}, "api_version": "1.0", "transport_only_agent": true})
 		return
 	case Prefix + "/report":
 		if r.Method != http.MethodGet {
 			break
-		}
-
-		select {
-		case s.reportGate <- struct{}{}:
-			defer func() { <-s.reportGate }()
-		default:
-			respond(w, 409, "busy")
-			return
 		}
 
 		interval, err := strconv.Atoi(r.URL.Query().Get("interval"))
@@ -179,17 +173,22 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		payload := map[string]any{}
-		guardErr := s.guard.Check()
-		if guardErr == nil {
-			payload = s.collect("incus-node-v1", interval)
-		} else if errors.Is(guardErr, nodesecurity.ErrLocked) {
-			payload = s.collectLocked()
+		s.serveTelemetry(w, func() map[string]any {
+			return s.collect("incus-node-v1", interval)
+		})
+		return
+	case Prefix + "/baseline":
+		if r.Method != http.MethodGet {
+			break
 		}
-		payload["nodeSecurity"] = s.guard.Report()
-		payload["networkStatus"] = s.engine.Report()
-		payload["nodeApi"] = Extension
-		respond(w, 200, payload)
+
+		s.serveTelemetry(w, func() map[string]any {
+			collectFn := s.collectBaseline
+			if collectFn == nil {
+				collectFn = s.collect
+			}
+			return collectFn("incus-node-v1", config.DefaultHeartbeatIntervalSeconds)
+		})
 		return
 	case Prefix + "/reset":
 		// Local terminal only: a wiped node must never be triggered remotely.
@@ -370,6 +369,28 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respond(w, 405, "method not allowed")
+}
+
+func (s *Service) serveTelemetry(w http.ResponseWriter, collectFn func() map[string]any) {
+	select {
+	case s.reportGate <- struct{}{}:
+		defer func() { <-s.reportGate }()
+	default:
+		respond(w, 409, "busy")
+		return
+	}
+
+	payload := map[string]any{}
+	guardErr := s.guard.Check()
+	if guardErr == nil {
+		payload = collectFn()
+	} else if errors.Is(guardErr, nodesecurity.ErrLocked) {
+		payload = s.collectLocked()
+	}
+	payload["nodeSecurity"] = s.guard.Report()
+	payload["networkStatus"] = s.engine.Report()
+	payload["nodeApi"] = Extension
+	respond(w, 200, payload)
 }
 
 func (s *Service) control(w http.ResponseWriter, r *http.Request, method string, params json.RawMessage, timeout time.Duration) {

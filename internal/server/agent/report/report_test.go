@@ -25,6 +25,15 @@ func TestHeartbeatPayloadIncludesHostMetrics(t *testing.T) {
 		t.Fatalf("traffic-counters capability missing: %#v", capabilities)
 	}
 
+	if _, hasStorage := payload["storage"]; hasStorage {
+		t.Fatalf("heartbeat payload should not collect heavy storage inventory: %#v", payload["storage"])
+	}
+
+	baseline := BaselinePayload("test-version", 30)
+	if _, hasStorage := baseline["storage"]; !hasStorage {
+		t.Fatalf("baseline payload missing storage inventory: %#v", baseline)
+	}
+
 	instances, ok := payload["instances"].(map[string]any)
 	if !ok {
 		t.Fatalf("instances report missing or invalid: %#v", payload["instances"])

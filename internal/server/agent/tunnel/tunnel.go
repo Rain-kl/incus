@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -34,13 +35,16 @@ type WorkerConfig struct {
 
 // Worker maintains the authenticated reverse connection.
 type Worker struct {
-	mu         sync.Mutex
-	cfg        WorkerConfig
-	enabled    bool
-	targetHost string
-	targetPort int
-	cancel     context.CancelFunc
-	running    bool
+	mu          sync.Mutex
+	cfg         WorkerConfig
+	enabled     bool
+	targetHost  string
+	targetPort  int
+	cancel      context.CancelFunc
+	running     bool
+	connected   atomic.Bool
+	reconnectCh chan struct{}
+	probeCh     chan struct{}
 }
 
 // NewWorker creates a reverse connector with bounded reconnect backoff.
@@ -56,9 +60,54 @@ func NewWorker(cfg WorkerConfig) *Worker {
 	}
 
 	return &Worker{
-		cfg:        cfg,
-		targetHost: th,
-		targetPort: tp,
+		cfg:         cfg,
+		targetHost:  th,
+		targetPort:  tp,
+		reconnectCh: make(chan struct{}, 1),
+		probeCh:     make(chan struct{}, 1),
+	}
+}
+
+// IsConnected reports whether the reverse websocket tunnel currently has an active session.
+func (w *Worker) IsConnected() bool {
+	if w == nil {
+		return false
+	}
+	return w.connected.Load()
+}
+
+// ReconnectNow wakes a sleeping reconnect backoff timer when the tunnel is enabled but disconnected.
+func (w *Worker) ReconnectNow() {
+	if w == nil || w.connected.Load() {
+		return
+	}
+	w.mu.Lock()
+	running := w.enabled && w.running
+	w.mu.Unlock()
+	if !running || w.reconnectCh == nil {
+		return
+	}
+	select {
+	case w.reconnectCh <- struct{}{}:
+	default:
+	}
+}
+
+// Probe forces an immediate WebSocket ping on an active connection or wakes reconnect if disconnected.
+func (w *Worker) Probe() {
+	if w == nil {
+		return
+	}
+	if !w.connected.Load() {
+		w.ReconnectNow()
+		return
+	}
+	if w.probeCh == nil {
+		return
+	}
+	select {
+	case w.probeCh <- struct{}{}:
+	default:
 	}
 }
 
@@ -76,6 +125,12 @@ func (w *Worker) SyncConfig(enabled bool, targetHost string, targetPort int) {
 	}
 
 	if enabled == w.enabled {
+		if enabled && w.running && !w.connected.Load() && w.reconnectCh != nil {
+			select {
+			case w.reconnectCh <- struct{}{}:
+			default:
+			}
+		}
 		return
 	}
 
@@ -127,19 +182,38 @@ func (w *Worker) runLoop(ctx context.Context) {
 		default:
 		}
 
+		// Drain any queued wakeups from before this attempt so a later failure still honors backoff.
+		if w.reconnectCh != nil {
+			select {
+			case <-w.reconnectCh:
+			default:
+			}
+		}
+
+		startedAt := time.Now()
 		err := w.connectAndServe(ctx)
 		if ctx.Err() != nil {
 			return
+		}
+
+		if time.Since(startedAt) >= 10*time.Second {
+			backoff = 1 * time.Second
 		}
 
 		if err != nil {
 			log.Printf("[tunnel] tunnel disconnected: %v, reconnecting in %v", err, backoff)
 		}
 
+		timer := time.NewTimer(backoff)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
-		case <-time.After(backoff):
+		case <-w.reconnectCh:
+			timer.Stop()
+			backoff = 1 * time.Second
+			continue
+		case <-timer.C:
 		}
 
 		backoff *= 2
@@ -192,7 +266,15 @@ func (w *Worker) connectAndServe(ctx context.Context) error {
 	header.Set("x-incus-body-sha256", bodyHash)
 	header.Set("x-incus-signature", signature)
 
-	dialer := *websocket.DefaultDialer
+	netDialer := &net.Dialer{
+		Timeout:   10 * time.Second,
+		KeepAlive: 15 * time.Second,
+	}
+	dialer := websocket.Dialer{
+		Proxy:            http.ProxyFromEnvironment,
+		NetDialContext:   netDialer.DialContext,
+		HandshakeTimeout: 12 * time.Second,
+	}
 	if w.cfg.InsecureTLS {
 		dialer.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} // nolint:gosec
 	}
@@ -200,12 +282,17 @@ func (w *Worker) connectAndServe(ctx context.Context) error {
 	conn, resp, err := dialer.DialContext(ctx, wsURL, header)
 	if err != nil {
 		if resp != nil {
+			if resp.Body != nil {
+				_ = resp.Body.Close()
+			}
 			return fmt.Errorf("dial websocket (status %d): %w", resp.StatusCode, err)
 		}
 
 		return fmt.Errorf("dial websocket: %w", err)
 	}
 
+	w.connected.Store(true)
+	defer w.connected.Store(false)
 	defer conn.Close()
 
 	log.Printf("[tunnel] reverse tunnel established to %s", wsURL)
@@ -215,6 +302,12 @@ func (w *Worker) connectAndServe(ctx context.Context) error {
 	defer connCancel()
 	conn.SetReadLimit(2 << 20)
 	go func() { <-connCtx.Done(); _ = conn.Close() }()
+
+	const (
+		pingInterval = 15 * time.Second
+		writeTimeout = 8 * time.Second
+		readTimeout  = 35 * time.Second
+	)
 
 	writeChan := make(chan []byte, 128)
 	writeErrChan := make(chan error, 1)
@@ -243,33 +336,48 @@ func (w *Worker) connectAndServe(ctx context.Context) error {
 
 	// Write pump
 	go func() {
-		pingTicker := time.NewTicker(25 * time.Second)
+		pingTicker := time.NewTicker(pingInterval)
 		defer pingTicker.Stop()
+
+		failWrite := func(err error) {
+			select {
+			case writeErrChan <- err:
+			default:
+			}
+			connCancel()
+			_ = conn.Close()
+		}
+
+		sendPing := func(deadline time.Duration) error {
+			_ = conn.SetWriteDeadline(time.Now().Add(deadline))
+			return conn.WriteMessage(websocket.PingMessage, nil)
+		}
 
 		for {
 			select {
 			case <-connCtx.Done():
 				return
 			case <-pingTicker.C:
-				_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-				{
-					err := conn.WriteMessage(websocket.PingMessage, nil)
-					if err != nil {
-						writeErrChan <- err
-						return
-					}
+				if err := sendPing(writeTimeout); err != nil {
+					failWrite(err)
+					return
 				}
-
+			case <-w.probeCh:
+				_ = conn.SetReadDeadline(time.Now().Add(6 * time.Second))
+				if err := sendPing(4 * time.Second); err != nil {
+					failWrite(err)
+					return
+				}
 			case frame, ok := <-writeChan:
 				if !ok {
 					return
 				}
 
-				_ = conn.SetWriteDeadline(time.Now().Add(30 * time.Second))
+				_ = conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 				{
 					err := conn.WriteMessage(websocket.BinaryMessage, frame)
 					if err != nil {
-						writeErrChan <- err
+						failWrite(err)
 						return
 					}
 				}
@@ -278,8 +386,13 @@ func (w *Worker) connectAndServe(ctx context.Context) error {
 	}()
 
 	conn.SetPongHandler(func(string) error {
-		_ = conn.SetReadDeadline(time.Now().Add(70 * time.Second))
+		_ = conn.SetReadDeadline(time.Now().Add(readTimeout))
 		return nil
+	})
+	defaultPingHandler := conn.PingHandler()
+	conn.SetPingHandler(func(appData string) error {
+		_ = conn.SetReadDeadline(time.Now().Add(readTimeout))
+		return defaultPingHandler(appData)
 	})
 
 	// Read pump
@@ -287,12 +400,12 @@ func (w *Worker) connectAndServe(ctx context.Context) error {
 		select {
 		case err := <-writeErrChan:
 			return err
-		case <-ctx.Done():
+		case <-connCtx.Done():
 			return nil
 		default:
 		}
 
-		_ = conn.SetReadDeadline(time.Now().Add(70 * time.Second))
+		_ = conn.SetReadDeadline(time.Now().Add(readTimeout))
 		msgType, msg, err := conn.ReadMessage()
 		if err != nil {
 			return fmt.Errorf("read websocket: %w", err)
@@ -366,7 +479,7 @@ func (w *Worker) connectAndServe(ctx context.Context) error {
 					streamsMu.Unlock()
 					select {
 					case writeChan <- EncodeFrame(FrameTypeReset, sID, nil):
-					case <-ctx.Done():
+					case <-connCtx.Done():
 					}
 
 					return
@@ -399,7 +512,7 @@ func (w *Worker) connectAndServe(ctx context.Context) error {
 
 						case <-entry.closed:
 							return
-						case <-ctx.Done():
+						case <-connCtx.Done():
 							return
 						}
 					}
@@ -415,7 +528,7 @@ func (w *Worker) connectAndServe(ctx context.Context) error {
 						case writeChan <- dataFrame:
 						case <-entry.closed:
 							return
-						case <-ctx.Done():
+						case <-connCtx.Done():
 							return
 						}
 					}
@@ -431,12 +544,12 @@ func (w *Worker) connectAndServe(ctx context.Context) error {
 						if readErr == io.EOF {
 							select {
 							case writeChan <- EncodeFrame(FrameTypeClose, sID, nil):
-							case <-ctx.Done():
+							case <-connCtx.Done():
 							}
 						} else {
 							select {
 							case writeChan <- EncodeFrame(FrameTypeReset, sID, nil):
-							case <-ctx.Done():
+							case <-connCtx.Done():
 							}
 						}
 
@@ -453,7 +566,7 @@ func (w *Worker) connectAndServe(ctx context.Context) error {
 				select {
 				case entry.writeChan <- payload:
 				case <-entry.closed:
-				case <-ctx.Done():
+				case <-connCtx.Done():
 				}
 			}
 

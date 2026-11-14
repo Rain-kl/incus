@@ -83,3 +83,24 @@ func TestSecurityReportSignedContract(t *testing.T) {
 		t.Fatal("ignored cancellation")
 	}
 }
+
+func TestPanelClientUsesIsolatedTransportAndRecoversAfterError(t *testing.T) {
+	client := New(config.Config{PanelURL: "http://127.0.0.1:1", AgentID: "node-test", AgentSecret: "test-only-secret", RequestTimeout: 300 * time.Millisecond})
+	if client.httpClient.Transport == nil || client.httpClient.Transport == http.DefaultTransport {
+		t.Fatal("panel client must use an isolated http.Transport")
+	}
+	_, err := client.Heartbeat(context.Background(), map[string]any{"version": "test"})
+	if err == nil {
+		t.Fatal("expected dial error for closed port")
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"tunnel":{"enabled":false}}`))
+	}))
+	defer server.Close()
+	client.panelURL = server.URL
+	res, err := client.Heartbeat(context.Background(), map[string]any{"version": "test"})
+	if err != nil || !res.OK {
+		t.Fatalf("expected recovery after transport reset, got res=%+v err=%v", res, err)
+	}
+}

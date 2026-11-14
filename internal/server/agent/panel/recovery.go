@@ -115,6 +115,7 @@ func (client *Client) StartupKeys(ctx context.Context) (RecoveryGrant, error) {
 	req.Header.Set("x-incus-signature", protocol.Signature(client.agentSecret, protocol.SigningPayload("POST", recoveryPath, timestamp, authNonce, hash)))
 	response, err := client.httpClient.Do(req)
 	if err != nil {
+		client.resetConnections()
 		return RecoveryGrant{}, fmt.Errorf("startup transport unavailable")
 	}
 	defer response.Body.Close()

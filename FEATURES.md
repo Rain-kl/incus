@@ -13,6 +13,35 @@
 
 上游始终以正式 LTS 版本为准，仅同步 LTS 维护版本及经过兼容性验证的新 LTS 系列。普通功能版、开发分支及未发版提交均不纳入基线或同步目标。定制提交建立在记录的 LTS 基线上。
 
+## 轻量化心跳、基线端点与隧道断线重连加固（2026-11-14）
+
+- 目的：
+  1. 拆分高频 5 秒心跳与低频存储/硬件基线同步：5 秒心跳不再反复扫描存储池与硬件清单，新增按需拉取端点 `GET /1.0/agent/baseline`（扩展能力 `incus_baseline_v1`），在安全锁定状态下仍允许读取以支持控制端重建与诊断核对。
+  2. 在 `report/storage.go` 的 `StoragePool` 遥测中补充 `space.available`（节点侧真实剩余可用容量）。
+  3. 修复 `incus-agent` 在宿主机网络波动或开关 WireGuard 导致长连接半开/路由变更后无法自动恢复的问题。
+- 行为与限制：
+  1. HTTP 上报传输（`panel/client.go`、`panel/recovery.go`）使用专用 HTTP/1.1 Transport，禁用 HTTP/2 多路复用粘连并在错误时显式调用 `CloseIdleConnections()` 丢弃半开连接。
+  2. 反向隧道（`tunnel/tunnel.go`）为拨号、WebSocket Pong 与控制帧读取配置有界超时，使用 `connCtx` 协调读写协程退出，并提供 `Probe()` / `ReconnectNow()` 接口；连接器（`connector/main.go`）在心跳从失败恢复为成功时立即探测并重连过期隧道。
+  3. 保持中性 `incus` 命名与 API 契约不变，不含平台前缀。
+- 代码接入点：`internal/server/agent/{service.go,service_test.go}`、`internal/server/agent/panel/{client.go,recovery.go,client_test.go}`、`internal/server/agent/tunnel/{tunnel.go,control_test.go}`、`internal/server/agent/connector/main.go`、`internal/server/agent/report/{report.go,report_test.go,storage.go,storage_test.go}`、`internal/server/agent/security/policy.go`；不涉及上游 Incus 核心 API 语义破坏。
+
+## 网桥修复容错与断点续跑增强（2026-11-14）
+
+- 目的：提升 `incus-tui`「修复网桥」在异常中断、残留孤立 `dnsmasq` 进程及陈旧锁文件场景下的自愈与断点续跑能力。
+- 行为与限制：
+  1. 识别并恢复中断残留的临时解绑网卡：`isDetachedPanelNIC` 匹配上次修复解绑后停留在 `nictype: p2p` 且无 `network`/`parent` 的网卡，重跑修复时可重新绑定回 `incusbr0`。
+  2. 清理孤立 `incusbr0` `dnsmasq` 并重试：`POST /1.0/networks` 若返回 `Address already in use`，精确匹配 `comm=dnsmasq` 且命令行含 `--interface=incusbr0` 的残留进程并发送 `SIGTERM` 后重试创建一次（不触碰 `lxcbr0` 等其它进程）。
+  3. 自动清理陈旧修复锁：`acquireRepairLock` 在 `bridge.lock` 已存在时检查记录的 `pid` 是否仍存活，已退出进程的残留锁自动清理并重试加锁；存活进程继续拒绝并发。
+- 代码接入点与上游 API：`tools/incus-tui/network_repair.go`、`tools/incus-tui/network_repair_test.go`；仅涉及本地 TUI 容错逻辑，无上游源码或 Incus API 变更。
+- 验证：`tools/incus-tui` 下 `go test -race ./...` 与 `go vet ./...` 全部通过（含新增 `TestBridgeRepairRecoversDetachedNICFromInterruptedRun`、`TestBridgeRepairCleansStaleDnsmasqAndRetries`、`TestBridgeRepairClearsStaleLockFile`）。
+
+## 节点卸载脚本（2026-11-14）
+
+- 目的：为节点端补充标准化卸载脚本，支持仅移除连接器（保留 Incus 与实例）和完整卸载 `incus-lts` 软件包两种场景。
+- 行为与限制：`scripts/node/uninstall.sh`（随包安装至 `/usr/libexec/incus/node-uninstall.sh`）强制要求显式指定 `--agent-only` 或 `--full`，非交互终端必须传入 `--yes` 或 `--dry-run`。`--agent-only` 仅停止并禁用 `incus-agent.service`、移除 `/etc/incus/agent/config.yaml`；`--full` 依次停止/禁用连接器、守护组件、`incus-egress-*.service` 与 `incus.service`，若已安装 `incus-lts` 则执行 `apt-get purge -y incus-lts` 与 `autoremove`，并清理 `/etc/incus/agent`、`/var/cache/incus/node-install` 与 `/run/incus-upgrade`，默认保留 `/var/lib/incus` 与 `/etc/incus` 实例数据；仅当显式传入 `--full --purge-data` 时才删除 `/var/lib/incus`、`/var/lib/incus-tui`、`/var/log/incus-tui` 与 `/etc/incus`。脚本保持中性命名，不包含平台品牌前缀。
+- 代码接入点与上游 API：`scripts/node/uninstall.sh`、`scripts/node/package.sh`、`scripts/node/test-uninstall.py`、`scripts/node/test-package.py`、`scripts/node/INSTALL.md`、`.github/workflows/payincus.yml`；全部位于独立节点脚本与打包流程，不涉及上游源码或 Incus API 变更。
+- 验证：`bash -n scripts/node/uninstall.sh`、`python3 scripts/node/test-uninstall.py`（6 项测试，覆盖中性命名、参数校验、非交互保护、`--dry-run`、`--agent-only`、`--full` 及 `--purge-data`）、`python3 scripts/node/test-install.py` 与 `python3 scripts/node/test-upgrade.py` 均通过。
+
 ## Ubuntu 发行构建网络恢复（2026-11-11）
 
 - 原因：v2.0.0 的两轮 CI 在 Ubuntu 官方源和 Azure 源域名解析处重复失败；Debian 13 arm64 的原生构建及包扫描成功。

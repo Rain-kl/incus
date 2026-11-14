@@ -3,9 +3,11 @@ package panel
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -57,14 +59,38 @@ type heartbeatResponse struct {
 
 // New creates an API client using the supplied connection configuration.
 func New(cfg config.Config) *Client {
+	dialer := &net.Dialer{
+		Timeout:   8 * time.Second,
+		KeepAlive: 15 * time.Second,
+	}
+	transport := &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           dialer.DialContext,
+		ForceAttemptHTTP2:     false,
+		TLSNextProto:          make(map[string]func(string, *tls.Conn) http.RoundTripper),
+		MaxIdleConns:          10,
+		IdleConnTimeout:       20 * time.Second,
+		TLSHandshakeTimeout:   8 * time.Second,
+		ResponseHeaderTimeout: 10 * time.Second,
+		ExpectContinueTimeout: time.Second,
+	}
+
 	return &Client{
 		panelURL:    strings.TrimRight(cfg.PanelURL, "/"),
 		agentID:     cfg.AgentID,
 		agentSecret: cfg.AgentSecret,
 		httpClient: &http.Client{
-			Timeout: cfg.RequestTimeout,
+			Timeout:   cfg.RequestTimeout,
+			Transport: transport,
 		},
 	}
+}
+
+func (client *Client) resetConnections() {
+	if client == nil || client.httpClient == nil {
+		return
+	}
+	client.httpClient.CloseIdleConnections()
 }
 
 // Heartbeat sends a signed report and reads panel instructions.
@@ -99,6 +125,7 @@ func (client *Client) Heartbeat(ctx context.Context, payload map[string]any) (He
 	startedAt := time.Now()
 	response, err := client.httpClient.Do(request)
 	if err != nil {
+		client.resetConnections()
 		return HeartbeatResult{}, err
 	}
 
@@ -106,6 +133,7 @@ func (client *Client) Heartbeat(ctx context.Context, payload map[string]any) (He
 
 	responseBody, err := io.ReadAll(io.LimitReader(response.Body, 1024*1024))
 	if err != nil {
+		client.resetConnections()
 		return HeartbeatResult{}, err
 	}
 
@@ -171,6 +199,7 @@ func (client *Client) SecurityReport(ctx context.Context, payload map[string]any
 	request.Header.Set("x-incus-signature", protocol.Signature(client.agentSecret, protocol.SigningPayload("POST", path, timestamp, nonce, hash)))
 	response, err := client.httpClient.Do(request)
 	if err != nil {
+		client.resetConnections()
 		return nil, fmt.Errorf("report transport failed")
 	}
 	defer response.Body.Close()

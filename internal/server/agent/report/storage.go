@@ -162,7 +162,7 @@ func storageReport(ctx context.Context, client *http.Client, result map[string]a
 			}
 			resources, err := incusRequestContext[map[string]any](ctx, client, "/1.0/storage-pools/"+url.PathEscape(pool.Name)+"/resources")
 			if err == nil {
-				item["space"] = resources["space"]
+				item["space"] = enrichStorageSpace(resources["space"])
 				item["status"] = "ready"
 			}
 		}(index, pool)
@@ -178,4 +178,47 @@ func storageReport(ctx context.Context, client *http.Client, result map[string]a
 	}
 	result["collectionComplete"] = complete
 	return result
+}
+
+func enrichStorageSpace(raw any) any {
+	space, ok := raw.(map[string]any)
+	if !ok || space == nil {
+		return raw
+	}
+	copied := make(map[string]any, len(space)+1)
+	for k, v := range space {
+		copied[k] = v
+	}
+	if _, hasAvail := copied["available"]; !hasAvail {
+		total, okTotal := numericInt64(copied["total"])
+		used, okUsed := numericInt64(copied["used"])
+		if okTotal && okUsed {
+			avail := total - used
+			if avail < 0 {
+				avail = 0
+			}
+			copied["available"] = avail
+		}
+	}
+	return copied
+}
+
+func numericInt64(v any) (int64, bool) {
+	switch val := v.(type) {
+	case int64:
+		return val, true
+	case int:
+		return int64(val), true
+	case uint64:
+		if val > uint64(1<<62) {
+			return 1 << 62, true
+		}
+		return int64(val), true
+	case float64:
+		if val < 0 {
+			return 0, true
+		}
+		return int64(val), true
+	}
+	return 0, false
 }

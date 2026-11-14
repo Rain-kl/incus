@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -246,4 +247,62 @@ func TestAgentJournalLogControlUsesIncusAgentUnit(t *testing.T) {
 
 	cancel()
 	<-done
+}
+
+func TestReconnectNowWakesBackoffAndProbeDetectsDeadSocket(t *testing.T) {
+	var attempts atomic.Int32
+	var allowUpgrade atomic.Bool
+	allowUpgrade.Store(true)
+	connections := make(chan *websocket.Conn, 4)
+
+	panel := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := attempts.Add(1)
+		if !allowUpgrade.Load() || n == 2 || n == 3 {
+			http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if err == nil {
+			connections <- conn
+		}
+	}))
+	defer panel.Close()
+
+	worker := NewWorker(WorkerConfig{
+		PanelURL:    panel.URL,
+		AgentID:     "local-agent",
+		AgentSecret: "local-test-secret",
+	})
+	worker.SyncConfig(true, "127.0.0.1", 8443)
+	defer worker.SyncConfig(false, "", 0)
+
+	var first *websocket.Conn
+	select {
+	case first = <-connections:
+	case <-time.After(3 * time.Second):
+		t.Fatal("initial connection timed out")
+	}
+
+	// Close first connection; attempts 2 & 3 fail so backoff reaches >= 4s.
+	_ = first.Close()
+	deadline := time.Now().Add(4 * time.Second)
+	for attempts.Load() < 3 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if attempts.Load() < 3 {
+		t.Fatalf("expected >= 3 dial attempts, got %d", attempts.Load())
+	}
+
+	// Wake reconnect immediately via Probe() instead of waiting for full backoff.
+	start := time.Now()
+	worker.Probe()
+	select {
+	case second := <-connections:
+		_ = second.Close()
+		if elapsed := time.Since(start); elapsed > 1500*time.Millisecond {
+			t.Fatalf("expected immediate reconnect, took %v", elapsed)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ReconnectNow/Probe did not wake backoff")
+	}
 }

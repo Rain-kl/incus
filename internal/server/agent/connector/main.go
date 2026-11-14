@@ -55,6 +55,7 @@ func Run(ctx context.Context, cfg config.Config, socket string, once bool) error
 	go securityReports(ctx, local, remote)
 	go startupRecovery(ctx, local, remote)
 	var caddyPending atomic.Bool
+	var hadHeartbeatFailure bool
 	tick := time.NewTicker(cfg.HeartbeatInterval)
 	defer tick.Stop()
 	requestID := ""
@@ -62,7 +63,11 @@ func Run(ctx context.Context, cfg config.Config, socket string, once bool) error
 		err := heartbeat(ctx, local, remote, cfg, worker, &caddyPending, requestID)
 		requestID = ""
 		if err != nil {
+			hadHeartbeatFailure = true
 			log.Printf("heartbeat: %v", err)
+		} else if hadHeartbeatFailure {
+			hadHeartbeatFailure = false
+			worker.Probe()
 		}
 
 		if once {

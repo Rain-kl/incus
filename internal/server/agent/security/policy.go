@@ -89,7 +89,7 @@ func AllowedWhileLocked(method, path string) bool {
 			return true
 		}
 		switch path {
-		case "/1.0/agent/security/startup", "/1.0/agent/storage", "/1.0", "/1.0/agent", "/1.0/agent/report", "/1.0/agent/security", "/1.0/agent/security/report":
+		case "/1.0/agent/security/startup", "/1.0/agent/storage", "/1.0", "/1.0/agent", "/1.0/agent/report", "/1.0/agent/baseline", "/1.0/agent/security", "/1.0/agent/security/report":
 			return true
 		}
 	}

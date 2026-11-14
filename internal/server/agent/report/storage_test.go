@@ -60,6 +60,10 @@ func TestStorageHeartbeatNativeContracts(t *testing.T) {
 	if result["available"] != true || result["complete"] != true || items[0]["status"] != "ready" || items[1]["status"] != "ready" || items[0]["backing"] == nil {
 		t.Fatal("ready pool report invalid", result)
 	}
+	space, ok := items[0]["space"].(map[string]any)
+	if !ok || space["available"] != int64((2<<30)-(10<<20)) {
+		t.Fatal("missing pool remaining space capacity", items[0])
+	}
 	globalLocked = true
 	globalItems, validItems := read()["pools"].([]map[string]any)
 	if !validItems {

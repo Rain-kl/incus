@@ -16,11 +16,20 @@ import (
 
 var incusSocketCandidates = localapi.SocketCandidates()
 
-// HeartbeatPayload collects bounded host and instance telemetry for the panel.
+// HeartbeatPayload collects bounded host and instance telemetry for the panel without heavy storage or static hardware queries.
 func HeartbeatPayload(version string, heartbeatIntervalSeconds int) map[string]any {
-	return map[string]any{
+	return buildPayload(version, heartbeatIntervalSeconds, false)
+}
+
+// BaselinePayload collects full host hardware, storage pool inventory, and instance telemetry for on-demand baseline synchronization.
+func BaselinePayload(version string, heartbeatIntervalSeconds int) map[string]any {
+	return buildPayload(version, heartbeatIntervalSeconds, true)
+}
+
+func buildPayload(version string, heartbeatIntervalSeconds int, includeBaseline bool) map[string]any {
+	payload := map[string]any{
 		"version":      version,
-		"capabilities": []any{"heartbeat", "report", "host-metrics", "instance-status", "traffic-counters", "nvidia-gpu", "xray-egress", "network-control", "storage-inventory-v1"},
+		"capabilities": []any{"heartbeat", "report", "host-metrics", "instance-status", "traffic-counters", "nvidia-gpu", "xray-egress", "network-control", "storage-inventory-v1", "node-baseline-v1"},
 		"runtime": map[string]any{
 			"goos":   runtime.GOOS,
 			"goarch": runtime.GOARCH,
@@ -28,10 +37,15 @@ func HeartbeatPayload(version string, heartbeatIntervalSeconds int) map[string]a
 		"incus":     detectIncus(),
 		"caddy":     collectCaddyStatus(),
 		"instances": collectIncusInstanceReport(),
-		"resources": collectResources(),
 		"metrics":   collectMetrics(heartbeatIntervalSeconds),
-		"storage":   collectStorageReport(),
 	}
+	if includeBaseline {
+		payload["resources"] = collectResources()
+		payload["storage"] = collectStorageReport()
+	} else {
+		payload["resources"] = collectResourcesWithHardware(false)
+	}
+	return payload
 }
 
 // collectCaddyStatus 探测本机 Caddy：管理 API 是否在回环 127.0.0.1:<port> 可用。
@@ -79,20 +93,26 @@ func serviceActive(unit string) bool {
 }
 
 func collectResources() map[string]any {
+	return collectResourcesWithHardware(true)
+}
+
+func collectResourcesWithHardware(includeHardware bool) map[string]any {
 	resources := map[string]any{
-		"cpuTotal":         runtime.NumCPU(),
-		"nvidiaGpu":        collectNvidiaGPUs(),
-		"storageAvailable": false,
+		"cpuTotal":  runtime.NumCPU(),
+		"nvidiaGpu": collectNvidiaGPUs(),
 	}
-	socket, ok := detectIncusSocket()
-	if ok {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		inventory, err := incusRequestContext[map[string]any](ctx, newIncusUnixHTTPClient(socket), "/1.0/resources")
-		if err == nil {
-			resources["storage"] = inventory["storage"]
-			resources["network"] = inventory["network"]
-			resources["storageAvailable"] = inventory["storage"] != nil
+	if includeHardware {
+		resources["storageAvailable"] = false
+		socket, ok := detectIncusSocket()
+		if ok {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			inventory, err := incusRequestContext[map[string]any](ctx, newIncusUnixHTTPClient(socket), "/1.0/resources")
+			if err == nil {
+				resources["storage"] = inventory["storage"]
+				resources["network"] = inventory["network"]
+				resources["storageAvailable"] = inventory["storage"] != nil
+			}
 		}
 	}
 	if model := readCPUModel(); model != "" {

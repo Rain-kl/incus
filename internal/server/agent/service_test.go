@@ -323,7 +323,7 @@ func TestStorageEncryptionNamespaceHTTPContract(t *testing.T) {
 		t.Fatal("capability response could not be decoded", err)
 	}
 	advertised := strings.Join(result.Metadata.Extensions, ",")
-	for _, extension := range []string{nodesecurity.StorageExtension, nodesecurity.StartupExtension, XrayMaintenanceExtension} {
+	for _, extension := range []string{nodesecurity.StorageExtension, nodesecurity.StartupExtension, XrayMaintenanceExtension, BaselineExtension} {
 		if !strings.Contains(advertised, extension) {
 			t.Fatalf("Incus extension %q is not discoverable", extension)
 		}
@@ -348,5 +348,25 @@ func TestLockedHeartbeatKeepsOnlyRecoveryStorage(t *testing.T) {
 	}
 	if json.Unmarshal(recorder.Body.Bytes(), &response) != nil || response.Metadata["storage"] == nil || response.Metadata["instances"] != nil || response.Metadata["resources"] != nil {
 		t.Fatal("locked recovery identities lost or private inventory exposed", recorder.Body.String())
+	}
+}
+
+func TestBaselineEndpointContract(t *testing.T) {
+	service := newService(context.Background(), true, &fakeEngine{})
+	service.guard = nodesecurity.New(filepath.Join(t.TempDir(), "guard"))
+	service.collectBaseline = func(string, int) map[string]any {
+		return map[string]any{"storage": map[string]any{"available": true, "pools": []any{}}, "resources": map[string]any{"cpuTotal": 2}}
+	}
+	service.collect = func(string, int) map[string]any { t.Fatal("baseline endpoint called heartbeat collector"); return nil }
+	recorder := httptest.NewRecorder()
+	service.ServeHTTP(recorder, httptest.NewRequest("GET", Prefix+"/baseline", nil))
+	var response struct {
+		Metadata map[string]any `json:"metadata"`
+	}
+	if recorder.Code != 200 || json.Unmarshal(recorder.Body.Bytes(), &response) != nil || response.Metadata["storage"] == nil || response.Metadata["resources"] == nil {
+		t.Fatalf("baseline endpoint failed: code=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if !nodesecurity.AllowedWhileLocked(http.MethodGet, Prefix+"/baseline") {
+		t.Fatal("baseline endpoint must remain safe-readable when locked")
 	}
 }
