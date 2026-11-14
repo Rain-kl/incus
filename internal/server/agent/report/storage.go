@@ -2,6 +2,7 @@ package report
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -219,6 +220,19 @@ func numericInt64(v any) (int64, bool) {
 			return 0, true
 		}
 		return int64(val), true
+	case json.Number:
+		if parsed, err := val.Int64(); err == nil {
+			if parsed < 0 {
+				return 0, true
+			}
+			return parsed, true
+		}
+		if parsed, err := val.Float64(); err == nil {
+			if parsed < 0 {
+				return 0, true
+			}
+			return int64(parsed), true
+		}
 	}
 	return 0, false
 }
