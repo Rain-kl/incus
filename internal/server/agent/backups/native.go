@@ -8,6 +8,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	incus "github.com/lxc/incus/v7/client"
@@ -118,10 +119,14 @@ func (n nativeSource) Import(ctx context.Context, reader io.Reader, name string,
 		return "", err
 	}
 	defer client.Disconnect()
+	resolvedPool, err := resolveImportPool(client, poolName)
+	if err != nil {
+		return "", err
+	}
 	op, err := client.CreateInstanceFromBackup(incus.InstanceBackupArgs{
 		BackupFile: reader,
 		Name:       name,
-		PoolName:   poolName,
+		PoolName:   resolvedPool,
 	})
 	if err != nil {
 		return "", err
@@ -174,4 +179,36 @@ func attachOperationProgress(ctx context.Context, op incus.Operation, prefix str
 			}
 		}
 	})
+}
+
+func resolveImportPool(client incus.InstanceServer, requested string) (string, error) {
+	poolNames, poolsErr := client.GetStoragePoolNames()
+	if requested != "" {
+		if poolsErr == nil && !slices.Contains(poolNames, requested) {
+			return "", fmt.Errorf("target storage pool %q does not exist", requested)
+		}
+		return requested, nil
+	}
+	profile, _, profErr := client.GetProfile("default")
+	if profErr == nil && !hasRootDiskDevice(profile.Devices) && poolsErr == nil {
+		if len(poolNames) == 0 {
+			return "", errors.New("no storage pool configured on target node")
+		}
+		if slices.Contains(poolNames, "default") {
+			return "default", nil
+		}
+		sorted := slices.Clone(poolNames)
+		slices.Sort(sorted)
+		return sorted[0], nil
+	}
+	return "", nil
+}
+
+func hasRootDiskDevice(devices map[string]map[string]string) bool {
+	for _, dev := range devices {
+		if dev["type"] == "disk" && dev["path"] == "/" {
+			return true
+		}
+	}
+	return false
 }

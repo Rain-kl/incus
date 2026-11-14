@@ -80,7 +80,7 @@ func TestNativeImportReportsOperationStage(t *testing.T) {
 		case r.URL.Path == "/1.0":
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"type":     "sync",
-				"metadata": map[string]any{"api_extensions": []string{"instances", "storage", "container_backup", "container_backup_override_pool"}, "environment": map[string]any{"server_name": "node-a"}},
+				"metadata": map[string]any{"api_extensions": []string{"instances", "storage", "container_backup", "container_backup_override_pool", "backup_override_name"}, "environment": map[string]any{"server_name": "node-a"}},
 			})
 		case r.URL.Path == "/1.0/instances" && r.Method == "POST":
 			w.Header().Set("Content-Type", "application/json")
@@ -95,6 +95,11 @@ func TestNativeImportReportsOperationStage(t *testing.T) {
 					"status_code": 200,
 					"resources":   map[string][]string{"instances": {"/1.0/instances/restored-vm"}},
 				},
+			})
+		case r.URL.Path == "/1.0/storage-pools" && r.Method == "GET":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"type":     "sync",
+				"metadata": []string{"/1.0/storage-pools/default"},
 			})
 		case r.URL.Path == "/1.0/operations/"+opID:
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -147,5 +152,67 @@ func TestNativeImportReportsOperationStage(t *testing.T) {
 	mu.Unlock()
 	if !strings.Contains(joined, "Importing: unpacking instance on host") {
 		t.Fatalf("expected unpacking progress stage, got %q", joined)
+	}
+}
+
+func TestNativeImportResolvesFallbackPoolAndFailsFastOnMissingPool(t *testing.T) {
+	opID := "22222222-2222-2222-2222-222222222222"
+	var seenPoolHeader string
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/1.0":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"type":     "sync",
+				"metadata": map[string]any{"api_extensions": []string{"instances", "storage", "container_backup", "container_backup_override_pool", "backup_override_name"}, "environment": map[string]any{"server_name": "node-a"}},
+			})
+		case r.URL.Path == "/1.0/storage-pools" && r.Method == "GET":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"type":     "sync",
+				"metadata": []string{"/1.0/storage-pools/nvme-pool"},
+			})
+		case r.URL.Path == "/1.0/profiles/default" && r.Method == "GET":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"type":     "sync",
+				"metadata": map[string]any{"name": "default", "devices": map[string]any{}},
+			})
+		case r.URL.Path == "/1.0/instances" && r.Method == "POST":
+			seenPoolHeader = r.Header.Get("X-Incus-pool")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"type":      "async",
+				"operation": "/1.0/operations/" + opID,
+				"metadata": map[string]any{
+					"id":          opID,
+					"class":       "task",
+					"status":      "Success",
+					"status_code": 200,
+					"resources":   map[string][]string{"instances": {"/1.0/instances/u3-ok"}},
+				},
+			})
+		default:
+			t.Errorf("unexpected endpoint %s %s", r.Method, r.URL.String())
+			http.Error(w, "unexpected", 500)
+		}
+	}))
+	defer server.Close()
+
+	source := nativeSource{connect: func(ctx context.Context) (incus.InstanceServer, error) {
+		return incus.ConnectIncusWithContext(ctx, server.URL, &incus.ConnectionArgs{InsecureSkipVerify: true, SkipGetEvents: true})
+	}}
+
+	if _, err := source.Import(context.Background(), strings.NewReader("archive"), "u3-ok", "missing-pool"); err == nil || !strings.Contains(err.Error(), "missing-pool") {
+		t.Fatalf("expected immediate missing pool error, got %v", err)
+	}
+	if seenPoolHeader != "" {
+		t.Fatalf("must not upload archive when target pool is missing, saw header %q", seenPoolHeader)
+	}
+
+	name, err := source.Import(context.Background(), strings.NewReader("archive"), "u3-ok", "")
+	if err != nil {
+		t.Fatalf("fallback import failed: %v", err)
+	}
+	if name != "u3-ok" || seenPoolHeader != "nvme-pool" {
+		t.Fatalf("expected fallback X-Incus-pool nvme-pool, got name=%q header=%q", name, seenPoolHeader)
 	}
 }
