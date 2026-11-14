@@ -13,7 +13,9 @@ import (
 	"reflect"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -50,6 +52,10 @@ func repairPath(kind string, object repairObject) string {
 		project = "default"
 	}
 	return "/1.0/" + kind + "/" + url.PathEscape(object.Name) + "?project=" + url.QueryEscape(project)
+}
+
+func isDetachedPanelNIC(device map[string]string) bool {
+	return device["type"] == "nic" && device["nictype"] == "p2p" && device["network"] == "" && device["parent"] == ""
 }
 
 func usesPanelBridge(device map[string]string) bool {
@@ -162,7 +168,7 @@ func (c *localClient) repairInventory(ctx context.Context) (*bridgeRepair, error
 				if device["type"] == "nic" || device["type"] == "none" {
 					hasNIC = true
 				}
-				if usesPanelBridge(device) {
+				if usesPanelBridge(device) || isDetachedPanelNIC(device) {
 					target.NICs[name] = repairedNIC(device)
 					if kind == "instances" && target.NICs[name]["hwaddr"] == "" && object.Config["volatile."+name+".hwaddr"] != "" {
 						target.NICs[name]["hwaddr"] = object.Config["volatile."+name+".hwaddr"]
@@ -413,13 +419,77 @@ func (b *backend) repairBridge(ctx context.Context) error {
 	return c.repairBridge(ctx, b.runner, "/var/lib/incus-tui/repairs")
 }
 
+func acquireRepairLock(backupRoot string) (*os.File, error) {
+	lockPath := filepath.Join(backupRoot, "bridge.lock")
+	lock, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if !errors.Is(err, os.ErrExist) {
+		return lock, err
+	}
+	content, readErr := os.ReadFile(lockPath)
+	if readErr == nil {
+		stale := true
+		for _, field := range strings.Fields(string(content)) {
+			if raw, ok := strings.CutPrefix(field, "pid="); ok {
+				if pid, convErr := strconv.Atoi(raw); convErr == nil && pid > 0 {
+					if proc, findErr := os.FindProcess(pid); findErr == nil {
+						sigErr := proc.Signal(syscall.Signal(0))
+						if sigErr == nil || errors.Is(sigErr, syscall.EPERM) {
+							stale = false
+						}
+					}
+				}
+			}
+		}
+		if stale && os.Remove(lockPath) == nil {
+			return os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		}
+	}
+	return nil, err
+}
+
+func cleanupStaleBridgeDnsmasq(ctx context.Context, runner Runner) bool {
+	if runner == nil {
+		return false
+	}
+	out, err := runner.Run(ctx, "ps", []string{"-eo", "pid=,comm=,args="}, "")
+	if err != nil {
+		return false
+	}
+	cleaned := false
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 3 || fields[1] != "dnsmasq" {
+			continue
+		}
+		args := strings.Join(fields[2:], " ")
+		if !strings.Contains(args, "--interface="+panelBridge) && !strings.Contains(args, "--interface "+panelBridge) {
+			continue
+		}
+		pid, convErr := strconv.Atoi(fields[0])
+		if convErr != nil || pid <= 0 || pid == os.Getpid() {
+			continue
+		}
+		logOperation(ctx, "网桥修复：检测到残留 %s dnsmasq 进程 (pid=%d)，尝试清理后重试", panelBridge, pid)
+		if _, killErr := runner.Run(ctx, "kill", []string{"-TERM", fields[0]}, ""); killErr == nil {
+			cleaned = true
+		}
+	}
+	if cleaned {
+		select {
+		case <-ctx.Done():
+		case <-time.After(300 * time.Millisecond):
+		}
+	}
+	return cleaned
+}
+
 // Incus: repair only the panel NAT bridge; preserve disks, profiles, valid IPs and stopped state.
 func (c *localClient) repairBridge(ctx context.Context, runner Runner, backupRoot string) (err error) {
 	err = os.MkdirAll(backupRoot, 0o700)
 	if err != nil {
 		return err
 	}
-	lock, err := os.OpenFile(filepath.Join(backupRoot, "bridge.lock"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	lock, err := acquireRepairLock(backupRoot)
 	if err != nil {
 		return fmt.Errorf("无法取得网桥修复锁；请检查其它修复进程或未完成操作：%w", err)
 	}
@@ -610,6 +680,9 @@ func (c *localClient) repairBridge(ctx context.Context, runner Runner, backupRoo
 		}
 	}
 	_, err = c.call(ctx, "POST", "/1.0/networks", map[string]any{"name": panelBridge, "type": "bridge", "config": config})
+	if err != nil && strings.Contains(err.Error(), "Address already in use") && cleanupStaleBridgeDnsmasq(ctx, runner) {
+		_, err = c.call(ctx, "POST", "/1.0/networks", map[string]any{"name": panelBridge, "type": "bridge", "config": config})
+	}
 	if err != nil {
 		return err
 	}

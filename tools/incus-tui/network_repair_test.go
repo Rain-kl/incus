@@ -378,6 +378,77 @@ func TestBridgeRepairUpdatesChangedIPReferencesAndPreservesInheritedNIC(t *testi
 	}
 }
 
+func TestBridgeRepairRecoversDetachedNICFromInterruptedRun(t *testing.T) {
+	f := newRepairFixture()
+	f.network = nil
+	def := f.profiles["/1.0/profiles/default?project=default"]
+	def.Devices["eth0"] = map[string]string{"type": "nic", "nictype": "p2p", "name": "eth0"}
+	c := apiFixture(t, f.handler(t))
+	if err := c.repairBridge(context.Background(), &fakeRunner{}, t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	if def.Devices["eth0"]["network"] != panelBridge || def.Devices["eth0"]["nictype"] != "" {
+		t.Fatalf("detached profile NIC was not rebound: %#v", def.Devices["eth0"])
+	}
+	if !compatiblePanelNetwork(f.network) {
+		t.Fatal("missing bridge was not recreated")
+	}
+}
+
+func TestBridgeRepairCleansStaleDnsmasqAndRetries(t *testing.T) {
+	f := newRepairFixture()
+	f.network = nil
+	base := f.handler(t)
+	postAttempts := 0
+	c := apiFixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/1.0/networks" {
+			postAttempts++
+			if postAttempts == 1 {
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte(`{"error":"The DNS and DHCP service exited prematurely: exit status 2 (\"dnsmasq: failed to create listening socket for 10.10.0.1: Address already in use\")","error_code":500,"type":"error"}`))
+				return
+			}
+		}
+		base.ServeHTTP(w, r)
+	}))
+	var killed []string
+	runner := &fakeRunner{reply: func(call call) ([]byte, error) {
+		if call.name == "ps" {
+			return []byte("27206 dnsmasq dnsmasq --interface=lxcbr0 --listen-address 10.0.3.1\n1230295 dnsmasq dnsmasq --interface=incusbr0 --listen-address=10.10.0.1\n"), nil
+		}
+		if call.name == "kill" {
+			killed = append(killed, strings.Join(call.args, " "))
+			return nil, nil
+		}
+		return nil, fmt.Errorf("unexpected command: %s %v", call.name, call.args)
+	}}
+	if err := c.repairBridge(context.Background(), runner, t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	if postAttempts != 2 || !slices.Equal(killed, []string{"-TERM 1230295"}) || !compatiblePanelNetwork(f.network) {
+		t.Fatalf("stale dnsmasq cleanup/retry failed: attempts=%d killed=%v", postAttempts, killed)
+	}
+}
+
+func TestBridgeRepairClearsStaleLockFile(t *testing.T) {
+	dir := t.TempDir()
+	lockPath := filepath.Join(dir, "bridge.lock")
+	if err := os.WriteFile(lockPath, []byte("pid=999999999 started=2026-11-14T00:00:00Z\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f := newRepairFixture()
+	c := apiFixture(t, f.handler(t))
+	if err := c.repairBridge(context.Background(), &fakeRunner{}, dir); err != nil {
+		t.Fatalf("stale lock blocked repair: %v", err)
+	}
+	if err := os.WriteFile(lockPath, []byte(fmt.Sprintf("pid=%d started=2026-11-14T00:00:00Z\n", os.Getpid())), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.repairBridge(context.Background(), &fakeRunner{}, dir); err == nil || !strings.Contains(err.Error(), "无法取得网桥修复锁") {
+		t.Fatalf("active lock was bypassed: %v", err)
+	}
+}
+
 func TestBridgeRepairAddressExhaustionDoesNotMutateNode(t *testing.T) {
 	f := newRepairFixture()
 	f.instances = map[string]*repairObject{}
