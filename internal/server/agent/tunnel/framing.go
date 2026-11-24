@@ -2,6 +2,7 @@ package tunnel
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 )
@@ -19,10 +20,19 @@ const (
 	FrameTypeHeartbeat    byte = 0x0b
 	FrameTypeTaskLogCtl   byte = 0x0c
 	FrameTypeTaskLogData  byte = 0x0d
+	FrameTypeRPCRequest   byte = 0x0e // 通用 RPC 请求（Agent -> Server），StreamID = 请求 ID
+	FrameTypeRPCResponse  byte = 0x0f // 通用 RPC 响应（Server -> Agent），StreamID = 对应请求 ID
 )
 
 // HeaderLength is the byte size of the multiplexed frame header.
 const HeaderLength = 5
+
+// RPC protocol constants define size limits and capability negotiation tokens.
+const (
+	MaxRPCPayloadBytes = 900 * 1024
+	RPCProtocolVersion = 1
+	RPCCapability      = "tunnel-rpc-v1"
+)
 
 // TargetConfig identifies the local reverse-tunnel destination.
 type TargetConfig struct {
@@ -30,8 +40,39 @@ type TargetConfig struct {
 	TargetPort int    `json:"targetPort"`
 }
 
-// ErrFrameTooShort indicates a frame missing its mandatory header.
-var ErrFrameTooShort = errors.New("frame too short")
+// ControlHelloPayload carries capability and method negotiation metadata on CONTROL_HELLO frames.
+type ControlHelloPayload struct {
+	Capabilities []string `json:"capabilities"`
+	RPCMethods   []string `json:"rpcMethods,omitempty"`
+}
+
+// RPCRequestEnvelope represents a versioned RPC call carried inside FrameTypeRPCRequest.
+type RPCRequestEnvelope struct {
+	V       int               `json:"v"`
+	Method  string            `json:"method"`
+	Params  any               `json:"params,omitempty"`
+	Headers map[string]string `json:"headers,omitempty"`
+}
+
+// RPCResponseEnvelope represents a versioned RPC reply carried inside FrameTypeRPCResponse.
+type RPCResponseEnvelope struct {
+	V      int             `json:"v"`
+	OK     bool            `json:"ok"`
+	Status int             `json:"status"`
+	Code   string          `json:"code,omitempty"`
+	Error  string          `json:"error,omitempty"`
+	Data   json.RawMessage `json:"data,omitempty"`
+}
+
+// Sentinel errors classify tunnel RPC failures for transparent transport fallback.
+var (
+	ErrFrameTooShort      = errors.New("frame too short")
+	ErrTunnelNotReady     = errors.New("tunnel is not ready")
+	ErrRPCUnsupported     = errors.New("tunnel rpc method unsupported")
+	ErrTunnelClosed       = errors.New("tunnel connection closed")
+	ErrPayloadTooLarge    = errors.New("rpc payload exceeds frame limit")
+	ErrInvalidRPCResponse = errors.New("invalid rpc response")
+)
 
 // EncodeFrame 编码 5 字节头部与 Payload.
 func EncodeFrame(frameType byte, streamID uint32, payload []byte) []byte {

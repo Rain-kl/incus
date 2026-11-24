@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -19,24 +20,35 @@ import (
 
 const heartbeatPath = "/api/agent/heartbeat"
 
+var heartbeatEndpointSpec = EndpointSpec{
+	RPCMethod:  "agent.heartbeat",
+	HTTPMethod: http.MethodPost,
+	HTTPPath:   heartbeatPath,
+	WSTimeout:  defaultWSTimeout,
+}
+
 // Client provides authenticated access to its peer API.
 type Client struct {
 	panelURL           string
 	agentID            string
 	agentSecret        string
 	httpClient         *http.Client
+	mu                 sync.RWMutex
+	tunnelTransport    RPCCaller
 	recoveryBlocked    atomic.Bool
 	recoveryGeneration atomic.Uint64
 }
 
 // HeartbeatResult contains panel connection instructions and response timing.
 type HeartbeatResult struct {
-	StatusCode int
-	Body       string
-	OK         bool
-	Tunnel     *TunnelInstruction
-	Caddy      *CaddyInstruction
-	LatencyMs  int64
+	StatusCode     int
+	Body           string
+	OK             bool
+	Tunnel         *TunnelInstruction
+	Caddy          *CaddyInstruction
+	LatencyMs      int64
+	Transport      string
+	FallbackReason string
 }
 
 // CaddyInstruction requests a fixed Caddy lifecycle action.
@@ -93,81 +105,36 @@ func (client *Client) resetConnections() {
 	client.httpClient.CloseIdleConnections()
 }
 
-// Heartbeat sends a signed report and reads panel instructions.
+// Heartbeat sends a signed report via tunnel RPC when available, falling back to HTTP.
 func (client *Client) Heartbeat(ctx context.Context, payload map[string]any) (HeartbeatResult, error) {
-	body, err := protocol.CanonicalJSON(payload)
-	if err != nil {
-		return HeartbeatResult{}, err
-	}
-
-	timestamp := protocol.NewTimestamp()
-	nonce, err := protocol.NewNonce()
-	if err != nil {
-		return HeartbeatResult{}, err
-	}
-
-	bodyHash := protocol.BodySHA256(body)
-	signingPayload := protocol.SigningPayload(http.MethodPost, heartbeatPath, timestamp, nonce, bodyHash)
-	signature := protocol.Signature(client.agentSecret, signingPayload)
-
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, client.panelURL+heartbeatPath, bytes.NewReader(body))
-	if err != nil {
-		return HeartbeatResult{}, err
-	}
-
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("x-incus-agent-id", client.agentID)
-	request.Header.Set("x-incus-timestamp", timestamp)
-	request.Header.Set("x-incus-nonce", nonce)
-	request.Header.Set("x-incus-body-sha256", bodyHash)
-	request.Header.Set("x-incus-signature", signature)
-
-	startedAt := time.Now()
-	response, err := client.httpClient.Do(request)
-	if err != nil {
-		client.resetConnections()
-		return HeartbeatResult{}, err
-	}
-
-	defer response.Body.Close()
-
-	responseBody, err := io.ReadAll(io.LimitReader(response.Body, 1024*1024))
-	if err != nil {
-		client.resetConnections()
-		return HeartbeatResult{}, err
-	}
-
+	res, err := client.CallEndpoint(ctx, heartbeatEndpointSpec, payload)
 	result := HeartbeatResult{
-		StatusCode: response.StatusCode,
-		Body:       string(responseBody),
-		OK:         response.StatusCode >= 200 && response.StatusCode < 300,
-		LatencyMs:  time.Since(startedAt).Milliseconds(),
+		StatusCode:     res.StatusCode,
+		Body:           res.Body,
+		OK:             res.OK,
+		LatencyMs:      res.LatencyMs,
+		Transport:      res.Transport,
+		FallbackReason: res.FallbackReason,
+	}
+	if err != nil {
+		return result, err
 	}
 
-	if !result.OK {
-		return result, fmt.Errorf("heartbeat failed: status=%d body=%s", response.StatusCode, result.Body)
-	}
-
+	rawBytes := []byte(result.Body)
 	var parsedResponse heartbeatResponse
-	{
-		err := json.Unmarshal(responseBody, &parsedResponse)
-		if err == nil {
-			result.Tunnel = parsedResponse.Tunnel
-			result.Caddy = parsedResponse.Caddy
-		}
+	parseErr := json.Unmarshal(rawBytes, &parsedResponse)
+	if parseErr == nil {
+		result.Tunnel = parsedResponse.Tunnel
+		result.Caddy = parsedResponse.Caddy
 	}
 
 	var parsed map[string]any
-	{
-		err := json.Unmarshal(responseBody, &parsed)
-		if err == nil {
-			parsed["latencyMs"] = result.LatencyMs
-			{
-				compact, err := json.Marshal(parsed)
-				if err == nil {
-					result.Body = string(compact)
-				}
-			}
+	mapErr := json.Unmarshal(rawBytes, &parsed)
+	if mapErr == nil {
+		parsed["latencyMs"] = result.LatencyMs
+		compact, marshalErr := json.Marshal(parsed)
+		if marshalErr == nil {
+			result.Body = string(compact)
 		}
 	}
 

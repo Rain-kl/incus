@@ -11,7 +11,23 @@
 | 官方发布时间 | 2026-10-16 |
 | 核对日期 | 2026-11-11 |
 
-上游始终以正式 LTS 版本为准，仅同步 LTS 维护版本及经过兼容性验证的新 LTS 系列。普通功能版、开发分支及未发版提交均不纳入基线或同步目标。定制提交建立在记录的 LTS 基线上。
+上流始终以正式 LTS 版本为准，仅同步 LTS 维护版本及经过兼容性验证的新 LTS 系列。普通功能版、开发分支及未发版提交均不纳入基线或同步目标。定制提交建立在记录的 LTS 基线上。
+
+## 反向 WebSocket 隧道通用 RPC 框架与心跳自动升级（2026-11-24）
+
+- 目的：
+  1. 在节点已建立且通过 HMAC 鉴权的反向 WebSocket 隧道上提供可扩展的通用请求-响应 RPC 帧协议，使心跳与未来新增的节点上报/控制请求无需每次都走外网 HTTP 短连接与重复签名建连。
+  2. 将 `incus-agent` 周期及确认心跳自动升级至反向 WebSocket 隧道承载，仅在隧道未建立、服务端不支持或异常中断/超时时透明降级为 HTTP 签名心跳，确保零丢包与旧版主控/旧版节点双向兼容。
+- 行为与限制：
+  1. 帧协议与能力协商：`internal/server/agent/tunnel/framing.go` 新增 `FrameTypeRPCRequest = 0x0e` 与 `FrameTypeRPCResponse = 0x0f`（沿用 5 字节帧头 `Type + 4B StreamID + Payload`，与 TCP 字节中继流及已废弃旧 RPC 帧完全隔离）。连接建立后通过双向 `FrameTypeControlHello (0x0a)` 协商 `tunnel-rpc-v1` 能力及服务端已注册的 `rpcMethods` 列表（当前包含 `agent.heartbeat`）；Agent 端仅对双方共同声明的 `rpcMethods` 启用隧道 RPC，旧版主控发送空 `CONTROL_HELLO` 时保持禁用并走 HTTP。
+  2. 通用可扩展传输抽象：`internal/server/agent/tunnel/rpc.go` 实现带 `StreamID` 关联的多路复用并发 `CallRPC` 与 `SupportsRPCMethod`（单帧请求上限 `MaxRPCPayloadBytes = 900 KiB`，连接关闭即时唤醒挂起请求返回 `ErrTunnelClosed`）；`internal/server/agent/panel/transport.go` 定义 `RPCCaller`、`EndpointSpec` 与 `Client.CallEndpoint`，未来新端点只需声明 `EndpointSpec{RPCMethod, HTTPMethod, HTTPPath, WSTimeout}` 即可自动复用“WS RPC 优先 + 签名 HTTP Fallback”调度。
+  3. 自动升级与降级边界：`Client.Heartbeat` 与 `connector/main.go` 默认绑定反向隧道传输。首次心跳（隧道未连）走 HTTP 并拉起隧道，协商成功后后续心跳自动升级至 WS；遇到隧道离线、服务端未声明方法、本地/远端超限（413）、`404 RPC_METHOD_NOT_FOUND` / `501`、断链或 WS 单次 20 秒超时（超时自动触发 `worker.Probe()` 探测半开连接）时立即在同一次调用内回退 HTTP。服务端返回的权威业务响应（如 `2xx`、`400`、`401`、`409`）直接结束调用而不重复 HTTP；仅在传输模式切换时输出简洁状态日志。
+  4. 保持中性 `incus` 命名与原有 `/1.0/agent/*` 本地 Unix socket 契约，不涉及上游 Incus 源码改动。
+- 配置与兼容性：无新增控制端配置项、环境变量或数据库变更；单帧载荷超过 `MaxRPCPayloadBytes` 自动跳过 WS 回退 HTTP，防止触发服务端 1 MiB WebSocket `maxPayload` 断链（1009）。
+- 代码接入点与上游 API：`internal/server/agent/tunnel/{framing.go,rpc.go,tunnel.go,control_test.go}`、`internal/server/agent/panel/{transport.go,client.go,transport_test.go}`、`internal/server/agent/connector/{main.go,main_test.go}`；不修改上游 Incus 核心 API 或文件。
+- 测试位置与验证结果：
+  1. `internal/server/agent/{tunnel,panel,connector}`：`TMPDIR=/tmp go test -race -count=1 -v ./internal/server/agent/tunnel/... ./internal/server/agent/panel/... ./internal/server/agent/connector/...` 全部通过（含 `TestTunnelRPCNegotiationAndConcurrency`、`TestHeartbeatPrefersWSTunnelWhenNegotiated`、`TestHeartbeatFallbacksToHTTP`、`TestHeartbeatAuthoritativeWSErrorDoesNotRetryHTTP`、`TestCallEndpointSupportsCustomEndpoints`、`TestConnectorHeartbeatUpgradesToWSTunnelAndFallsBack`）。
+  2. `GOOS=linux go vet ./internal/server/agent/... ./cmd/incus-node-agent/...`、`GOOS=linux GOARCH=amd64 go build ./cmd/incus-node-agent`、`go build ./cmd/incus-node-agent` 与 `gofmt -l` 均无异常；控制端 TS/Go 对应测试与构建在主仓库完成验证。
 
 ## 跨宿主机实例导入自动清理不兼容宿主 GPU 设备（2026-11-14）
 

@@ -45,6 +45,8 @@ type Worker struct {
 	connected   atomic.Bool
 	reconnectCh chan struct{}
 	probeCh     chan struct{}
+	sessionMu   sync.Mutex
+	session     *rpcSession
 }
 
 // NewWorker creates a reverse connector with bounded reconnect backoff.
@@ -312,6 +314,13 @@ func (w *Worker) connectAndServe(ctx context.Context) error {
 	writeChan := make(chan []byte, 128)
 	writeErrChan := make(chan error, 1)
 
+	sess := newRPCSession(connCtx, writeChan)
+	w.setSession(sess)
+	defer func() {
+		w.clearSession(sess)
+		sess.close()
+	}()
+
 	taskStreams := make(map[int]context.CancelFunc)
 	defer func() {
 		for _, cancel := range taskStreams {
@@ -431,12 +440,21 @@ func (w *Worker) connectAndServe(ctx context.Context) error {
 			}
 		case FrameTypeControlHello:
 			if streamID == 0 && len(payload) <= 4096 {
+				if len(payload) > 0 {
+					var hello ControlHelloPayload
+					err := json.Unmarshal(payload, &hello)
+					if err == nil {
+						sess.setServerHello(hello)
+					}
+				}
 				select {
-				case writeChan <- EncodeFrame(FrameTypeControlHello, 0, []byte(`{"capabilities":["incus_node_v1","heartbeat-trigger-v1","heartbeat-confirm-v1"]}`)):
+				case writeChan <- EncodeFrame(FrameTypeControlHello, 0, []byte(`{"capabilities":["incus_node_v1","heartbeat-trigger-v1","heartbeat-confirm-v1","tunnel-rpc-v1"]}`)):
 				case <-connCtx.Done():
 					return connCtx.Err()
 				}
 			}
+		case FrameTypeRPCResponse:
+			sess.handleResponse(streamID, payload)
 		case FrameTypeOpen:
 			var openCfg TargetConfig
 			if len(payload) > 0 {

@@ -51,17 +51,27 @@ func Run(ctx context.Context, cfg config.Config, socket string, once bool) error
 		default:
 		}
 	}})
+	remote.SetTunnelTransport(worker)
 	defer worker.SyncConfig(false, "", 0)
 	go securityReports(ctx, local, remote)
 	go startupRecovery(ctx, local, remote)
 	var caddyPending atomic.Bool
 	var hadHeartbeatFailure bool
+	var lastTransport string
 	tick := time.NewTicker(cfg.HeartbeatInterval)
 	defer tick.Stop()
 	requestID := ""
 	for {
-		err := heartbeat(ctx, local, remote, cfg, worker, &caddyPending, requestID)
+		result, err := heartbeatRoundTrip(ctx, local, remote, cfg, worker, &caddyPending, requestID)
 		requestID = ""
+		if result.Transport != "" && result.Transport != lastTransport {
+			if result.Transport == panel.TransportWS {
+				log.Printf("heartbeat transport upgraded to %s", result.Transport)
+			} else if lastTransport == panel.TransportWS {
+				log.Printf("heartbeat transport fell back to %s (%s)", result.Transport, result.FallbackReason)
+			}
+			lastTransport = result.Transport
+		}
 		if err != nil {
 			hadHeartbeatFailure = true
 			log.Printf("heartbeat: %v", err)
@@ -91,6 +101,11 @@ func Run(ctx context.Context, cfg config.Config, socket string, once bool) error
 }
 
 func heartbeat(ctx context.Context, local *nodeclient.Client, remote *panel.Client, cfg config.Config, worker *tunnel.Worker, caddyPending *atomic.Bool, requestID string) error {
+	_, err := heartbeatRoundTrip(ctx, local, remote, cfg, worker, caddyPending, requestID)
+	return err
+}
+
+func heartbeatRoundTrip(ctx context.Context, local *nodeclient.Client, remote *panel.Client, cfg config.Config, worker *tunnel.Worker, caddyPending *atomic.Bool, requestID string) (panel.HeartbeatResult, error) {
 	requestCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 	var payload map[string]any
@@ -125,7 +140,7 @@ func heartbeat(ctx context.Context, local *nodeclient.Client, remote *panel.Clie
 	payload["capabilities"] = append(capabilities, "network-control", "incus_node_v1")
 	result, err := remote.Heartbeat(requestCtx, payload)
 	if err != nil {
-		return err
+		return result, err
 	}
 
 	if result.Tunnel != nil {
@@ -145,7 +160,7 @@ func heartbeat(ctx context.Context, local *nodeclient.Client, remote *panel.Clie
 		}()
 	}
 
-	return localErr
+	return result, localErr
 }
 
 // securityReports uses a separate bounded cadence so alarms are not delayed by resource collection.
