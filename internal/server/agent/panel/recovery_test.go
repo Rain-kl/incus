@@ -9,11 +9,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/lxc/incus/v7/internal/server/agent/config"
 	"github.com/lxc/incus/v7/internal/server/agent/protocol"
+	"github.com/lxc/incus/v7/internal/server/agent/tunnel"
 )
 
 func sealRecoveryJSON(t *testing.T, secret, agent, direction string, value any) RecoveryEnvelope {
@@ -167,5 +169,77 @@ func TestStartupKeysRejectsGrantForDifferentNonce(t *testing.T) {
 	_, err := client.StartupKeys(context.Background())
 	if err == nil {
 		t.Fatal("accepted response not bound to its request nonce")
+	}
+}
+
+func TestStartupKeysUpgradesToWSTunnelAndFallsBackToHTTP(t *testing.T) {
+	const secret = "fixture-ws-startup-secret"
+	var httpCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		httpCalls.Add(1)
+		body, _ := io.ReadAll(r.Body)
+		var request RecoveryEnvelope
+		_ = json.Unmarshal(body, &request)
+		plain, err := OpenRecovery(secret, "agent-ws-startup", "request", request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var proof struct {
+			Nonce string `json:"nonce"`
+		}
+		_ = json.Unmarshal(plain, &proof)
+		resp := sealRecoveryJSON(t, secret, "agent-ws-startup", "response", map[string]any{
+			"nonce": proof.Nonce, "locked": false, "generation": 8,
+			"keys": []map[string]string{{"dataset": "tank/http", "key": strings.Repeat("cd", 32)}},
+		})
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	client := New(config.Config{PanelURL: server.URL, AgentID: "agent-ws-startup", AgentSecret: secret, RequestTimeout: time.Second})
+	caller := &mockRPCCaller{
+		methods: map[string]bool{"agent.startup.keys": true},
+		call: func(_ context.Context, method string, params any) (tunnel.RPCResponseEnvelope, error) {
+			if method != "agent.startup.keys" {
+				t.Fatalf("unexpected rpc method: %s", method)
+			}
+			env, ok := params.(RecoveryEnvelope)
+			if !ok {
+				t.Fatalf("unexpected params type: %T", params)
+			}
+			plain, err := OpenRecovery(secret, "agent-ws-startup", "request", env)
+			if err != nil {
+				t.Fatalf("open request envelope: %v", err)
+			}
+			var proof struct {
+				Nonce string `json:"nonce"`
+			}
+			_ = json.Unmarshal(plain, &proof)
+			resp := sealRecoveryJSON(t, secret, "agent-ws-startup", "response", map[string]any{
+				"nonce": proof.Nonce, "locked": false, "generation": 7,
+				"keys": []map[string]string{{"dataset": "tank/ws", "key": strings.Repeat("ab", 32)}},
+			})
+			raw, _ := json.Marshal(resp)
+			return tunnel.RPCResponseEnvelope{V: tunnel.RPCProtocolVersion, OK: true, Status: http.StatusOK, Data: raw}, nil
+		},
+	}
+	client.SetTunnelTransport(caller)
+
+	grant, err := client.StartupKeys(context.Background())
+	if err != nil || grant.Generation != 7 || len(grant.Keys) != 1 || grant.Keys[0].Dataset != "tank/ws" {
+		t.Fatalf("expected WS StartupKeys grant, grant=%+v err=%v", grant, err)
+	}
+	if httpCalls.Load() != 0 {
+		t.Fatalf("expected 0 HTTP calls when WS succeeded, got %d", httpCalls.Load())
+	}
+
+	// Disable method -> seamless fallback to signed HTTP
+	caller.methods["agent.startup.keys"] = false
+	grant, err = client.StartupKeys(context.Background())
+	if err != nil || grant.Generation != 8 || len(grant.Keys) != 1 || grant.Keys[0].Dataset != "tank/http" {
+		t.Fatalf("expected HTTP fallback StartupKeys grant, grant=%+v err=%v", grant, err)
+	}
+	if httpCalls.Load() != 1 {
+		t.Fatalf("expected 1 HTTP call on fallback, got %d", httpCalls.Load())
 	}
 }

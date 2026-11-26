@@ -137,7 +137,7 @@ func heartbeatRoundTrip(ctx context.Context, local *nodeclient.Client, remote *p
 	if !ok {
 		capabilities = nil
 	}
-	payload["capabilities"] = append(capabilities, "network-control", "incus_node_v1")
+	payload["capabilities"] = append(capabilities, "network-control", "incus_node_v1", tunnel.RPCCapability)
 	result, err := remote.Heartbeat(requestCtx, payload)
 	if err != nil {
 		return result, err

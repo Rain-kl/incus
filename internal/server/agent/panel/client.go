@@ -1,21 +1,16 @@
 package panel
 
 import (
-	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net"
+	"log"
 	"net/http"
-	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/lxc/incus/v7/internal/server/agent/comm"
 	"github.com/lxc/incus/v7/internal/server/agent/config"
-	"github.com/lxc/incus/v7/internal/server/agent/protocol"
 )
 
 const heartbeatPath = "/api/agent/heartbeat"
@@ -27,14 +22,19 @@ var heartbeatEndpointSpec = EndpointSpec{
 	WSTimeout:  defaultWSTimeout,
 }
 
-// Client provides authenticated access to its peer API.
+var securityReportEndpointSpec = EndpointSpec{
+	RPCMethod:        "agent.security.report",
+	HTTPMethod:       http.MethodPost,
+	HTTPPath:         "/api/agent/security-report",
+	WSTimeout:        10 * time.Second,
+	MaxResponseBytes: 32768,
+}
+
+// Client provides authenticated access to its peer API via the unified comm layer.
 type Client struct {
-	panelURL           string
+	comm               *comm.Client
 	agentID            string
 	agentSecret        string
-	httpClient         *http.Client
-	mu                 sync.RWMutex
-	tunnelTransport    RPCCaller
 	recoveryBlocked    atomic.Bool
 	recoveryGeneration atomic.Uint64
 }
@@ -71,38 +71,26 @@ type heartbeatResponse struct {
 
 // New creates an API client using the supplied connection configuration.
 func New(cfg config.Config) *Client {
-	dialer := &net.Dialer{
-		Timeout:   8 * time.Second,
-		KeepAlive: 15 * time.Second,
-	}
-	transport := &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
-		DialContext:           dialer.DialContext,
-		ForceAttemptHTTP2:     false,
-		TLSNextProto:          make(map[string]func(string, *tls.Conn) http.RoundTripper),
-		MaxIdleConns:          10,
-		IdleConnTimeout:       20 * time.Second,
-		TLSHandshakeTimeout:   8 * time.Second,
-		ResponseHeaderTimeout: 10 * time.Second,
-		ExpectContinueTimeout: time.Second,
-	}
-
 	return &Client{
-		panelURL:    strings.TrimRight(cfg.PanelURL, "/"),
+		comm: comm.New(comm.Config{
+			BaseURL:        cfg.PanelURL,
+			AgentID:        cfg.AgentID,
+			AgentSecret:    cfg.AgentSecret,
+			RequestTimeout: cfg.RequestTimeout,
+			OnTransportChange: func(endpoint, from, to, reason string) {
+				if endpoint == heartbeatEndpointSpec.RPCMethod {
+					return
+				}
+				if to == comm.TransportWS {
+					log.Printf("%s transport upgraded to %s", endpoint, to)
+				} else if from == comm.TransportWS {
+					log.Printf("%s transport fell back to %s (%s)", endpoint, to, reason)
+				}
+			},
+		}),
 		agentID:     cfg.AgentID,
 		agentSecret: cfg.AgentSecret,
-		httpClient: &http.Client{
-			Timeout:   cfg.RequestTimeout,
-			Transport: transport,
-		},
 	}
-}
-
-func (client *Client) resetConnections() {
-	if client == nil || client.httpClient == nil {
-		return
-	}
-	client.httpClient.CloseIdleConnections()
 }
 
 // Heartbeat sends a signed report via tunnel RPC when available, falling back to HTTP.
@@ -141,45 +129,22 @@ func (client *Client) Heartbeat(ctx context.Context, payload map[string]any) (He
 	return result, nil
 }
 
-// SecurityReport authenticates event batches and accepts only explicit durable-delivery acknowledgements.
+// SecurityReport authenticates event batches via WS tunnel RPC when negotiated with signed HTTP fallback.
 func (client *Client) SecurityReport(ctx context.Context, payload map[string]any) ([]string, error) {
-	const path = "/api/agent/security-report"
-	body, err := protocol.CanonicalJSON(payload)
+	res, err := client.CallEndpoint(ctx, securityReportEndpointSpec, payload)
 	if err != nil {
-		return nil, err
-	}
-	timestamp := protocol.NewTimestamp()
-	nonce, err := protocol.NewNonce()
-	if err != nil {
-		return nil, err
-	}
-	hash := protocol.BodySHA256(body)
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, client.panelURL+path, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("x-incus-agent-id", client.agentID)
-	request.Header.Set("x-incus-timestamp", timestamp)
-	request.Header.Set("x-incus-nonce", nonce)
-	request.Header.Set("x-incus-body-sha256", hash)
-	request.Header.Set("x-incus-signature", protocol.Signature(client.agentSecret, protocol.SigningPayload("POST", path, timestamp, nonce, hash)))
-	response, err := client.httpClient.Do(request)
-	if err != nil {
-		client.resetConnections()
+		if res.StatusCode > 0 {
+			return nil, fmt.Errorf("report status %d", res.StatusCode)
+		}
 		return nil, fmt.Errorf("report transport failed")
 	}
-	defer response.Body.Close()
-	if response.StatusCode != 200 {
-		return nil, fmt.Errorf("report status %d", response.StatusCode)
-	}
+
 	var result struct {
 		Ack                []string `json:"ack"`
 		RecoveryBlocked    bool     `json:"recoveryBlocked"`
 		RecoveryGeneration uint64   `json:"recoveryGeneration"`
 	}
-	err = json.NewDecoder(io.LimitReader(response.Body, 32768)).Decode(&result)
-	if err != nil || result.Ack == nil || len(result.Ack) > 128 {
+	if json.Unmarshal([]byte(res.Body), &result) != nil || result.Ack == nil || len(result.Ack) > 128 {
 		return nil, fmt.Errorf("invalid acknowledgement")
 	}
 	client.recoveryGeneration.Store(result.RecoveryGeneration)

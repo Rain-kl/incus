@@ -13,6 +13,22 @@
 
 上流始终以正式 LTS 版本为准，仅同步 LTS 维护版本及经过兼容性验证的新 LTS 系列。普通功能版、开发分支及未发版提交均不纳入基线或同步目标。定制提交建立在记录的 LTS 基线上。
 
+## 统一 Agent 通信模块抽象、全端点自动升级与防绕过守卫（2026-11-26）
+
+- 目的：
+  1. 在节点侧抽象出独立通信模块 `internal/server/agent/comm/`，将 WS 隧道 RPC 与签名 HTTP Fallback 统一封装在单一传输调度器中，彻底移除 `panel` 业务层对 `*http.Client` 与 HMAC 签名的直接依赖。
+  2. 将此前仍硬编码走独立 HTTP 的安全事件上报（`agent.security.report` ↔ `/api/agent/security-report`）与启动密钥恢复（`agent.startup.keys` ↔ `/api/agent/startup-keys`）全部接入统一通信层，确保节点通过首次 HTTP 心跳建立反向 WS 隧道后，全部受签权端点均自动升级走 WS 复用隧道、断链或未协商时无缝回退 HTTP。
+  3. 增加防绕过静态守卫与能力声明（`tunnel-rpc-v1`），防止后续新增通信接口继续手写 HTTP 调用而不走 WS 自动升级；底层继续合并复用现有反向 WebSocket 隧道（帧空间与直连/穿透语义保持完全隔离）。
+- 行为与限制：
+  1. 独立通信模块：`internal/server/agent/comm/{endpoint.go,http.go,client.go}` 封装隔离 HTTP/1.1 Transport、HMAC-SHA256 自动签名、WS 优先调度与传输模式切换回调（`OnTransportChange`）；`Call` 强制要求每个 `Endpoint` 必须同时声明 `RPCMethod` 与 `HTTPPath`，遇到隧道不可用、方法未协商、超限（413）、`404 RPC_METHOD_NOT_FOUND` / `501`、断链或 WS 单次超时（自动触发 `Probe()`）时单次调用内降级 HTTP；权威业务响应（`2xx`/`400`/`401`/`403`/`409`/`500`/`503`）绝不重复重试 HTTP。
+  2. 全端点接入与能力声明：`panel/client.go`、`panel/recovery.go` 与 `panel/transport.go` 全部委托给 `comm.Client`，`SecurityReport` 使用 `agent.security.report`（10s WS 超时、32 KiB 响应上限），`StartupKeys` 使用 `agent.startup.keys`（继续保留 AES-256-GCM 域分离信封与明文 `clear()` 清零）；`connector/main.go` 心跳默认声明 `tunnel.RPCCapability`（`tunnel-rpc-v1`）。
+  3. 保持中性 `incus` 命名与原有 `/1.0/agent/*` 本地 Unix socket 契约，不涉及上游 Incus 源码改动。
+- 配置与兼容性：无新增节点配置项或控制端环境变量；兼容旧版主控（`CONTROL_HELLO` 未声明 `agent.security.report` / `agent.startup.keys` 时自动回退 HTTP）。
+- 代码接入点与上游 API：`internal/server/agent/comm/{endpoint.go,http.go,client.go,client_test.go}`、`internal/server/agent/panel/{transport.go,client.go,recovery.go,guard_test.go,client_test.go,recovery_test.go}`、`internal/server/agent/connector/{main.go,main_test.go}`；不修改上游 Incus 核心 API 或文件。
+- 测试位置与验证结果：
+  1. `internal/server/agent/{comm,panel,tunnel,connector}`：`TMPDIR=/tmp go test -race -count=1 ./internal/server/agent/comm/... ./internal/server/agent/panel/... ./internal/server/agent/tunnel/... ./internal/server/agent/connector/...` 全部通过（含 `comm/client_test.go`、`panel/guard_test.go` AST 防绕过守卫、`SecurityReport`/`StartupKeys` WS 升级与回退单测及 `connector` 全端点端到端升级测试）。
+  2. `GOOS=linux go vet ./internal/server/agent/... ./cmd/incus-node-agent/...` 与 `GOOS=linux GOARCH=amd64 go build -o /dev/null ./cmd/incus-node-agent` 通过；控制端 TS/Go 对应 `agent-comm` / `agent_comm` 抽象与路由一致性守卫在主仓库完成验证。
+
 ## 反向 WebSocket 隧道通用 RPC 框架与心跳自动升级（2026-11-24）
 
 - 目的：

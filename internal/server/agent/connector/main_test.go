@@ -259,3 +259,194 @@ func TestConnectorHeartbeatUpgradesToWSTunnelAndFallsBack(t *testing.T) {
 		t.Fatalf("step 3 expected HTTP fallback, res=%+v err=%v httpCount=%d", res, err, httpHeartbeats.Load())
 	}
 }
+
+func TestConnectorAllPanelEndpointsUpgradeToWSAndFallback(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), "incus.socket")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	localServer := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		value := map[string]any{"api_extensions": []string{"incus_node_v1"}}
+		if r.URL.Path == "/1.0/agent/report" {
+			value = map[string]any{
+				"incus":     map[string]any{"available": true},
+				"instances": map[string]any{"available": true, "items": []any{}},
+			}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"type": "sync", "metadata": value})
+	})}
+	go func() { _ = localServer.Serve(listener) }()
+	defer localServer.Close()
+
+	const secret = "e2e-all-secret"
+	const agentID = "e2e-all-agent"
+	var httpSecurityCalls, wsSecurityCalls atomic.Int32
+	var httpStartupCalls, wsStartupCalls atomic.Int32
+	var allowWSUpgrade atomic.Bool
+	allowWSUpgrade.Store(true)
+	wsConns := make(chan *websocket.Conn, 2)
+
+	control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/agent/heartbeat":
+			_, _ = w.Write([]byte(`{"ok":true,"tunnel":{"enabled":true,"targetHost":"127.0.0.1","targetPort":8443}}`))
+		case "/api/agent/security-report":
+			httpSecurityCalls.Add(1)
+			_, _ = w.Write([]byte(`{"ack":["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],"recoveryBlocked":false,"recoveryGeneration":2}`))
+		case "/api/agent/startup-keys":
+			httpStartupCalls.Add(1)
+			var req panel.RecoveryEnvelope
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			plain, _ := panel.OpenRecovery(secret, agentID, "request", req)
+			var proof struct {
+				Nonce string `json:"nonce"`
+			}
+			_ = json.Unmarshal(plain, &proof)
+			grantBytes, _ := json.Marshal(map[string]any{"nonce": proof.Nonce, "locked": false, "generation": 2, "keys": []any{}})
+			respEnv, _ := panel.SealRecovery(secret, agentID, "response", grantBytes)
+			_ = json.NewEncoder(w).Encode(respEnv)
+		case "/api/agent/tunnel":
+			if !allowWSUpgrade.Load() {
+				http.Error(w, "ws unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			conn, upErr := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+			if upErr == nil {
+				wsConns <- conn
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer control.Close()
+
+	cfg := config.Config{
+		PanelURL:                 control.URL,
+		AgentID:                  agentID,
+		AgentSecret:              secret,
+		HeartbeatIntervalSeconds: 5,
+		RequestTimeout:           2 * time.Second,
+	}
+	local := nodeclient.New(socket)
+	remote := panel.New(cfg)
+	worker := tunnel.NewWorker(tunnel.WorkerConfig{
+		PanelURL:    cfg.PanelURL,
+		AgentID:     cfg.AgentID,
+		AgentSecret: cfg.AgentSecret,
+		NodeClient:  local,
+	})
+	remote.SetTunnelTransport(worker)
+	defer worker.SyncConfig(false, "", 0)
+
+	var pending atomic.Bool
+	// 1. Initial HTTP heartbeat triggers WS tunnel establishment.
+	res, err := heartbeatRoundTrip(context.Background(), local, remote, cfg, worker, &pending, "")
+	if err != nil || res.Transport != panel.TransportHTTP {
+		t.Fatalf("expected initial HTTP heartbeat, res=%+v err=%v", res, err)
+	}
+
+	var conn *websocket.Conn
+	select {
+	case conn = <-wsConns:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for reverse WS tunnel")
+	}
+
+	helloPayload, _ := json.Marshal(tunnel.ControlHelloPayload{
+		Capabilities: []string{tunnel.RPCCapability},
+		RPCMethods:   []string{"agent.heartbeat", "agent.security.report", "agent.startup.keys"},
+	})
+	if err := conn.WriteMessage(websocket.BinaryMessage, tunnel.EncodeFrame(tunnel.FrameTypeControlHello, 0, helloPayload)); err != nil {
+		t.Fatal(err)
+	}
+
+	wsDone := make(chan struct{})
+	go func() {
+		defer close(wsDone)
+		for {
+			msgType, frame, rErr := conn.ReadMessage()
+			if rErr != nil {
+				return
+			}
+			if msgType != websocket.BinaryMessage {
+				continue
+			}
+			kind, sID, payload, dErr := tunnel.DecodeFrame(frame)
+			if dErr != nil || kind != tunnel.FrameTypeRPCRequest {
+				continue
+			}
+			var req tunnel.RPCRequestEnvelope
+			_ = json.Unmarshal(payload, &req)
+			switch req.Method {
+			case "agent.security.report":
+				wsSecurityCalls.Add(1)
+				respBytes, _ := json.Marshal(tunnel.RPCResponseEnvelope{
+					V:      tunnel.RPCProtocolVersion,
+					OK:     true,
+					Status: http.StatusOK,
+					Data:   json.RawMessage(`{"ack":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],"recoveryBlocked":false,"recoveryGeneration":1}`),
+				})
+				_ = conn.WriteMessage(websocket.BinaryMessage, tunnel.EncodeFrame(tunnel.FrameTypeRPCResponse, sID, respBytes))
+			case "agent.startup.keys":
+				wsStartupCalls.Add(1)
+				rawParams, _ := json.Marshal(req.Params)
+				var env panel.RecoveryEnvelope
+				_ = json.Unmarshal(rawParams, &env)
+				plain, _ := panel.OpenRecovery(secret, agentID, "request", env)
+				var proof struct {
+					Nonce string `json:"nonce"`
+				}
+				_ = json.Unmarshal(plain, &proof)
+				grantBytes, _ := json.Marshal(map[string]any{"nonce": proof.Nonce, "locked": false, "generation": 1, "keys": []any{}})
+				respEnv, _ := panel.SealRecovery(secret, agentID, "response", grantBytes)
+				respData, _ := json.Marshal(respEnv)
+				respBytes, _ := json.Marshal(tunnel.RPCResponseEnvelope{
+					V:      tunnel.RPCProtocolVersion,
+					OK:     true,
+					Status: http.StatusOK,
+					Data:   respData,
+				})
+				_ = conn.WriteMessage(websocket.BinaryMessage, tunnel.EncodeFrame(tunnel.FrameTypeRPCResponse, sID, respBytes))
+			}
+		}
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for !worker.SupportsRPCMethod("agent.startup.keys") && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !worker.SupportsRPCMethod("agent.security.report") || !worker.SupportsRPCMethod("agent.startup.keys") {
+		t.Fatal("worker did not negotiate security.report and startup.keys RPC methods")
+	}
+
+	// 2. Both SecurityReport and StartupKeys automatically upgrade to WS with zero HTTP calls.
+	ack, err := remote.SecurityReport(context.Background(), map[string]any{"state": map[string]any{"locked": false, "revision": 1}, "events": []any{}})
+	if err != nil || len(ack) != 1 || ack[0] != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" || wsSecurityCalls.Load() != 1 || httpSecurityCalls.Load() != 0 {
+		t.Fatalf("expected SecurityReport via WS, ack=%v err=%v ws=%d http=%d", ack, err, wsSecurityCalls.Load(), httpSecurityCalls.Load())
+	}
+
+	grant, err := remote.StartupKeys(context.Background())
+	if err != nil || grant.Generation != 1 || wsStartupCalls.Load() != 1 || httpStartupCalls.Load() != 0 {
+		t.Fatalf("expected StartupKeys via WS, grant=%+v err=%v ws=%d http=%d", grant, err, wsStartupCalls.Load(), httpStartupCalls.Load())
+	}
+
+	// 3. Disconnect tunnel -> both fall back cleanly to HTTP.
+	allowWSUpgrade.Store(false)
+	_ = conn.Close()
+	<-wsDone
+	deadline = time.Now().Add(2 * time.Second)
+	for worker.IsConnected() && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	ack, err = remote.SecurityReport(context.Background(), map[string]any{"state": map[string]any{"locked": false, "revision": 2}, "events": []any{}})
+	if err != nil || len(ack) != 1 || ack[0] != "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" || httpSecurityCalls.Load() != 1 {
+		t.Fatalf("expected SecurityReport HTTP fallback, ack=%v err=%v http=%d", ack, err, httpSecurityCalls.Load())
+	}
+
+	grant, err = remote.StartupKeys(context.Background())
+	if err != nil || grant.Generation != 2 || httpStartupCalls.Load() != 1 {
+		t.Fatalf("expected StartupKeys HTTP fallback, grant=%+v err=%v http=%d", grant, err, httpStartupCalls.Load())
+	}
+}

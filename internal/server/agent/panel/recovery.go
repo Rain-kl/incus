@@ -1,7 +1,6 @@
 package panel
 
 import (
-	"bytes"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -10,7 +9,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 
@@ -19,7 +17,15 @@ import (
 
 const recoveryPath = "/api/agent/startup-keys"
 
-// RecoveryEnvelope uses a domain-separated authenticated envelope inside signed HTTPS requests.
+var startupKeysEndpointSpec = EndpointSpec{
+	RPCMethod:        "agent.startup.keys",
+	HTTPMethod:       http.MethodPost,
+	HTTPPath:         recoveryPath,
+	WSTimeout:        defaultWSTimeout,
+	MaxResponseBytes: 131072,
+}
+
+// RecoveryEnvelope uses a domain-separated authenticated envelope inside signed requests.
 type RecoveryEnvelope struct {
 	IV         string `json:"iv"`
 	Ciphertext string `json:"ciphertext"`
@@ -78,7 +84,7 @@ func OpenRecovery(secret, agentID, direction string, envelope RecoveryEnvelope) 
 	return aead.Open(nil, iv, ciphertext, []byte("incus-startup-v1:"+direction+":"+agentID))
 }
 
-// StartupKeys first authenticates the node, then proves freshness and token possession in a separate envelope.
+// StartupKeys requests sealed storage keys over WS tunnel RPC when available, falling back to signed HTTP.
 func (client *Client) StartupKeys(ctx context.Context) (RecoveryGrant, error) {
 	nonce, err := protocol.NewNonce()
 	if err != nil {
@@ -93,38 +99,17 @@ func (client *Client) StartupKeys(ctx context.Context) (RecoveryGrant, error) {
 	if err != nil {
 		return RecoveryGrant{}, err
 	}
-	body, err := protocol.CanonicalJSON(envelope)
+
+	res, err := client.CallEndpoint(ctx, startupKeysEndpointSpec, envelope)
 	if err != nil {
-		return RecoveryGrant{}, err
-	}
-	timestamp := protocol.NewTimestamp()
-	authNonce, err := protocol.NewNonce()
-	if err != nil {
-		return RecoveryGrant{}, err
-	}
-	hash := protocol.BodySHA256(body)
-	req, err := http.NewRequestWithContext(ctx, "POST", client.panelURL+recoveryPath, bytes.NewReader(body))
-	if err != nil {
-		return RecoveryGrant{}, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-incus-agent-id", client.agentID)
-	req.Header.Set("x-incus-timestamp", timestamp)
-	req.Header.Set("x-incus-nonce", authNonce)
-	req.Header.Set("x-incus-body-sha256", hash)
-	req.Header.Set("x-incus-signature", protocol.Signature(client.agentSecret, protocol.SigningPayload("POST", recoveryPath, timestamp, authNonce, hash)))
-	response, err := client.httpClient.Do(req)
-	if err != nil {
-		client.resetConnections()
+		if res.StatusCode > 0 {
+			return RecoveryGrant{}, fmt.Errorf("startup service status %d", res.StatusCode)
+		}
 		return RecoveryGrant{}, fmt.Errorf("startup transport unavailable")
 	}
-	defer response.Body.Close()
-	if response.StatusCode != 200 {
-		return RecoveryGrant{}, fmt.Errorf("startup service status %d", response.StatusCode)
-	}
+
 	var sealed RecoveryEnvelope
-	err = json.NewDecoder(io.LimitReader(response.Body, 131072)).Decode(&sealed)
-	if err != nil {
+	if json.Unmarshal([]byte(res.Body), &sealed) != nil {
 		return RecoveryGrant{}, fmt.Errorf("invalid startup response")
 	}
 	plain, err := OpenRecovery(client.agentSecret, client.agentID, "response", sealed)

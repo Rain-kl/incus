@@ -2,14 +2,17 @@ package panel
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/lxc/incus/v7/internal/server/agent/config"
 	"github.com/lxc/incus/v7/internal/server/agent/protocol"
+	"github.com/lxc/incus/v7/internal/server/agent/tunnel"
 )
 
 func TestSignedHeartbeatContract(t *testing.T) {
@@ -86,7 +89,7 @@ func TestSecurityReportSignedContract(t *testing.T) {
 
 func TestPanelClientUsesIsolatedTransportAndRecoversAfterError(t *testing.T) {
 	client := New(config.Config{PanelURL: "http://127.0.0.1:1", AgentID: "node-test", AgentSecret: "test-only-secret", RequestTimeout: 300 * time.Millisecond})
-	if client.httpClient.Transport == nil || client.httpClient.Transport == http.DefaultTransport {
+	if client.comm.HTTPTransport() == nil || client.comm.HTTPTransport() == http.DefaultTransport {
 		t.Fatal("panel client must use an isolated http.Transport")
 	}
 	_, err := client.Heartbeat(context.Background(), map[string]any{"version": "test"})
@@ -98,9 +101,56 @@ func TestPanelClientUsesIsolatedTransportAndRecoversAfterError(t *testing.T) {
 		_, _ = w.Write([]byte(`{"tunnel":{"enabled":false}}`))
 	}))
 	defer server.Close()
-	client.panelURL = server.URL
+	client.comm.SetBaseURL(server.URL)
 	res, err := client.Heartbeat(context.Background(), map[string]any{"version": "test"})
 	if err != nil || !res.OK {
 		t.Fatalf("expected recovery after transport reset, got res=%+v err=%v", res, err)
+	}
+}
+
+func TestSecurityReportUpgradesToWSTunnelAndFallsBackToHTTP(t *testing.T) {
+	var httpCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		httpCalls.Add(1)
+		_, _ = w.Write([]byte(`{"ack":["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],"recoveryBlocked":false,"recoveryGeneration":12}`))
+	}))
+	defer server.Close()
+
+	client := New(config.Config{PanelURL: server.URL, AgentID: "fixture", AgentSecret: "secret", RequestTimeout: time.Second})
+	caller := &mockRPCCaller{
+		methods: map[string]bool{"agent.security.report": true},
+		call: func(_ context.Context, method string, _ any) (tunnel.RPCResponseEnvelope, error) {
+			if method != "agent.security.report" {
+				t.Fatalf("unexpected rpc method: %s", method)
+			}
+			return tunnel.RPCResponseEnvelope{
+				V:      tunnel.RPCProtocolVersion,
+				OK:     true,
+				Status: http.StatusOK,
+				Data:   json.RawMessage(`{"ack":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],"recoveryBlocked":true,"recoveryGeneration":11}`),
+			}, nil
+		},
+	}
+	client.SetTunnelTransport(caller)
+
+	ids, err := client.SecurityReport(context.Background(), map[string]any{"state": map[string]any{"locked": true, "revision": 3}, "events": []any{}})
+	if err != nil || len(ids) != 1 || ids[0] != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
+		t.Fatalf("expected WS SecurityReport success, ids=%v err=%v", ids, err)
+	}
+	if httpCalls.Load() != 0 {
+		t.Fatalf("expected 0 HTTP calls when WS succeeded, got %d", httpCalls.Load())
+	}
+	if !client.RecoveryBlocked() || client.RecoveryGeneration() != 11 {
+		t.Fatalf("unexpected recovery state after WS report: blocked=%v gen=%d", client.RecoveryBlocked(), client.RecoveryGeneration())
+	}
+
+	// Disable method -> seamless fallback to signed HTTP
+	caller.methods["agent.security.report"] = false
+	ids, err = client.SecurityReport(context.Background(), map[string]any{"state": map[string]any{"locked": false, "revision": 4}, "events": []any{}})
+	if err != nil || len(ids) != 1 || ids[0] != "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" {
+		t.Fatalf("expected HTTP fallback SecurityReport success, ids=%v err=%v", ids, err)
+	}
+	if httpCalls.Load() != 1 || client.RecoveryBlocked() || client.RecoveryGeneration() != 12 {
+		t.Fatalf("unexpected state after HTTP fallback: httpCalls=%d blocked=%v gen=%d", httpCalls.Load(), client.RecoveryBlocked(), client.RecoveryGeneration())
 	}
 }
