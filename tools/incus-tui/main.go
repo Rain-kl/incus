@@ -20,7 +20,13 @@ import (
 var version = "v2.0.0"
 
 // Incus: the reviewed token form is the confirmation; enrollment starts on submit with no second y/n prompt.
-const tokenEnrollNote = "使用一次性 token 接入所填面板：启用 Incus 并等待 API，兑换凭据、导入面板公钥证书、配置本地监听 127.0.0.1:8443，保存配置并启动连接器。token 将被消费，已有其他监听地址将拒绝覆盖。按 Enter 开始接入。"
+func tokenEnrollNoteFor(listenAddress string) string {
+	trimmed := strings.TrimSpace(listenAddress)
+	if trimmed != "" {
+		return "使用一次性 token 接入所填面板：启用 Incus 并等待 API，兑换凭据、导入面板公钥证书、配置 HTTPS 监听 " + trimmed + "，保存配置并启动连接器。token 将被消费，已有其他监听地址将拒绝覆盖。按 Enter 开始接入。"
+	}
+	return "使用一次性 token 接入所填面板：启用 Incus 并等待 API，兑换凭据、导入面板公钥证书、按面板配置设置 HTTPS 监听（默认 127.0.0.1:8443），保存配置并启动连接器。token 将被消费，已有其他监听地址将拒绝覆盖。按 Enter 开始接入。"
+}
 
 type field struct {
 	label, value string
@@ -477,15 +483,19 @@ func (m model) selectMenu() (tea.Model, tea.Cmd) {
 		m.fields = []field{{label: "Panel 根地址", value: c.Panel}, {label: "Agent ID", value: c.ID}, {label: "Agent 密钥（保留原值可直接确认）", value: c.Secret, secret: true}}
 	case "token":
 		m.page = "token"
-		m.message = tokenEnrollNote
-		m.fields = []field{{label: "Panel 根地址", value: m.backend.loadConnection().Panel}, {label: "一次性安装 token（ait_，只使用一次）", secret: true}}
+		m.message = tokenEnrollNoteFor("")
+		m.fields = []field{
+			{label: "Panel 根地址", value: m.backend.loadConnection().Panel},
+			{label: "一次性安装 token（ait_，只使用一次）", secret: true},
+			{label: "Incus HTTPS 监听地址（留空使用面板配置或 127.0.0.1:8443）"},
+		}
 	case "certificate":
 		m.page = "certificate"
 		m.fields = []field{{label: "Panel 客户端 PEM 公钥证书的本地绝对路径"}}
 	case "listener":
-		m.page = "confirm"
-		m.message = "启用本地 HTTPS 监听 127.0.0.1:8443，供反向隧道连接。已有其他监听地址时拒绝覆盖。仍需导入 Panel 证书，并在控制端启用隧道。"
-		m.confirm = m.backend.listener
+		m.page = "listener"
+		m.message = "检查或启用 Incus HTTPS 监听（默认 127.0.0.1:8443；直连模式可填 :8443）。已有其他监听地址时拒绝覆盖。"
+		m.fields = []field{{label: "Incus HTTPS 监听地址", value: defaultHTTPSAddress}}
 	case "incus":
 		m.page = "incus"
 	case "incus-agent":
@@ -546,6 +556,15 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 			m.message = "无效的 ait_ 安装 token"
 			return m, nil
 		}
+		listenAddr := ""
+		if len(values) >= 3 && values[2] != "" {
+			normalized, err := normalizeHTTPSAddress(values[2])
+			if err != nil {
+				m.message = err.Error()
+				return m, nil
+			}
+			listenAddr = normalized
+		}
 		// Incus: submitting the reviewed token form is the confirmation; enrollment starts immediately.
 		panel, token := values[0], values[1]
 		m.fields = nil
@@ -554,7 +573,15 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 		ctx = context.WithValue(ctx, operationLogKey{}, m.backend.logs)
 		m.cancel = cancel
-		return m, operation(ctx, cancel, func(ctx context.Context) error { return m.backend.enroll(ctx, panel, token) })
+		return m, operation(ctx, cancel, func(ctx context.Context) error { return m.backend.enrollWithAddress(ctx, panel, token, listenAddr) })
+	case "listener":
+		addr, err := normalizeHTTPSAddress(values[0])
+		if err != nil {
+			m.message = err.Error()
+			return m, nil
+		}
+		m.confirm = func(ctx context.Context) error { return m.backend.setListenerAddress(ctx, addr) }
+		m.message = "启用 HTTPS 监听 " + addr + "。已有其他监听地址时拒绝覆盖。仍需导入 Panel 证书，并在控制端配置对应端口。"
 	case "certificate":
 		if !strings.HasPrefix(values[0], "/") {
 			m.message = "请输入绝对路径"
@@ -756,12 +783,22 @@ func (m model) render() string {
 func initialModel(b *backend) model {
 	m := model{backend: b, status: "正在读取服务状态…"}
 	panel, token := os.Getenv("INCUS_PANEL_URL"), os.Getenv("INCUS_AGENT_INSTALL_TOKEN")
+	listenAddr := strings.TrimSpace(os.Getenv("INCUS_HTTPS_ADDRESS"))
 	_ = os.Unsetenv("INCUS_AGENT_INSTALL_TOKEN")
+	_ = os.Unsetenv("INCUS_HTTPS_ADDRESS")
 	if panel != "" && token != "" {
 		_ = os.Unsetenv("INCUS_PANEL_URL")
+		effectiveAddr := listenAddr
+		if effectiveAddr == "" {
+			effectiveAddr = defaultHTTPSAddress
+		}
 		m.page = "token"
-		m.message = tokenEnrollNote + "节点存储初始化可在主菜单完成。"
-		m.fields = []field{{label: "Panel 根地址", value: panel}, {label: "一次性安装 token（ait_，只使用一次）", value: token, secret: true}}
+		m.message = tokenEnrollNoteFor(effectiveAddr) + "节点存储初始化可在主菜单完成。"
+		m.fields = []field{
+			{label: "Panel 根地址", value: panel},
+			{label: "一次性安装 token（ait_，只使用一次）", value: token, secret: true},
+			{label: "Incus HTTPS 监听地址（默认 127.0.0.1:8443）", value: effectiveAddr},
+		}
 	}
 	return m
 }

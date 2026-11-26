@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -21,7 +22,36 @@ import (
 	"time"
 )
 
-const configPath = "/etc/incus/agent/config.yaml"
+const (
+	configPath          = "/etc/incus/agent/config.yaml"
+	defaultHTTPSAddress = "127.0.0.1:8443"
+)
+
+func normalizeHTTPSAddress(value string) (string, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return defaultHTTPSAddress, nil
+	}
+	host, portText, err := net.SplitHostPort(trimmed)
+	if err != nil {
+		return "", fmt.Errorf("无效的 HTTPS 监听地址 %q，格式应为 host:port 或 :port", value)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil || port < 1 || port > 65535 {
+		return "", fmt.Errorf("无效的 HTTPS 监听端口 %q，有效范围为 1-65535", portText)
+	}
+	if host == "" {
+		return ":" + strconv.Itoa(port), nil
+	}
+	ip := net.ParseIP(host)
+	if ip != nil {
+		return net.JoinHostPort(ip.String(), strconv.Itoa(port)), nil
+	}
+	if host == "localhost" {
+		return net.JoinHostPort(host, strconv.Itoa(port)), nil
+	}
+	return "", fmt.Errorf("无效的 HTTPS 监听主机 %q，仅支持 IP、localhost 或留空", host)
+}
 
 // Runner centralizes node API and system command adapters.
 type Runner interface {
@@ -280,8 +310,9 @@ func (c connection) validate() error {
 
 type enrollment struct {
 	connection
-	Certificate []byte
-	Fingerprint string
+	Certificate  []byte
+	Fingerprint  string
+	HTTPSAddress string
 }
 
 func (b *backend) exchange(ctx context.Context, panel, token string) (enrollment, error) {
@@ -324,6 +355,7 @@ func (b *backend) exchange(ctx context.Context, panel, token string) (enrollment
 		AgentSecret                       string `json:"agentSecret"`
 		PanelClientCertificate            string `json:"panelClientCertificate"`
 		PanelClientCertificateFingerprint string `json:"panelClientCertificateFingerprint"`
+		HTTPSAddress                      string `json:"httpsAddress"`
 	}
 	err = json.Unmarshal(data, &config)
 	if err != nil {
@@ -345,8 +377,15 @@ func (b *backend) exchange(ctx context.Context, panel, token string) (enrollment
 	if config.PanelClientCertificateFingerprint != fingerprint {
 		return enrollment{}, errors.New("Panel 客户端证书 SHA256 指纹不匹配")
 	}
+	var httpsAddress string
+	if strings.TrimSpace(config.HTTPSAddress) != "" {
+		httpsAddress, err = normalizeHTTPSAddress(config.HTTPSAddress)
+		if err != nil {
+			return enrollment{}, fmt.Errorf("Panel 下发的 HTTPS 监听地址无效：%w", err)
+		}
+	}
 	logOperation(ctx, "Panel 凭据兑换完成；客户端公钥证书 SHA256：%s", fingerprint)
-	return enrollment{connection: c, Certificate: cert, Fingerprint: fingerprint}, nil
+	return enrollment{connection: c, Certificate: cert, Fingerprint: fingerprint, HTTPSAddress: httpsAddress}, nil
 }
 
 func (b *backend) loadConnection() connection {
@@ -604,23 +643,39 @@ func (b *backend) trust(ctx context.Context, cert []byte, fingerprint string) er
 	return err
 }
 
-func (b *backend) checkListener(ctx context.Context) error {
+func (b *backend) checkListenerAddress(ctx context.Context, address string) error {
+	target, err := normalizeHTTPSAddress(address)
+	if err != nil {
+		return err
+	}
 	data, err := b.run(ctx, "/usr/bin/incus", "config", "get", "core.https_address")
 	if err != nil {
 		return err
 	}
 	current := strings.TrimSpace(string(data))
-	if current != "" && current != "127.0.0.1:8443" {
+	if current != "" && current != target {
 		return errors.New("已有 HTTPS 监听配置，拒绝覆盖：" + current)
 	}
 	return nil
 }
 
-func (b *backend) listener(ctx context.Context) error {
-	err := b.checkListener(ctx)
+func (b *backend) setListenerAddress(ctx context.Context, address string) error {
+	target, err := normalizeHTTPSAddress(address)
 	if err != nil {
 		return err
 	}
-	_, err = b.run(ctx, "/usr/bin/incus", "config", "set", "core.https_address", "127.0.0.1:8443")
+	err = b.checkListenerAddress(ctx, target)
+	if err != nil {
+		return err
+	}
+	_, err = b.run(ctx, "/usr/bin/incus", "config", "set", "core.https_address", target)
 	return err
+}
+
+func (b *backend) checkListener(ctx context.Context) error {
+	return b.checkListenerAddress(ctx, defaultHTTPSAddress)
+}
+
+func (b *backend) listener(ctx context.Context) error {
+	return b.setListenerAddress(ctx, defaultHTTPSAddress)
 }

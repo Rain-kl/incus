@@ -84,7 +84,7 @@ sudo bash /usr/libexec/incus/node-uninstall.sh --full --yes
 
 TUI 的搭建、配置命令与本地 API 响应会完整实时输出到终端，并保存到界面显示的 `/var/log/incus-tui/session-*.log`。HTTP/异步 operation 失败保留原始错误；敏感凭据遮蔽，其他输出不截断。Panel 地址可使用 HTTP 或 HTTPS，由管理员自行选择；一次性凭据请求不跟随重定向。
 2. 在 Panel 创建或选择宿主机，生成一次性 `ait_` token。它通常在 30 分钟内有效且只能消费一次；粘贴 token 本身，不粘贴整条 shell 安装命令。
-3. 选择“面板接入”，确认 HTTP/HTTPS 根地址与 token。TUI 自动启动 Incus 并等待 API，检查 `incusbr0` 与固定 IPv4 地址池：桥缺失时创建，已有不兼容桥时在消费 token 前停止并提示修复。随后兑换连接凭据和 Panel **公钥证书**、验证指纹、导入信任、设置 `127.0.0.1:8443` 回环监听、原子保存 `/etc/incus/agent/config.yaml`（0600），再启用并重启连接器。既有其它监听不会被覆盖，既有证书不会被删除；不传输私钥。需要配套控制端的 JSON 接入响应。
+3. 选择“面板接入”，确认 HTTP/HTTPS 根地址、token 与 Incus HTTPS 监听地址（留空时采用控制端配置的端口或默认 `127.0.0.1:8443`；通过面板安装命令启动时会自动从 `INCUS_HTTPS_ADDRESS` 预填）。TUI 自动启动 Incus 并等待 API，检查 `incusbr0` 与固定 IPv4 地址池：桥缺失时创建，已有不兼容桥时在消费 token 前停止并提示修复。随后兑换连接凭据和 Panel **公钥证书**、验证指纹、导入信任、设置对应的 `core.https_address` 监听、原子保存 `/etc/incus/agent/config.yaml`（0600），再启用并重启连接器。既有其它监听不会被覆盖，既有证书不会被删除；不传输私钥。需要配套控制端的 JSON 接入响应。
 4. 在 Panel 验证节点连接。手填 ID/密钥、手动导入证书和监听检查/修复都位于“高级维护”，用于诊断和维护；正常 token 接入无需分别执行。Agent 心跳与 mTLS 管理连接仍是不同的验证证据。
 
 需要定制存储/ZFS/桥接网络/集群时，使用官方 `incus admin init`；TUI 的一键初始化是固定的基础配置，不自动迁移已有资源。dir 驱动的配额与快照能力有限，有存储配额需求时应选择经过验证的 ZFS/Btrfs 等方案。初始化失败会保留步骤与原始错误；相匹配的基础资源可重试补齐，已有实例的桥问题使用下述修复菜单。

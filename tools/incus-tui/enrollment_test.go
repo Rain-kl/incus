@@ -234,3 +234,90 @@ func TestEnrollmentWithLivePanel(t *testing.T) {
 		t.Fatal("live enrollment credentials leaked into logs")
 	}
 }
+
+func TestEnrollmentCustomHTTPSAddressAndServerHint(t *testing.T) {
+	c := goodConnection()
+	basePayload, _, _ := enrollmentFixture(t, c)
+
+	for _, tc := range []struct {
+		name          string
+		explicitAddr  string
+		serverAddr    string
+		wantSetArg    string
+		existingAddr  string
+		wantTokenUsed bool
+		wantErr       bool
+	}{
+		{
+			name:          "explicit custom port",
+			explicitAddr:  "127.0.0.1:58443",
+			serverAddr:    "127.0.0.1:9443",
+			wantSetArg:    "127.0.0.1:58443",
+			wantTokenUsed: true,
+		},
+		{
+			name:          "server hint custom port",
+			explicitAddr:  "",
+			serverAddr:    "127.0.0.1:58443",
+			wantSetArg:    "127.0.0.1:58443",
+			wantTokenUsed: true,
+		},
+		{
+			name:          "server hint direct wildcard port",
+			explicitAddr:  "",
+			serverAddr:    ":58443",
+			wantSetArg:    ":58443",
+			wantTokenUsed: true,
+		},
+		{
+			name:          "preflight conflict does not consume token",
+			explicitAddr:  "127.0.0.1:58443",
+			existingAddr:  "127.0.0.1:8443",
+			wantTokenUsed: false,
+			wantErr:       true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := basePayload
+			if tc.serverAddr != "" {
+				payload = strings.TrimSuffix(basePayload, "}") + `,"httpsAddress":` + `"` + tc.serverAddr + `"}`
+			}
+			requests := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				_, _ = w.Write([]byte(payload))
+			}))
+			defer server.Close()
+
+			var setAddr string
+			f := &fakeRunner{reply: func(call call) ([]byte, error) {
+				args := strings.Join(call.args, " ")
+				switch {
+				case strings.Contains(args, "ExecStart"):
+					return []byte("/usr/libexec/incus/agent/incus-agent"), nil
+				case args == "config get core.https_address":
+					return []byte(tc.existingAddr), nil
+				case args == "query /1.0/certificates?recursion=1":
+					return []byte("[]"), nil
+				case strings.HasPrefix(args, "config set core.https_address "):
+					setAddr = call.args[3]
+				}
+				return nil, nil
+			}}
+
+			b := newBackend()
+			b.runner = f
+			b.path = filepath.Join(t.TempDir(), "config.yaml")
+			err := b.enrollWithAddress(context.Background(), server.URL, "ait_"+strings.Repeat("x", 43), tc.explicitAddr)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("enrollWithAddress err=%v, wantErr=%v", err, tc.wantErr)
+			}
+			if (requests > 0) != tc.wantTokenUsed {
+				t.Fatalf("requests=%d, wantTokenUsed=%v", requests, tc.wantTokenUsed)
+			}
+			if !tc.wantErr && setAddr != tc.wantSetArg {
+				t.Fatalf("setAddr=%q, want %q", setAddr, tc.wantSetArg)
+			}
+		})
+	}
+}

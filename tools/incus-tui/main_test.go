@@ -150,12 +150,53 @@ func TestJournalAndOperationCancellation(t *testing.T) {
 func TestInstallerTokenPrefillIsMaskedAndRemovedFromEnvironment(t *testing.T) {
 	t.Setenv("INCUS_PANEL_URL", "https://panel.example.com")
 	t.Setenv("INCUS_AGENT_INSTALL_TOKEN", "ait_fixture_not_a_real_secret")
+	t.Setenv("INCUS_HTTPS_ADDRESS", "127.0.0.1:58443")
 	m := initialModel(&backend{runner: &fakeRunner{}})
-	if m.page != "token" || len(m.fields) != 2 || m.fields[0].value != "https://panel.example.com" || !m.fields[1].secret {
+	if m.page != "token" || len(m.fields) != 3 || m.fields[0].value != "https://panel.example.com" || !m.fields[1].secret || m.fields[2].value != "127.0.0.1:58443" {
 		t.Fatal("missing installer handoff")
 	}
-	if strings.Contains(m.View(), "ait_fixture_not_a_real_secret") || os.Getenv("INCUS_AGENT_INSTALL_TOKEN") != "" {
-		t.Fatal("token was exposed or inherited")
+	if strings.Contains(m.View(), "ait_fixture_not_a_real_secret") || os.Getenv("INCUS_AGENT_INSTALL_TOKEN") != "" || os.Getenv("INCUS_HTTPS_ADDRESS") != "" {
+		t.Fatal("token or env was exposed or inherited")
+	}
+}
+
+func TestTokenAndListenerFormValidateHTTPSAddress(t *testing.T) {
+	b := &backend{path: filepath.Join(t.TempDir(), "config.yaml"), runner: &fakeRunner{}}
+	m := model{
+		backend: b,
+		page:    "token",
+		fields: []field{
+			{value: "https://panel.example.com"},
+			{value: "ait_" + strings.Repeat("x", 43)},
+			{value: "invalid-addr"},
+		},
+	}
+	updated, cmd := m.submit()
+	m = asModel(t, updated)
+	if cmd != nil || m.busy || m.message == "" {
+		t.Fatal("invalid token listener address was not rejected")
+	}
+
+	m = model{
+		backend: b,
+		page:    "listener",
+		fields:  []field{{value: "127.0.0.1:70000"}},
+	}
+	updated, cmd = m.submit()
+	m = asModel(t, updated)
+	if cmd != nil || m.page == "confirm" || m.message == "" {
+		t.Fatal("invalid listener form port was not rejected")
+	}
+
+	m = model{
+		backend: b,
+		page:    "listener",
+		fields:  []field{{value: "127.0.0.1:58443"}},
+	}
+	updated, cmd = m.submit()
+	m = asModel(t, updated)
+	if cmd != nil || m.page != "confirm" || m.confirm == nil || !strings.Contains(m.message, "127.0.0.1:58443") {
+		t.Fatal("valid listener form did not transition to confirm with custom address")
 	}
 }
 

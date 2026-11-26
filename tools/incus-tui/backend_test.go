@@ -185,6 +185,56 @@ func TestServicesAndListenerContracts(t *testing.T) {
 	}
 }
 
+func TestNormalizeAndSetCustomHTTPSListener(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+		ok    bool
+	}{
+		{"", "127.0.0.1:8443", true},
+		{" 127.0.0.1:58443 ", "127.0.0.1:58443", true},
+		{"[::1]:58443", "[::1]:58443", true},
+		{"localhost:58443", "localhost:58443", true},
+		{":58443", ":58443", true},
+		{"127.0.0.1:0", "", false},
+		{"127.0.0.1:70000", "", false},
+		{"example.com:8443", "", false},
+		{"not-an-address", "", false},
+	}
+	for _, tc := range cases {
+		got, err := normalizeHTTPSAddress(tc.input)
+		if (err == nil) != tc.ok {
+			t.Fatalf("normalizeHTTPSAddress(%q): err=%v, want ok=%v", tc.input, err, tc.ok)
+		}
+		if tc.ok && got != tc.want {
+			t.Fatalf("normalizeHTTPSAddress(%q)=%q, want %q", tc.input, got, tc.want)
+		}
+	}
+
+	for _, addr := range []string{"127.0.0.1:58443", "[::1]:58443", ":58443"} {
+		f := &fakeRunner{reply: func(c call) ([]byte, error) {
+			if strings.HasPrefix(strings.Join(c.args, " "), "config get") {
+				return []byte(""), nil
+			}
+			return nil, nil
+		}}
+		err := (&backend{runner: f}).setListenerAddress(context.Background(), addr)
+		if err != nil {
+			t.Fatalf("setListenerAddress(%q) failed: %v", addr, err)
+		}
+		if !reflect.DeepEqual(f.calls[1].args, []string{"--force-local", "config", "set", "core.https_address", addr}) {
+			t.Fatalf("unexpected set args for %q: %v", addr, f.calls[1].args)
+		}
+	}
+
+	f := &fakeRunner{reply: func(c call) ([]byte, error) {
+		return []byte("127.0.0.1:8443"), nil
+	}}
+	if (&backend{runner: f}).setListenerAddress(context.Background(), "127.0.0.1:58443") == nil || len(f.calls) != 1 {
+		t.Fatal("overwrote existing listener with different port")
+	}
+}
+
 func goodConnection() connection {
 	return connection{"https://panel.example.com", "agt_" + strings.Repeat("a", 32), "ias_" + strings.Repeat("b", 43)}
 }
@@ -233,12 +283,16 @@ func TestPanelTokenProtocol(t *testing.T) {
 	c := goodConnection()
 	payload, _, _ := enrollmentFixture(t, c)
 	token := "ait_" + strings.Repeat("x", 43)
+	payloadWithAddr := strings.TrimSuffix(payload, "}") + `,"httpsAddress":"127.0.0.1:58443"}`
+	payloadBadAddr := strings.TrimSuffix(payload, "}") + `,"httpsAddress":"bad-host:8443"}`
 	for _, tt := range []struct {
 		name, body string
 		status     int
 		want       bool
 	}{
 		{"success", payload, 200, true},
+		{"success with httpsAddress", payloadWithAddr, 200, true},
+		{"invalid httpsAddress", payloadBadAddr, 200, false},
 		{"expired", "# expired", 403, false},
 		{"unauthorized", "", 401, false},
 		{"server error", "", 500, false},

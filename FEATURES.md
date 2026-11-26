@@ -708,3 +708,33 @@ CI 接线修正：fork 初始没有官方 release tag，校验步骤从官方仓
 - 接入点：定制模块 `internal/server/agent/backups/{manager,native}.go`，`service.go` 仅添加分发、懒初始化与能力声明，`security/backup_state.go` 复用既有 AES-256-GCM 状态存储。上游 API 为 GetServer、GetInstancesAllProjects、GetStoragePools、CreateInstanceBackupStream；缺少 direct_backup 时使用 CreateInstanceBackup / Operation.Wait / GetInstanceBackupFile / DeleteInstanceBackup，正常完成后清理临时备份。未改上游 API 或数据库格式。
 - 测试：`backups/manager_test.go` 覆盖请求断开后继续执行、幂等、节点并发、部分失败、临时文件清理、状态恢复、危险目录及持久化失败；`native_test.go` 通过真实上游 Go 客户端检查项目/集群成员筛选、流式导出和请求参数；`security/backup_state_test.go` 检查密文、篡改与密钥丢失拒绝。Linux 下 backups/security/agent 全模块 race 测试通过；控制端管理员权限、能力与指纹缺失、审计失败、节点错误传播测试及类型检查、前端守卫和双端构建通过。浏览器已验证入口、设置、提交、刷新后任务恢复及 390px 布局。本地隔离 Debian 13 / Incus 6.0.4 真实容器验证原生兼容导出路径：原容器 PID 4859 保持运行，1,019,280 字节归档导入另一实例后校验文件一致；7.0.2 源码的 direct_backup 契约经真实上游客户端 fixture 验证。生产未部署。
 - 构建版本：继续使用 `scripts/node/VERSION` 与构建提交 SHA 统一生成 Agent/TUI/软件包身份；此新增扩展要求重新构建并升级节点集成包。后续 LTS 同步核对以上原生客户端契约、依赖卷语义、operation 生命周期及 server can_edit 接线。
+
+## 自定义 Incus HTTPS 监听端口支持（2026-11-26）
+
+### 目的
+
+- 解决宿主机 8443 端口冲突时，控制端生成的节点安装命令未携带自定义端口配置、`incus-tui` 固定配置 `core.https_address=127.0.0.1:8443` 导致端口不一致或启动失败的问题。
+
+### 行为与限制
+
+- `tools/incus-tui/main.go`：支持读取并立即清理环境变量 `INCUS_HTTPS_ADDRESS`，在“接入”表单预填第三个字段「Incus HTTPS 监听地址」；菜单手动进入“接入”时可显式填写监听地址或留空使用控制端下发的 `httpsAddress`（缺省仍为 `127.0.0.1:8443`）；“高级维护 → 检查隧道监听”改为表单输入目标监听地址后再进入确认。
+- `tools/incus-tui/backend.go`：新增 `normalizeHTTPSAddress` 校验 `host:port` / `:port`（端口 `1..65535`，主机仅允许 IP、`localhost` 或空），并在 `exchange()` 解析控制端 `GET /api/agent/install-config/:token?format=json` 返回的可选 `httpsAddress`。新增 `checkListenerAddress` / `setListenerAddress` 按目标地址校验并设置 `core.https_address`，仍严格拒绝覆盖已有不同的监听配置。
+- `tools/incus-tui/enrollment.go`：新增 `enrollWithAddress(ctx, panel, token, listenAddress)`，在消费一次性 token 前先按目标地址做预检查，避免已有冲突监听时浪费 token；写入监听时优先使用显式表单地址，其次使用控制端下发的 `httpsAddress`，最后回退到 `127.0.0.1:8443`。
+
+### 配置与兼容性
+
+- 新增可选环境变量 `INCUS_HTTPS_ADDRESS`（仅由 TUI 读取后立即 `Unsetenv`）与 JSON 接入响应可选字段 `httpsAddress`；未提供时完全保持 `127.0.0.1:8443` 默认行为。未修改上游 Incus 源码、API 扩展或数据库结构。
+
+### 代码接入点
+
+- `tools/incus-tui/main.go`（`initialModel`、`tokenEnrollNoteFor`、`selectMenu`、`submit`）
+- `tools/incus-tui/backend.go`（`defaultHTTPSAddress`、`normalizeHTTPSAddress`、`exchange`、`checkListenerAddress`、`setListenerAddress`）
+- `tools/incus-tui/enrollment.go`（`enroll`、`enrollWithAddress`）
+- `scripts/node/INSTALL.md`（首次接入说明同步）
+
+### 测试与验证
+
+- `tools/incus-tui/backend_test.go`：`TestNormalizeAndSetCustomHTTPSListener`、`TestPanelTokenProtocol`（含 `httpsAddress` 解析与非法地址拒绝）。
+- `tools/incus-tui/enrollment_test.go`：`TestEnrollmentCustomHTTPSAddressAndServerHint`（显式端口、服务端 `httpsAddress` 回退、直连 `:58443`、预检查冲突不消费 token）。
+- `tools/incus-tui/main_test.go`：`TestInstallerTokenPrefillIsMaskedAndRemovedFromEnvironment`（含 `INCUS_HTTPS_ADDRESS` 预填与环境清理）、`TestTokenAndListenerFormValidateHTTPSAddress`。
+- 本地运行独立 TUI module 的 `go test -race -v ./...`、`go vet ./...`、`GOOS=linux GOARCH=amd64 go build` 与 `python3 scripts/node/test-install.py`；尚未在远程节点构建并发布新的 canary `.deb` 包。

@@ -4,11 +4,29 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
 // Incus: complete enrollment through one token and preserve existing Incus trust entries.
 func (b *backend) enroll(ctx context.Context, panel, token string) error {
+	return b.enrollWithAddress(ctx, panel, token, "")
+}
+
+func (b *backend) enrollWithAddress(ctx context.Context, panel, token, listenAddress string) error {
+	var requestedAddress string
+	if strings.TrimSpace(listenAddress) != "" {
+		normalized, err := normalizeHTTPSAddress(listenAddress)
+		if err != nil {
+			return err
+		}
+		requestedAddress = normalized
+	}
+	preflightAddress := defaultHTTPSAddress
+	if requestedAddress != "" {
+		preflightAddress = requestedAddress
+	}
+
 	logOperation(ctx, "[1/5] 检查连接器、启动 Incus 并等待本地 API")
 	err := b.connectorReady(ctx)
 	if err != nil {
@@ -18,7 +36,7 @@ func (b *backend) enroll(ctx context.Context, panel, token string) error {
 	if err != nil {
 		return err
 	}
-	err = b.checkListener(ctx)
+	err = b.checkListenerAddress(ctx, preflightAddress)
 	if err != nil {
 		return err
 	}
@@ -33,12 +51,18 @@ func (b *backend) enroll(ctx context.Context, panel, token string) error {
 	if err != nil {
 		return fmt.Errorf("兑换接入信息失败；已发出的 token 请求不自动重试：%w", err)
 	}
+	targetAddress := defaultHTTPSAddress
+	if requestedAddress != "" {
+		targetAddress = requestedAddress
+	} else if config.HTTPSAddress != "" {
+		targetAddress = config.HTTPSAddress
+	}
 	steps := []struct {
 		name string
 		run  func() error
 	}{
 		{"[3/5] 信任 Panel 客户端公钥证书", func() error { return b.ensureTrust(ctx, config.Certificate, config.Fingerprint) }},
-		{"[4/5] 配置本地监听 127.0.0.1:8443", func() error { return b.listener(ctx) }},
+		{fmt.Sprintf("[4/5] 配置 HTTPS 监听 %s", targetAddress), func() error { return b.setListenerAddress(ctx, targetAddress) }},
 		{"[5/5] 保存连接凭据并启动连接器", func() error {
 			logOperation(ctx, "保存 Panel 连接配置：%s (0600)", b.path)
 			err := b.saveConnection(config.connection)
